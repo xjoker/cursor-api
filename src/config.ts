@@ -5,6 +5,8 @@ import type { AppConfig } from "./contracts.js";
 const MAX_BODY_BYTES = 1_048_576;
 const DEFAULT_PORT = 8787;
 const DEFAULT_DATA_DIR = "data";
+const DEFAULT_LOG_RETENTION_DAYS = 30;
+const DEFAULT_LOG_MAX_ROWS = 100_000;
 const CONFIG_FILE_NAME = "gateway.toml";
 
 const EMPTY_CONFIG_TEMPLATE = `# cursor-api configuration (auto-created in container)
@@ -16,6 +18,10 @@ port = 8787
 cursor_api_key = ""
 admin_access_key = ""
 api_key_pepper = ""
+
+[logs]
+retention_days = 30
+max_rows = 100000
 `;
 
 interface TomlTable {
@@ -81,6 +87,18 @@ export function loadConfig(
       pickString(env.SOURCE_COMMIT, undefined) ??
       "unknown",
     maxBodyBytes: MAX_BODY_BYTES,
+    logRetentionDays: parseBoundedInt(
+      pickString(env.LOG_RETENTION_DAYS, undefined) ?? intToString(tomlInt(toml, "retention_days")),
+      DEFAULT_LOG_RETENTION_DAYS,
+      "retention_days",
+      { min: 1, max: 3650 },
+    ),
+    logMaxRows: parseBoundedInt(
+      pickString(env.LOG_MAX_ROWS, undefined) ?? intToString(tomlInt(toml, "max_rows")),
+      DEFAULT_LOG_MAX_ROWS,
+      "max_rows",
+      { min: 1_000, max: 10_000_000 },
+    ),
   };
 }
 
@@ -135,6 +153,41 @@ function parsePositiveInt(raw: string | undefined, fallback: number, name: strin
     throw new Error(`${name} must be a complete positive integer`);
   }
   return parsed;
+}
+
+function parseBoundedInt(
+  raw: string | undefined,
+  fallback: number,
+  name: string,
+  bounds: { min: number; max: number },
+): number {
+  const parsed = parsePositiveInt(raw, fallback, name);
+  if (parsed < bounds.min || parsed > bounds.max) {
+    throw new Error(`${name} must be between ${bounds.min} and ${bounds.max}`);
+  }
+  return parsed;
+}
+
+function intToString(value: number | undefined): string | undefined {
+  return value === undefined ? undefined : String(value);
+}
+
+function tomlInt(table: TomlTable, key: string): number | undefined {
+  const direct = scalarToNumber(table[key]);
+  if (direct !== undefined) return direct;
+  for (const value of Object.values(table)) {
+    if (value && typeof value === "object") {
+      const nested = scalarToNumber(value[key] as string | number | TomlTable | undefined);
+      if (nested !== undefined) return nested;
+    }
+  }
+  return undefined;
+}
+
+function scalarToNumber(value: string | number | TomlTable | undefined): number | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+  if (typeof value === "string" && /^[1-9]\d*$|^0$/.test(value)) return Number(value);
+  return undefined;
 }
 
 function readVersion(cwd: string): string {

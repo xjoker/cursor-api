@@ -11,5 +11,10 @@ api_key_pepper = ""
 # data_dir = "data"
 # cursor_workspace = "data/workspace"
 
+[logs]
+# Request log retention in SQLite (admin UI). Oldest rows are deleted first.
+retention_days = 30
+max_rows = 100000
+
 # Docker (NODE_ENV=production): missing gateway.toml is auto-created empty on first start.
 # Local npm dev defaults to 127.0.0.1:8787 when host/port are omitted.

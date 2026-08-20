@@ -27,7 +27,10 @@ try {
   process.exit(1);
 }
 
-const db = openDb(config.dataDir);
+const db = openDb(config.dataDir, {
+  retentionDays: config.logRetentionDays,
+  maxRows: config.logMaxRows,
+});
 const adminPagePath = path.join(import.meta.dirname, "..", "public", "admin.html");
 
 const server = createServer((req, res) => {

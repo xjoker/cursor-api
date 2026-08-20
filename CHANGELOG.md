@@ -13,7 +13,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ### Added
 
-- GitHub Actions workflow `.github/workflows/docker-publish.yml` (job name **Release**): tests + `linux/amd64` GHCR push **only** on version tags or `workflow_dispatch` — no runs on branch push.
+- `[logs]` in `gateway.toml`: `retention_days` (1–3650) and `max_rows` (1k–10M) cap SQLite request logs; oldest rows deleted first.
+- Compose `logging.options` (`max-size` / `max-file`) to cap container stdout disk use.
+- README deploy path: paste inline `docker-compose.yml` (GHCR `latest`); no clone required.
+- GitHub Actions **Release** workflow: tests + GHCR push on version tags or manual dispatch only.
+
+### Changed
+
+- Standard compose service name: `cursor-api` (was `gateway`).
 
 ---
 

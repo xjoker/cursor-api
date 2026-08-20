@@ -8,38 +8,61 @@
 
 ## Deploy in 4 steps
 
-1. **Start the container** — `docker compose up -d`
+**No git clone.** Create a folder, save the `docker-compose.yml` below, pull `ghcr.io/xjoker/cursor-api:latest`, and go.
+
+1. **Save `docker-compose.yml` and start** — `docker compose up -d`
 2. **Config is created for you** — `data/config/gateway.toml` (empty template on first run)
 3. **Edit that file** — fill in three secrets (see below)
-4. **Restart** — `docker compose restart` → gateway listens on `http://127.0.0.1:8787`
-
-No manual copy of example files. No secrets in the image or in git.
+4. **Restart** — `docker compose restart` → `http://127.0.0.1:8787`
 
 ---
 
-## 1. Start the container
+## 1. `docker-compose.yml` + start
+
+Create a directory (any path), save this as `docker-compose.yml`:
+
+```yaml
+services:
+  cursor-api:
+    image: ghcr.io/xjoker/cursor-api:latest
+    platform: linux/amd64
+    user: "${GATEWAY_UID:-1000}:${GATEWAY_GID:-1000}"
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+启动：
 
 ```bash
-cd cursor-api   # clone this repository first
-export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)   # Linux: set before the first start
+mkdir -p cursor-api && cd cursor-api
+# paste the yaml above into docker-compose.yml
 docker compose up -d
 ```
 
-The first start may exit until secrets are filled in — that is expected. It still creates `data/config/gateway.toml` under the mounted `data/` folder.
+The first start may exit until secrets are filled in — that is expected. It still creates `data/config/gateway.toml` under `./data`.
 
-**Linux:** run the `GATEWAY_UID` / `GATEWAY_GID` lines **before** the first `docker compose up -d`, so the auto-created config file is owned by your user. If you already started once as UID 1000, fix ownership then restart:
+**Linux only — if the container cannot read `gateway.toml` after you edit it:** the config file is mode `600` (owner-only). The container must run as the same user ID that owns the file. Before the **first** start:
 
 ```bash
-sudo chown "$(id -u):$(id -g)" data/config/gateway.toml
 export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)
 docker compose up -d
 ```
+
+(`GATEWAY_UID` / `GATEWAY_GID` in compose = which Linux user the container runs as. Default is `1000`. macOS and Windows Docker usually ignore this.)
 
 ---
 
 ## 2. Edit `data/config/gateway.toml`
 
-Open the file the container created (or create it from [`gateway.toml.example`](./data/config/gateway.toml.example) if you run from source).
+Open the file the container created under `./data/config/gateway.toml`.
 
 ```toml
 host = "0.0.0.0"
@@ -48,6 +71,10 @@ port = 8787
 cursor_api_key = "your-cursor-user-api-key"
 admin_access_key = "pick-a-long-random-admin-secret"
 api_key_pepper = "pick-another-long-random-string"
+
+[logs]
+retention_days = 30
+max_rows = 100000
 ```
 
 | Key | What it is |
@@ -55,6 +82,8 @@ api_key_pepper = "pick-another-long-random-string"
 | `cursor_api_key` | Your Cursor account key (upstream) |
 | `admin_access_key` | Password for `/admin/` |
 | `api_key_pepper` | Random string used to hash client keys |
+| `[logs].retention_days` | Drop request logs older than N days (1–3650) |
+| `[logs].max_rows` | Cap SQLite request log rows; oldest deleted first (1k–10M) |
 
 ```bash
 chmod 600 data/config/gateway.toml
@@ -132,17 +161,20 @@ Single file: `data/config/gateway.toml`. Optional overrides: [`.env.example`](./
 
 **Priority:** environment variables → `.env` → TOML → defaults.
 
-All runtime data (SQLite, workspace) lives in `./data` and persists across restarts.
+SQLite and workspace live under `./data`. Request logs are pruned by `[logs]` limits on each write and at startup. Container stdout is rotated by compose `logging.options` (max ~30 MB).
 
 ---
 
 ## Local development
 
-Requires Node **22.13+**. Copy and fill `data/config/gateway.toml`, then:
+Clone this repository if you want to hack on the gateway or run tests:
 
 ```bash
+git clone https://github.com/xjoker/cursor-api.git && cd cursor-api
 npm ci && npm run dev
 ```
+
+Requires Node **22.13+** and `data/config/gateway.toml`. See [`docker-compose.yml`](./docker-compose.yml) to build the image locally.
 
 ---
 

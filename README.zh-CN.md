@@ -8,38 +8,61 @@
 
 ## 四步部署
 
-1. **起容器** — `docker compose up -d`
-2. **自动生成配置** — 首次运行会创建 `data/config/gateway.toml`（空模板）
-3. **改配置** — 填入三把密钥（见下）
-4. **重启** — `docker compose restart` → 网关监听 `http://127.0.0.1:8787`
+**不用 clone 仓库。** 建个目录，把下面的 `docker-compose.yml` 存进去，拉 `ghcr.io/xjoker/cursor-api:latest` 即可。
 
-不用手动复制 example 文件。密钥不进镜像、不进 git。
+1. **保存 compose 并启动** — `docker compose up -d`
+2. **自动生成配置** — `data/config/gateway.toml`（空模板）
+3. **改配置** — 填入三把密钥（见下）
+4. **重启** — `docker compose restart` → `http://127.0.0.1:8787`
 
 ---
 
-## 1. 起容器
+## 1. `docker-compose.yml` + 启动
+
+任意目录下保存为 `docker-compose.yml`：
+
+```yaml
+services:
+  cursor-api:
+    image: ghcr.io/xjoker/cursor-api:latest
+    platform: linux/amd64
+    user: "${GATEWAY_UID:-1000}:${GATEWAY_GID:-1000}"
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+启动：
 
 ```bash
-cd cursor-api   # 先 clone 本仓库
-export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)   # Linux：首次启动前就要设
+mkdir -p cursor-api && cd cursor-api
+# 把上面的 yaml 写入 docker-compose.yml
 docker compose up -d
 ```
 
-第一次启动可能因密钥未填而退出，这是正常的；`data/` 卷里仍会生成 `gateway.toml`。
+第一次可能因密钥未填而退出，正常；`./data/config/gateway.toml` 仍会自动生成。
 
-**Linux：** 务必在**第一次** `docker compose up -d` 之前执行 `GATEWAY_UID` / `GATEWAY_GID`，这样自动生成的配置文件归当前用户所有。若已经用 UID 1000 起过一次，先改归属再重启：
+**仅 Linux — 改完配置后容器读不到文件时：** `gateway.toml` 是 `chmod 600`（只有文件主人能读），容器进程的用户 ID 必须和文件主人一致。在**第一次**启动前执行：
 
 ```bash
-sudo chown "$(id -u):$(id -g)" data/config/gateway.toml
 export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)
 docker compose up -d
 ```
+
+（compose 里的 `GATEWAY_UID` / `GATEWAY_GID` = 容器用哪个 Linux 用户身份跑，默认 `1000`。macOS / Windows 的 Docker 一般不用管。）
 
 ---
 
 ## 2. 编辑 `data/config/gateway.toml`
 
-改容器自动生成的文件（源码运行时也可从 [`gateway.toml.example`](./data/config/gateway.toml.example) 复制）。
+编辑容器生成的 `./data/config/gateway.toml`。
 
 ```toml
 host = "0.0.0.0"
@@ -48,6 +71,10 @@ port = 8787
 cursor_api_key = "你的-cursor-user-api-key"
 admin_access_key = "随机长串-管理密钥"
 api_key_pepper = "随机长串-HMAC-盐"
+
+[logs]
+retention_days = 30
+max_rows = 100000
 ```
 
 | 键 | 含义 |
@@ -55,6 +82,8 @@ api_key_pepper = "随机长串-HMAC-盐"
 | `cursor_api_key` | Cursor 账号 Key（上游） |
 | `admin_access_key` | 管理台登录密钥 |
 | `api_key_pepper` | 客户端 Key 哈希用的随机串 |
+| `[logs].retention_days` | 请求日志保留天数（1–3650），超期删除 |
+| `[logs].max_rows` | SQLite 请求日志行数上限（1k–10M），先删最旧 |
 
 ```bash
 chmod 600 data/config/gateway.toml
@@ -132,17 +161,20 @@ print(client.chat.completions.create(
 
 **优先级：** 环境变量 → `.env` → TOML → 默认值。
 
-SQLite 与工作区在 `./data`，重启不丢。
+SQLite 与工作区在 `./data`。请求日志按 `[logs]` 在写入时和启动时自动清理。容器 stdout 由 compose 的 `logging.options` 轮转（约 30 MB 上限）。
 
 ---
 
 ## 本地开发
 
-需 Node **22.13+**。准备好 `data/config/gateway.toml` 后：
+改代码或跑测试时再 clone 仓库：
 
 ```bash
+git clone https://github.com/xjoker/cursor-api.git && cd cursor-api
 npm ci && npm run dev
 ```
+
+需 Node **22.13+** 与 `data/config/gateway.toml`。本地编译镜像见 [`docker-compose.yml`](./docker-compose.yml)。
 
 ---
 

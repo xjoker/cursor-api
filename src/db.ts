@@ -1,10 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ApiKeyRow, ModelTokenRow, RequestLogFilters, RequestLogQuery, RequestLogRow, TokenTotals } from "./contracts.js";
+import type { ApiKeyRow, LogPolicy, ModelTokenRow, RequestLogFilters, RequestLogQuery, RequestLogRow, TokenTotals } from "./contracts.js";
+
+export const DEFAULT_LOG_POLICY: LogPolicy = {
+  retentionDays: 30,
+  maxRows: 100_000,
+};
 
 export const SCHEMA_VERSION = 2;
-export const LOG_RETENTION_DAYS = 30;
+
+const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -36,13 +42,14 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_a
 CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);
 `;
 
-export function openDb(dataDir: string): DatabaseSync {
+export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, "cursor-api.sqlite"), { timeout: 5000 });
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
   db.exec(SCHEMA);
   migrateRequestLogs(db);
+  logPolicies.set(db, policy);
   pruneRequestLogs(db);
   return db;
 }
@@ -195,16 +202,36 @@ function logWhere(query: RequestLogQuery): { sql: string; params: Array<string |
 }
 
 export function pruneRequestLogs(db: DatabaseSync): number {
-  const cutoff = new Date(Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const result = db.prepare("DELETE FROM request_logs WHERE created_at < ?").run(cutoff);
-  return asNumber(result.changes);
+  const policy = logPolicies.get(db) ?? DEFAULT_LOG_POLICY;
+  const cutoff = new Date(Date.now() - policy.retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  let removed = asNumber(
+    db.prepare("DELETE FROM request_logs WHERE created_at < ?").run(cutoff).changes,
+  );
+  const countRow = db.prepare("SELECT COUNT(*) AS count FROM request_logs").get();
+  const count = countRow ? asNumber(countRow.count) : 0;
+  if (count > policy.maxRows) {
+    const excess = count - policy.maxRows;
+    removed += asNumber(
+      db
+        .prepare(
+          `DELETE FROM request_logs
+           WHERE id IN (
+             SELECT id FROM request_logs ORDER BY created_at ASC LIMIT ?
+           )`,
+        )
+        .run(excess).changes,
+    );
+  }
+  return removed;
 }
 
 export function requestTokenStats(db: DatabaseSync): {
   retention_days: number;
+  max_rows: number;
   totals: TokenTotals;
   by_model: ModelTokenRow[];
 } {
+  const policy = logPolicies.get(db) ?? DEFAULT_LOG_POLICY;
   const totals = mapTokenTotals(
     db
       .prepare(
@@ -236,7 +263,7 @@ export function requestTokenStats(db: DatabaseSync): {
       model: asString(row.model),
       ...mapTokenTotals(row),
     }));
-  return { retention_days: LOG_RETENTION_DAYS, totals, by_model };
+  return { retention_days: policy.retentionDays, max_rows: policy.maxRows, totals, by_model };
 }
 
 export function requestStats(db: DatabaseSync): {

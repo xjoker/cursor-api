@@ -14,6 +14,13 @@ export interface AppConfig {
   version: string;
   gitCommit: string;
   maxBodyBytes: number;
+  logRetentionDays: number;
+  logMaxRows: number;
+}
+
+export interface LogPolicy {
+  retentionDays: number;
+  maxRows: number;
 }
 
 export interface ApiKeyRow {

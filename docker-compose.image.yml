@@ -1,11 +1,8 @@
+# Pull the published image (no local build). See docker-compose.yml to build from source.
 services:
   cursor-api:
+    image: ghcr.io/xjoker/cursor-api:latest
     platform: linux/amd64
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     user: "${GATEWAY_UID:-1000}:${GATEWAY_GID:-1000}"
     ports:
       - "127.0.0.1:8787:8787"
