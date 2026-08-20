@@ -6,7 +6,7 @@ import { handleAdminRequest } from "./admin.js";
 import { requireClientKey } from "./auth.js";
 import { loadConfig } from "./config.js";
 import { insertRequestLog, openDb, SCHEMA_VERSION } from "./db.js";
-import { GatewayError, httpStatusOf, modelNotFound } from "./errors.js";
+import { GatewayError, cancelledError, httpStatusOf, modelNotFound } from "./errors.js";
 import { beginSse, corsHeaders, readJsonBody, sendJson, sendOpenAiError, writeSse } from "./http.js";
 import { logError, logInfo, truncateUtf8 } from "./log.js";
 import {
@@ -247,6 +247,15 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         if (result.status === "cancelled") {
           httpStatus = 499;
           errorCode = "cancelled";
+          await writeSse(res, {
+            error: {
+              message: "Request cancelled",
+              type: "cancelled",
+              code: "cancelled",
+            },
+          });
+          await writeSse(res, "[DONE]");
+          res.end();
           return;
         }
         if (result.status === "error") {
@@ -291,12 +300,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         chatResult = result;
         if (result.usageKnown) usage = result.usage;
         if (result.status === "cancelled") {
-          httpStatus = 499;
-          errorCode = "cancelled";
+          throw cancelledError();
         }
         if (result.status === "error") {
-          httpStatus = 502;
-          errorCode = "upstream_error";
           throw new GatewayError(502, "upstream_error", "Cursor request failed", "upstream_error");
         }
         sendJson(
@@ -307,7 +313,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             created,
             model: parsed.model,
             content: result.text,
-            usage: result.usage,
+            usage: result.usageKnown ? result.usage : null,
             cost: result.cost,
             params: result.params,
           }),
@@ -324,8 +330,13 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req));
     } else {
+      const mapped = error instanceof GatewayError ? error : null;
       await writeSse(res, {
-        error: { message: "Cursor request failed", type: "upstream_error", code: "upstream_error" },
+        error: {
+          message: mapped?.message ?? "Cursor request failed",
+          type: mapped?.openaiType ?? "upstream_error",
+          code: mapped?.code ?? "upstream_error",
+        },
       });
       await writeSse(res, "[DONE]");
       res.end();

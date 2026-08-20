@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
-import { parseChatCompletionsRequest } from "../dist/openai.js";
+import { cancelledError } from "../dist/errors.js";
+import { encodeNonStreamCompletion, parseChatCompletionsRequest } from "../dist/openai.js";
 
 test("TOML trailing comments and hashes inside strings are valid", () => {
   const root = mkdtempSync(join(tmpdir(), "cursor-api-toml-"));
@@ -250,4 +251,35 @@ test("stream must be a boolean when present", () => {
     () => parseChatCompletionsRequest({ ...base, stream: 1 }),
     (error) => error instanceof Error && error.message.includes("stream"),
   );
+});
+
+test("non-stream completion omits usage when unknown", () => {
+  const without = encodeNonStreamCompletion({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "composer-2.5",
+    content: "hi",
+    usage: null,
+  });
+  assert.equal(Object.hasOwn(without, "usage"), false);
+
+  const withUsage = encodeNonStreamCompletion({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "composer-2.5",
+    content: "hi",
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  });
+  assert.deepEqual(withUsage.usage, {
+    prompt_tokens: 1,
+    completion_tokens: 2,
+    total_tokens: 3,
+  });
+});
+
+test("cancelledError maps to HTTP 499", () => {
+  const error = cancelledError();
+  assert.equal(error.httpStatus, 499);
+  assert.equal(error.code, "cancelled");
+  assert.equal(error.openaiType, "cancelled");
 });

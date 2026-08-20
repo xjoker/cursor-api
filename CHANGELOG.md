@@ -9,6 +9,18 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260820.3] — 2026-08-20
+
+OpenAI chat contract fixes for cancelled runs and unknown usage.
+
+### Fixed
+
+- Non-stream chat: upstream `cancelled` now returns HTTP 499 OpenAI error instead of 200 + `finish_reason: stop` (#1).
+- Stream chat: upstream `cancelled` writes SSE error + `[DONE]` and ends the response (#1).
+- Non-stream chat: omit `usage` when upstream did not report token usage (`usageKnown=false`) (#2).
+
+---
+
 ## [20260820.2] — 2026-08-20
 
 Detailed request logs (opt-in), admin modal, disk/latency hardening, and review fixes.

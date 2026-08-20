@@ -122,11 +122,11 @@ export function encodeNonStreamCompletion(input: {
   created: number;
   model: string;
   content: string;
-  usage: Usage;
+  usage: Usage | null;
   cost?: CursorCost | null;
   params?: ModelParam[];
 }): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     id: input.id,
     object: "chat.completion",
     created: input.created,
@@ -138,9 +138,12 @@ export function encodeNonStreamCompletion(input: {
         finish_reason: "stop",
       },
     ],
-    usage: encodeUsage(input.usage),
     cursor: encodeCursorExtra(input.cost, input.params),
   };
+  if (input.usage !== null) {
+    body.usage = encodeUsage(input.usage);
+  }
+  return body;
 }
 
 export function encodeStreamChunk(input: {
