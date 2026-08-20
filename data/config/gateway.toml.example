@@ -13,8 +13,13 @@ api_key_pepper = ""
 
 [logs]
 # Request log retention in SQLite (admin UI). Oldest rows are deleted first.
-retention_days = 30
+retention_days = 7
 max_rows = 100000
+# Record request/response JSON in SQLite (default off). Stores prompts in plaintext — keep data/ private.
+detailed = false
+# detailed_max_bytes = 65536
+# Cap total size of all detail columns (bytes). Oldest rows dropped first.
+# max_detail_bytes = 268435456
 
 # Docker (NODE_ENV=production): missing gateway.toml is auto-created empty on first start.
 # Local npm dev defaults to 127.0.0.1:8787 when host/port are omitted.

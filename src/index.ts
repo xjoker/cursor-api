@@ -8,7 +8,7 @@ import { loadConfig } from "./config.js";
 import { insertRequestLog, openDb, SCHEMA_VERSION } from "./db.js";
 import { GatewayError, httpStatusOf, modelNotFound } from "./errors.js";
 import { beginSse, corsHeaders, readJsonBody, sendJson, sendOpenAiError, writeSse } from "./http.js";
-import { logError, logInfo } from "./log.js";
+import { logError, logInfo, truncateUtf8 } from "./log.js";
 import {
   encodeNonStreamCompletion,
   encodeStreamChunk,
@@ -16,7 +16,7 @@ import {
   renderTranscript,
 } from "./openai.js";
 import { getCursorModel, listCursorModels, runCursorText, validateChatRequestModel, warmCursorAccount } from "./cursor.js";
-import type { AppConfig, Usage } from "./contracts.js";
+import type { AppConfig, CursorChatResult, ParsedChatRequest, Usage } from "./contracts.js";
 
 let config: AppConfig;
 try {
@@ -30,7 +30,16 @@ try {
 const db = openDb(config.dataDir, {
   retentionDays: config.logRetentionDays,
   maxRows: config.logMaxRows,
+  maxDetailBytes: config.logMaxDetailBytes,
 });
+if (config.logDetailed) {
+  logInfo("detailed request logs enabled", {
+    retention_days: config.logRetentionDays,
+    max_rows: config.logMaxRows,
+    detailed_max_bytes: config.logDetailedMaxBytes,
+    max_detail_bytes: config.logMaxDetailBytes,
+  });
+}
 const adminPagePath = path.join(import.meta.dirname, "..", "public", "admin.html");
 
 const server = createServer((req, res) => {
@@ -175,6 +184,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let httpStatus = 200;
   let errorCode: string | null = null;
   let usage: Usage | null = null;
+  let upstreamMs: number | null = null;
+  let requestDetail: string | null = null;
+  let responseDetail: string | null = null;
+  let chatResult: CursorChatResult | null = null;
 
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
@@ -182,6 +195,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     const parsed = parseChatCompletionsRequest(body);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
+    if (config.logDetailed) {
+      requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
+    }
     await validateChatRequestModel(config.cursorApiKey, parsed);
     const headers = corsHeaders(req);
 
@@ -205,6 +221,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             role: "assistant",
           }),
         );
+        const upstreamStarted = Date.now();
         const result = await runCursorText({
           apiKey: config.cursorApiKey,
           workspaceDir: config.cursorWorkspace,
@@ -224,6 +241,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             );
           },
         });
+        upstreamMs = Date.now() - upstreamStarted;
+        chatResult = result;
         if (result.usageKnown) usage = result.usage;
         if (result.status === "cancelled") {
           httpStatus = 499;
@@ -260,6 +279,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         await writeSse(res, "[DONE]");
         res.end();
       } else {
+        const upstreamStarted = Date.now();
         const result = await runCursorText({
           apiKey: config.cursorApiKey,
           workspaceDir: config.cursorWorkspace,
@@ -267,6 +287,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
           prompt,
           abortSignal: abort.signal,
         });
+        upstreamMs = Date.now() - upstreamStarted;
+        chatResult = result;
         if (result.usageKnown) usage = result.usage;
         if (result.status === "cancelled") {
           httpStatus = 499;
@@ -309,6 +331,14 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       res.end();
     }
   } finally {
+    const durationMs = Date.now() - started;
+    const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
+    if (config.logDetailed) {
+      responseDetail = truncateUtf8(
+        buildResponseDetail(chatResult, errorCode),
+        config.logDetailedMaxBytes,
+      );
+    }
     insertRequestLog(db, {
       id: requestId,
       api_key_id: key.id,
@@ -316,12 +346,16 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       model,
       stream,
       http_status: httpStatus,
-      duration_ms: Date.now() - started,
+      duration_ms: durationMs,
       input_tokens: usage?.prompt_tokens ?? null,
       output_tokens: usage?.completion_tokens ?? null,
       total_tokens: usage?.total_tokens ?? null,
       error_code: errorCode,
       created_at: new Date().toISOString(),
+      upstream_ms: upstreamMs,
+      gateway_ms: gatewayMs,
+      request_detail: requestDetail,
+      response_detail: responseDetail,
     });
     logInfo("chat completed", {
       request_id: requestId,
@@ -329,13 +363,39 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       model,
       stream: stream === 1,
       http_status: httpStatus,
-      duration_ms: Date.now() - started,
+      duration_ms: durationMs,
+      upstream_ms: upstreamMs,
+      gateway_ms: gatewayMs,
       input_tokens: usage?.prompt_tokens ?? null,
       output_tokens: usage?.completion_tokens ?? null,
       total_tokens: usage?.total_tokens ?? null,
       error_code: errorCode,
     });
   }
+}
+
+function buildRequestDetail(parsed: ParsedChatRequest): string {
+  return JSON.stringify({
+    model: parsed.model,
+    stream: parsed.stream,
+    messages: parsed.messages,
+    ...(parsed.params?.length ? { params: parsed.params } : {}),
+    ...(parsed.variant ? { variant: parsed.variant } : {}),
+    ...(parsed.reasoning_effort ? { reasoning_effort: parsed.reasoning_effort } : {}),
+    ...(parsed.verbosity ? { verbosity: parsed.verbosity } : {}),
+    ...(parsed.images?.length ? { images: `${parsed.images.length} attached` } : {}),
+  });
+}
+
+function buildResponseDetail(result: CursorChatResult | null, errorCode: string | null): string {
+  return JSON.stringify({
+    status: result?.status ?? (errorCode ? "error" : "unknown"),
+    text: result?.text ?? "",
+    usage: result?.usageKnown ? result.usage : null,
+    cost: result?.cost ?? null,
+    params: result?.params ?? null,
+    error_code: errorCode,
+  });
 }
 
 function peekModel(body: unknown): string {

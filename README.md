@@ -2,6 +2,8 @@
 
 **OpenAI-compatible gateway for Cursor models.** Point any OpenAI client at `/v1`; manage client keys and logs in a built-in admin UI.
 
+![Built-in admin: overview, client keys, request logs, and OpenAI base URL for clients](./docs/images/admin-overview.png)
+
 **中文文档：** [`README.zh-CN.md`](./README.zh-CN.md) · **Changelog:** [`CHANGELOG.md`](./CHANGELOG.md)
 
 **You need:** [Docker Compose](https://docs.docker.com/compose/) and a [Cursor User API Key](https://cursor.com/settings).
@@ -58,6 +60,13 @@ docker compose up -d
 
 (`GATEWAY_UID` / `GATEWAY_GID` in compose = which Linux user the container runs as. Default is `1000`. macOS and Windows Docker usually ignore this.)
 
+**Upgrading from an older compose** that used the service name `gateway`: remove the orphan container so port 8787 is free:
+
+```bash
+docker compose down --remove-orphans
+docker compose up -d
+```
+
 ---
 
 ## 2. Edit `data/config/gateway.toml`
@@ -73,8 +82,9 @@ admin_access_key = "pick-a-long-random-admin-secret"
 api_key_pepper = "pick-another-long-random-string"
 
 [logs]
-retention_days = 30
+retention_days = 7
 max_rows = 100000
+detailed = false
 ```
 
 | Key | What it is |
@@ -82,8 +92,11 @@ max_rows = 100000
 | `cursor_api_key` | Your Cursor account key (upstream) |
 | `admin_access_key` | Password for `/admin/` |
 | `api_key_pepper` | Random string used to hash client keys |
-| `[logs].retention_days` | Drop request logs older than N days (1–3650) |
+| `[logs].retention_days` | Drop request logs older than N days (1–3650), default **7** |
 | `[logs].max_rows` | Cap SQLite request log rows; oldest deleted first (1k–10M) |
+| `[logs].detailed` | Store request/response JSON for admin modal (default **false**). Stores prompts in **plaintext** under `./data` — keep the volume private |
+| `[logs].detailed_max_bytes` | Per-field cap for request/response JSON (4KiB–1MiB, default 64KiB) |
+| `[logs].max_detail_bytes` | Cap total bytes of all detail columns (default 256MiB); oldest rows dropped first |
 
 ```bash
 chmod 600 data/config/gateway.toml

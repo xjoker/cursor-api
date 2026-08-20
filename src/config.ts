@@ -5,8 +5,11 @@ import type { AppConfig } from "./contracts.js";
 const MAX_BODY_BYTES = 1_048_576;
 const DEFAULT_PORT = 8787;
 const DEFAULT_DATA_DIR = "data";
-const DEFAULT_LOG_RETENTION_DAYS = 30;
+const DEFAULT_LOG_RETENTION_DAYS = 7;
 const DEFAULT_LOG_MAX_ROWS = 100_000;
+const DEFAULT_LOG_DETAILED = false;
+const DEFAULT_LOG_DETAILED_MAX_BYTES = 65_536;
+const DEFAULT_LOG_MAX_DETAIL_BYTES = 268_435_456; // 256 MiB across all detail columns
 const CONFIG_FILE_NAME = "gateway.toml";
 
 const EMPTY_CONFIG_TEMPLATE = `# cursor-api configuration (auto-created in container)
@@ -20,12 +23,15 @@ admin_access_key = ""
 api_key_pepper = ""
 
 [logs]
-retention_days = 30
+retention_days = 7
 max_rows = 100000
+detailed = false
+# detailed_max_bytes = 65536
+# max_detail_bytes = 268435456
 `;
 
 interface TomlTable {
-  [key: string]: string | number | TomlTable;
+  [key: string]: string | number | boolean | TomlTable;
 }
 
 export function loadConfig(
@@ -71,9 +77,8 @@ export function loadConfig(
     ),
     gatewayHost: pickString(env.GATEWAY_HOST, tomlString(toml, "host")) ?? defaultHost,
     gatewayPort: parsePositiveInt(
-      pickString(env.GATEWAY_PORT, tomlString(toml, "port")),
+      pickConfigured(env, "GATEWAY_PORT", tomlString(toml, "port"), "port"),
       DEFAULT_PORT,
-      "port",
     ),
     dataDir,
     cursorWorkspace: path.resolve(
@@ -88,16 +93,38 @@ export function loadConfig(
       "unknown",
     maxBodyBytes: MAX_BODY_BYTES,
     logRetentionDays: parseBoundedInt(
-      pickString(env.LOG_RETENTION_DAYS, undefined) ?? intToString(tomlInt(toml, "retention_days")),
+      pickConfigured(env, "LOG_RETENTION_DAYS", intToString(tomlInt(toml, "retention_days")), "retention_days"),
       DEFAULT_LOG_RETENTION_DAYS,
-      "retention_days",
       { min: 1, max: 3650 },
     ),
     logMaxRows: parseBoundedInt(
-      pickString(env.LOG_MAX_ROWS, undefined) ?? intToString(tomlInt(toml, "max_rows")),
+      pickConfigured(env, "LOG_MAX_ROWS", intToString(tomlInt(toml, "max_rows")), "max_rows"),
       DEFAULT_LOG_MAX_ROWS,
-      "max_rows",
       { min: 1_000, max: 10_000_000 },
+    ),
+    logDetailed: parseBoolean(
+      pickConfigured(env, "LOG_DETAILED", boolToString(tomlBool(toml, "detailed")), "detailed"),
+      DEFAULT_LOG_DETAILED,
+    ),
+    logDetailedMaxBytes: parseBoundedInt(
+      pickConfigured(
+        env,
+        "LOG_DETAILED_MAX_BYTES",
+        intToString(tomlInt(toml, "detailed_max_bytes")),
+        "detailed_max_bytes",
+      ),
+      DEFAULT_LOG_DETAILED_MAX_BYTES,
+      { min: 4_096, max: 1_048_576 },
+    ),
+    logMaxDetailBytes: parseBoundedInt(
+      pickConfigured(
+        env,
+        "LOG_MAX_DETAIL_BYTES",
+        intToString(tomlInt(toml, "max_detail_bytes")),
+        "max_detail_bytes",
+      ),
+      DEFAULT_LOG_MAX_DETAIL_BYTES,
+      { min: 1_048_576, max: 10_737_418_240 },
     ),
   };
 }
@@ -142,34 +169,98 @@ function optionalTrimmed(value: string | undefined): string | undefined {
   return trimmed === "" ? undefined : trimmed;
 }
 
-function parsePositiveInt(raw: string | undefined, fallback: number, name: string): number {
-  const trimmed = optionalTrimmed(raw);
+function pickConfigured(
+  env: NodeJS.ProcessEnv,
+  envName: string,
+  tomlValue: string | undefined,
+  tomlKey: string,
+): { value: string | undefined; source: string } {
+  const fromEnv = optionalTrimmed(env[envName]);
+  if (fromEnv !== undefined) {
+    return { value: fromEnv, source: `environment variable ${envName}` };
+  }
+  const fromToml = optionalTrimmed(tomlValue);
+  if (fromToml !== undefined) {
+    return { value: fromToml, source: `gateway.toml key ${tomlKey}` };
+  }
+  return { value: undefined, source: "default" };
+}
+
+function parsePositiveInt(
+  configured: { value: string | undefined; source: string },
+  fallback: number,
+): number {
+  const trimmed = optionalTrimmed(configured.value);
   if (trimmed === undefined) return fallback;
   if (!/^[1-9]\d*$/.test(trimmed)) {
-    throw new Error(`${name} must be a complete positive integer`);
+    throw new Error(
+      `${configured.source} must be a complete positive integer (got ${JSON.stringify(trimmed)})`,
+    );
   }
   const parsed = Number(trimmed);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a complete positive integer`);
+    throw new Error(
+      `${configured.source} must be a complete positive integer (got ${JSON.stringify(trimmed)})`,
+    );
   }
   return parsed;
 }
 
 function parseBoundedInt(
-  raw: string | undefined,
+  configured: { value: string | undefined; source: string },
   fallback: number,
-  name: string,
   bounds: { min: number; max: number },
 ): number {
-  const parsed = parsePositiveInt(raw, fallback, name);
+  const parsed = parsePositiveInt(configured, fallback);
   if (parsed < bounds.min || parsed > bounds.max) {
-    throw new Error(`${name} must be between ${bounds.min} and ${bounds.max}`);
+    throw new Error(
+      `${configured.source} must be between ${bounds.min} and ${bounds.max} (got ${parsed})`,
+    );
   }
   return parsed;
 }
 
+function parseBoolean(
+  configured: { value: string | undefined; source: string },
+  fallback: boolean,
+): boolean {
+  if (configured.value === undefined) return fallback;
+  const value = configured.value.trim().toLowerCase();
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw new Error(
+    `${configured.source} must be true or false (got ${JSON.stringify(configured.value)})`,
+  );
+}
+
+function boolToString(value: boolean | undefined): string | undefined {
+  return value === undefined ? undefined : value ? "true" : "false";
+}
+
 function intToString(value: number | undefined): string | undefined {
   return value === undefined ? undefined : String(value);
+}
+
+function tomlBool(table: TomlTable, key: string): boolean | undefined {
+  const direct = table[key];
+  if (typeof direct === "boolean") return direct;
+  if (typeof direct === "string") {
+    const value = direct.trim().toLowerCase();
+    if (value === "true" || value === "1") return true;
+    if (value === "false" || value === "0") return false;
+  }
+  for (const value of Object.values(table)) {
+    if (value && typeof value === "object") {
+      const nested = value[key];
+      if (typeof nested === "boolean") return nested;
+      if (typeof nested === "string") {
+        const parsed = nested.trim().toLowerCase();
+        if (parsed === "true" || parsed === "1") return true;
+        if (parsed === "false" || parsed === "0") return false;
+      }
+    }
+  }
+  return undefined;
 }
 
 function tomlInt(table: TomlTable, key: string): number | undefined {
@@ -184,7 +275,8 @@ function tomlInt(table: TomlTable, key: string): number | undefined {
   return undefined;
 }
 
-function scalarToNumber(value: string | number | TomlTable | undefined): number | undefined {
+function scalarToNumber(value: string | number | boolean | TomlTable | undefined): number | undefined {
+  if (typeof value === "boolean") return undefined;
   if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   if (typeof value === "string" && /^[1-9]\d*$|^0$/.test(value)) return Number(value);
   return undefined;
@@ -229,7 +321,8 @@ function tomlString(table: TomlTable, key: string): string | undefined {
   return undefined;
 }
 
-function scalarToString(value: string | number | TomlTable | undefined): string | undefined {
+function scalarToString(value: string | number | boolean | TomlTable | undefined): string | undefined {
+  if (typeof value === "boolean") return undefined;
   if (typeof value === "string") return value;
   if (typeof value === "number") return String(value);
   return undefined;
@@ -269,7 +362,9 @@ function parseToml(text: string, source: string): TomlTable {
   return root;
 }
 
-function parseTomlScalar(raw: string, source: string, lineNo: string | number): string | number {
+function parseTomlScalar(raw: string, source: string, lineNo: string | number): string | number | boolean {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
   if (raw.startsWith("\"")) {
     return parseTomlDoubleQuote(raw, source, lineNo);
   }

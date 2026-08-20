@@ -7,6 +7,7 @@ import {
   disableApiKey,
   enableApiKey,
   getApiKeyById,
+  getRequestLogById,
   insertApiKey,
   listApiKeys,
   listRequestLogFilters,
@@ -72,6 +73,13 @@ async function dispatch(
       request_count: stats.tokens.totals.request_count,
       tokens: stats.tokens,
       stats,
+      logs: {
+        retention_days: ctx.config.logRetentionDays,
+        max_rows: ctx.config.logMaxRows,
+        detailed: ctx.config.logDetailed,
+        detailed_max_bytes: ctx.config.logDetailedMaxBytes,
+        max_detail_bytes: ctx.config.logMaxDetailBytes,
+      },
     });
     return;
   }
@@ -123,6 +131,16 @@ async function dispatch(
 
   if (method === "GET" && pathname === "/admin/api/logs/filters") {
     sendJson(res, 200, listRequestLogFilters(ctx.db));
+    return;
+  }
+
+  const logDetailMatch = /^\/admin\/api\/logs\/([^/]+)$/.exec(pathname);
+  if (method === "GET" && logDetailMatch) {
+    const row = getRequestLogById(ctx.db, decodeURIComponent(logDetailMatch[1] ?? ""));
+    if (!row) {
+      throw notFound("Request log not found");
+    }
+    sendJson(res, 200, row);
     return;
   }
 

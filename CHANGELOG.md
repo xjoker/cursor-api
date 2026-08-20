@@ -9,18 +9,30 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
-## [Unreleased]
+## [20260820.2] — 2026-08-20
+
+Detailed request logs (opt-in), admin modal, disk/latency hardening, and review fixes.
 
 ### Added
 
-- `[logs]` in `gateway.toml`: `retention_days` (1–3650) and `max_rows` (1k–10M) cap SQLite request logs; oldest rows deleted first.
-- Compose `logging.options` (`max-size` / `max-file`) to cap container stdout disk use.
+- `[logs]` detailed request/response capture (default off), admin log modal, upstream/gateway latency split.
+- `[logs].max_detail_bytes` caps total detail-column size (default 256MiB); SQLite/WAL chmod `600`.
+- `[logs]` in `gateway.toml`: `retention_days` (default **7**), `max_rows`, compose `logging.options`.
 - README deploy path: paste inline `docker-compose.yml` (GHCR `latest`); no clone required.
 - GitHub Actions **Release** workflow: tests + GHCR push on version tags or manual dispatch only.
+- Admin clipboard fallback for HTTP (non-secure contexts).
+- README screenshot: `docs/images/admin-overview.png`.
 
 ### Changed
 
-- Standard compose service name: `cursor-api` (was `gateway`).
+- Standard compose service name: `cursor-api` (was `gateway`); upgrade with `docker compose down --remove-orphans`.
+- Config parse errors name the source (`environment variable …` vs `gateway.toml key …`).
+- `truncateUtf8` for detailed logs is O(n) byte-safe (fixes event-loop DoS when `detailed = true`).
+
+### Fixed
+
+- HTTP admin “copy key” failed without HTTPS — fall back to `execCommand("copy")`.
+- Log detail modal focus trap / restore focus / `inert` on background.
 
 ---
 

@@ -16,11 +16,16 @@ export interface AppConfig {
   maxBodyBytes: number;
   logRetentionDays: number;
   logMaxRows: number;
+  logDetailed: boolean;
+  logDetailedMaxBytes: number;
+  logMaxDetailBytes: number;
 }
 
 export interface LogPolicy {
   retentionDays: number;
   maxRows: number;
+  /** Cap total UTF-8 bytes of request_detail + response_detail across all rows. */
+  maxDetailBytes: number;
 }
 
 export interface ApiKeyRow {
@@ -64,6 +69,11 @@ export interface RequestLogRow {
   total_tokens: number | null;
   error_code: string | null;
   created_at: string;
+  upstream_ms: number | null;
+  gateway_ms: number | null;
+  request_detail: string | null;
+  response_detail: string | null;
+  has_detail?: boolean;
   key_name?: string | null;
   key_prefix?: string | null;
 }

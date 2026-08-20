@@ -4,11 +4,12 @@ import { DatabaseSync } from "node:sqlite";
 import type { ApiKeyRow, LogPolicy, ModelTokenRow, RequestLogFilters, RequestLogQuery, RequestLogRow, TokenTotals } from "./contracts.js";
 
 export const DEFAULT_LOG_POLICY: LogPolicy = {
-  retentionDays: 30,
+  retentionDays: 7,
   maxRows: 100_000,
+  maxDetailBytes: 268_435_456,
 };
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
 
@@ -36,7 +37,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
   output_tokens INTEGER,
   total_tokens INTEGER,
   error_code TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  upstream_ms INTEGER,
+  gateway_ms INTEGER,
+  request_detail TEXT,
+  response_detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);
@@ -44,14 +49,26 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);
 
 export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
   fs.mkdirSync(dataDir, { recursive: true });
-  const db = new DatabaseSync(path.join(dataDir, "cursor-api.sqlite"), { timeout: 5000 });
+  const dbPath = path.join(dataDir, "cursor-api.sqlite");
+  const db = new DatabaseSync(dbPath, { timeout: 5000 });
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
   db.exec(SCHEMA);
   migrateRequestLogs(db);
   logPolicies.set(db, policy);
   pruneRequestLogs(db);
+  chmodOwnerOnly(dbPath);
+  chmodOwnerOnly(`${dbPath}-wal`);
+  chmodOwnerOnly(`${dbPath}-shm`);
   return db;
+}
+
+function chmodOwnerOnly(filePath: string): void {
+  try {
+    if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o600);
+  } catch {
+    // 部分文件系统/挂载不支持 chmod
+  }
 }
 
 export function insertApiKey(
@@ -111,8 +128,9 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
   db.prepare(
     `INSERT INTO request_logs (
       id, api_key_id, path, model, stream, http_status, duration_ms,
-      input_tokens, output_tokens, total_tokens, error_code, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      input_tokens, output_tokens, total_tokens, error_code, created_at,
+      upstream_ms, gateway_ms, request_detail, response_detail
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.api_key_id,
@@ -126,6 +144,10 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.total_tokens,
     row.error_code,
     row.created_at,
+    row.upstream_ms,
+    row.gateway_ms,
+    row.request_detail,
+    row.response_detail,
   );
   pruneRequestLogs(db);
 }
@@ -138,7 +160,11 @@ export function listRequestLogs(db: DatabaseSync, query: RequestLogQuery): {
   const totalRow = db.prepare(`SELECT COUNT(*) AS count FROM request_logs l ${sql}`).get(...params);
   const logs = db
     .prepare(
-      `SELECT l.*, k.name AS key_name, k.key_prefix AS key_prefix
+      `SELECT l.id, l.api_key_id, l.path, l.model, l.stream, l.http_status, l.duration_ms,
+              l.input_tokens, l.output_tokens, l.total_tokens, l.error_code, l.created_at,
+              l.upstream_ms, l.gateway_ms,
+              CASE WHEN l.request_detail IS NOT NULL OR l.response_detail IS NOT NULL THEN 1 ELSE 0 END AS has_detail,
+              k.name AS key_name, k.key_prefix AS key_prefix
        FROM request_logs l
        LEFT JOIN api_keys k ON k.id = l.api_key_id
        ${sql}
@@ -146,8 +172,20 @@ export function listRequestLogs(db: DatabaseSync, query: RequestLogQuery): {
        LIMIT ? OFFSET ?`,
     )
     .all(...params, query.limit, query.offset)
-    .map(mapRequestLog);
+    .map(mapRequestLogList);
   return { logs, total: totalRow ? asNumber(totalRow.count) : 0 };
+}
+
+export function getRequestLogById(db: DatabaseSync, id: string): RequestLogRow | undefined {
+  const row = db
+    .prepare(
+      `SELECT l.*, k.name AS key_name, k.key_prefix AS key_prefix
+       FROM request_logs l
+       LEFT JOIN api_keys k ON k.id = l.api_key_id
+       WHERE l.id = ?`,
+    )
+    .get(id);
+  return row ? mapRequestLog(row) : undefined;
 }
 
 export function listRequestLogFilters(db: DatabaseSync): RequestLogFilters {
@@ -222,12 +260,37 @@ export function pruneRequestLogs(db: DatabaseSync): number {
         .run(excess).changes,
     );
   }
+  // Drop oldest rows until total detail payload fits under maxDetailBytes.
+  for (;;) {
+    const sizeRow = db
+      .prepare(
+        `SELECT COALESCE(SUM(
+           COALESCE(LENGTH(request_detail), 0) + COALESCE(LENGTH(response_detail), 0)
+         ), 0) AS bytes FROM request_logs`,
+      )
+      .get();
+    const bytes = sizeRow ? asNumber(sizeRow.bytes) : 0;
+    if (bytes <= policy.maxDetailBytes) break;
+    const deleted = asNumber(
+      db
+        .prepare(
+          `DELETE FROM request_logs
+           WHERE id IN (
+             SELECT id FROM request_logs ORDER BY created_at ASC LIMIT 1
+           )`,
+        )
+        .run().changes,
+    );
+    if (deleted < 1) break;
+    removed += deleted;
+  }
   return removed;
 }
 
 export function requestTokenStats(db: DatabaseSync): {
   retention_days: number;
   max_rows: number;
+  max_detail_bytes: number;
   totals: TokenTotals;
   by_model: ModelTokenRow[];
 } {
@@ -263,7 +326,13 @@ export function requestTokenStats(db: DatabaseSync): {
       model: asString(row.model),
       ...mapTokenTotals(row),
     }));
-  return { retention_days: policy.retentionDays, max_rows: policy.maxRows, totals, by_model };
+  return {
+    retention_days: policy.retentionDays,
+    max_rows: policy.maxRows,
+    max_detail_bytes: policy.maxDetailBytes,
+    totals,
+    by_model,
+  };
 }
 
 export function requestStats(db: DatabaseSync): {
@@ -303,8 +372,28 @@ function migrateRequestLogs(db: DatabaseSync): void {
   if (!columns.has("path")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN path TEXT NOT NULL DEFAULT '/v1/chat/completions'");
   }
+  if (!columns.has("upstream_ms")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN upstream_ms INTEGER");
+  }
+  if (!columns.has("gateway_ms")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN gateway_ms INTEGER");
+  }
+  if (!columns.has("request_detail")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN request_detail TEXT");
+  }
+  if (!columns.has("response_detail")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN response_detail TEXT");
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
+}
+
+function mapRequestLogList(row: Record<string, unknown>): RequestLogRow {
+  const mapped = mapRequestLog(row);
+  mapped.request_detail = null;
+  mapped.response_detail = null;
+  mapped.has_detail = asNumber(row.has_detail) === 1;
+  return mapped;
 }
 
 function mapApiKey(row: Record<string, unknown>): ApiKeyRow {
@@ -335,6 +424,12 @@ function mapRequestLog(row: Record<string, unknown>): RequestLogRow {
     total_tokens: asNullableNumber(row.total_tokens),
     error_code: asNullableString(row.error_code),
     created_at: asString(row.created_at),
+    upstream_ms: asNullableNumber(row.upstream_ms),
+    gateway_ms: asNullableNumber(row.gateway_ms),
+    request_detail: asNullableString(row.request_detail),
+    response_detail: asNullableString(row.response_detail),
+    has_detail:
+      asNullableString(row.request_detail) !== null || asNullableString(row.response_detail) !== null,
     key_name: asNullableString(row.key_name),
     key_prefix: asNullableString(row.key_prefix),
   };

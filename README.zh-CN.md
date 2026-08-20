@@ -2,6 +2,8 @@
 
 **把 Cursor 模型暴露成 OpenAI 兼容接口。** 任意 OpenAI 客户端指向 `/v1`；在管理台签发客户端 Key、查看请求日志。
 
+![内置管理台：总览、客户端 Key、请求日志与 OpenAI 接入地址](./docs/images/admin-overview.png)
+
 **English:** [`README.md`](./README.md) · **变更记录：** [`CHANGELOG.md`](./CHANGELOG.md)
 
 **你需要：** [Docker Compose](https://docs.docker.com/compose/) 和 [Cursor User API Key](https://cursor.com/settings)。
@@ -58,6 +60,13 @@ docker compose up -d
 
 （compose 里的 `GATEWAY_UID` / `GATEWAY_GID` = 容器用哪个 Linux 用户身份跑，默认 `1000`。macOS / Windows 的 Docker 一般不用管。）
 
+**若以前 compose 服务名还是 `gateway`：** 先清掉孤儿容器，否则 8787 端口可能被旧容器占着：
+
+```bash
+docker compose down --remove-orphans
+docker compose up -d
+```
+
 ---
 
 ## 2. 编辑 `data/config/gateway.toml`
@@ -73,8 +82,9 @@ admin_access_key = "随机长串-管理密钥"
 api_key_pepper = "随机长串-HMAC-盐"
 
 [logs]
-retention_days = 30
+retention_days = 7
 max_rows = 100000
+detailed = false
 ```
 
 | 键 | 含义 |
@@ -82,8 +92,11 @@ max_rows = 100000
 | `cursor_api_key` | Cursor 账号 Key（上游） |
 | `admin_access_key` | 管理台登录密钥 |
 | `api_key_pepper` | 客户端 Key 哈希用的随机串 |
-| `[logs].retention_days` | 请求日志保留天数（1–3650），超期删除 |
+| `[logs].retention_days` | 请求日志保留天数（1–3650），默认 **7** |
 | `[logs].max_rows` | SQLite 请求日志行数上限（1k–10M），先删最旧 |
+| `[logs].detailed` | 记录请求/响应 JSON，管理台点击日志可查看（默认 **false**）。正文以**明文**存在 `./data`，请保护数据目录 |
+| `[logs].detailed_max_bytes` | 单条请求/响应 JSON 上限（4KiB–1MiB，默认 64KiB） |
+| `[logs].max_detail_bytes` | 全部详细正文合计字节上限（默认 256MiB），超限先删最旧行 |
 
 ```bash
 chmod 600 data/config/gateway.toml

@@ -796,6 +796,96 @@
       #overview-cards { margin-bottom: 16px; }
       #logs-view .table-wrap { max-height: max(10rem, calc(100dvh - 14rem)); }
     }
+
+    .duration-cell .hint { display: block; margin-top: 2px; font-size: 11px; color: var(--meta); }
+    .logs-table tbody tr.log-row { cursor: pointer; }
+    .logs-table tbody tr.log-row:hover { background: var(--surface-hover); }
+    .logs-table tbody tr.log-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: color-mix(in srgb, var(--bg) 55%, transparent);
+      backdrop-filter: blur(8px);
+    }
+    .modal-backdrop.hidden { display: none; }
+    .modal-card {
+      width: min(920px, 100%);
+      max-height: min(86vh, 900px);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border-soft);
+      border-radius: calc(var(--radius-md) + 4px);
+      box-shadow:
+        0 24px 64px color-mix(in srgb, var(--bg) 70%, transparent),
+        inset 0 1px 0 color-mix(in srgb, var(--fg) 8%, transparent),
+        inset 0 -1px 0 color-mix(in srgb, var(--bg) 35%, transparent);
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .modal-head h3 { margin: 0; font-size: 16px; }
+    .modal-body {
+      padding: 16px 18px 18px;
+      overflow: auto;
+      display: grid;
+      gap: 14px;
+    }
+    .modal-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+    }
+    .modal-meta .meta-item {
+      padding: 10px 12px;
+      background: var(--field);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius-sm);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 5%, transparent);
+    }
+    .modal-meta .k { font-size: 11px; color: var(--meta); text-transform: uppercase; letter-spacing: 0.04em; }
+    .modal-meta .v { margin-top: 4px; font-size: 13px; color: var(--fg-2); word-break: break-word; }
+    .detail-block h4 {
+      margin: 0 0 8px;
+      font-size: 12px;
+      color: var(--meta);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .detail-pre {
+      margin: 0;
+      padding: 12px 14px;
+      max-height: 280px;
+      overflow: auto;
+      background: var(--field);
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--fg-2);
+      white-space: pre-wrap;
+      word-break: break-word;
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+    }
+    .detail-empty {
+      padding: 12px 14px;
+      background: var(--field);
+      border: 1px dashed var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--muted);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -841,13 +931,13 @@
       <section id="view-overview">
         <div class="page-head">
           <h2>总览</h2>
-          <p>网关状态、30 天 Token 账本，以及给客户端复制的 OpenAI 入口。</p>
+          <p id="overview-retention-hint">网关状态、7 天 Token 账本，以及给客户端复制的 OpenAI 入口。</p>
         </div>
         <div id="overview-cards"></div>
         <div class="panel">
           <div class="panel-head">
             <h3>各模型进出 Token</h3>
-            <span class="hint">最近 30 天</span>
+            <span class="hint" id="token-window-hint">最近 7 天</span>
           </div>
           <p class="muted" id="token-unknown" hidden></p>
           <div id="token-models"><span class="loading">加载中</span></div>
@@ -895,7 +985,7 @@
       <section id="view-logs" class="hidden">
         <div class="page-head">
           <h2>请求日志</h2>
-          <p>SQLite 账本，最多留 30 天。时间按浏览器本机时区和 12/24 小时制显示。</p>
+          <p id="logs-retention-hint">SQLite 账本，最多留 7 天。时间按浏览器本机时区和 12/24 小时制显示。</p>
         </div>
         <div class="panel logs-panel">
           <div class="filters">
@@ -961,12 +1051,21 @@
         <div class="panel" style="margin-top:16px">
           <div class="panel-head">
             <h3 class="muted" style="font-weight:600">按模型 / 状态</h3>
-            <span class="hint">30 天</span>
+            <span class="hint" id="stats-window-hint">7 天</span>
           </div>
           <div id="stats-view"><span class="loading">加载中</span></div>
         </div>
       </section>
     </main>
+  </div>
+  <div id="log-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="log-modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="log-modal-title">请求详情</h3>
+        <button id="log-modal-close" class="btn btn-secondary btn-small" type="button">关闭</button>
+      </div>
+      <div id="log-modal-body" class="modal-body"></div>
+    </div>
   </div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
@@ -977,6 +1076,9 @@
     let currentView = "overview";
     let logPage = 1;
     let logTotal = 0;
+    let logRetentionDays = 7;
+    let logDetailedEnabled = false;
+    let logModalReturnFocus = null;
     let filterCache = null;
     let logRangePreset = "all";
 
@@ -1023,6 +1125,17 @@
     $("refresh-logs").addEventListener("click", () => { loadLogFilters(true); loadLogs(); loadStats(); });
     $("copy-base").addEventListener("click", () => copyText(openaiBase(), $("copy-base")));
     $("copy-snippet").addEventListener("click", () => copyText($("openai-snippet").textContent, $("copy-snippet")));
+    $("log-modal-close").addEventListener("click", closeLogModal);
+    $("log-modal").addEventListener("click", (event) => {
+      if (event.target === $("log-modal")) closeLogModal();
+    });
+    $("log-modal").addEventListener("keydown", trapLogModalFocus);
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !$("log-modal").classList.contains("hidden")) {
+        event.preventDefault();
+        closeLogModal();
+      }
+    });
     $("log-auto").addEventListener("change", syncLogTimer);
     ["log-model", "log-key", "log-status", "log-page-size"].forEach((id) => {
       $(id).addEventListener("change", () => { logPage = 1; loadLogs(); });
@@ -1112,6 +1225,17 @@
       const upstreamOk = data.upstream === "ok";
       const tokens = data.tokens ?? {};
       const totals = tokens.totals ?? {};
+      logRetentionDays = Number(tokens.retention_days ?? data.logs?.retention_days ?? 7) || 7;
+      logDetailedEnabled = Boolean(data.logs?.detailed);
+      const windowLabel = `近 ${fmtNum(logRetentionDays)} 天`;
+      $("overview-retention-hint").textContent =
+        `网关状态、${logRetentionDays} 天 Token 账本，以及给客户端复制的 OpenAI 入口。`;
+      $("token-window-hint").textContent = windowLabel;
+      $("stats-window-hint").textContent = `${logRetentionDays} 天`;
+      $("logs-retention-hint").textContent =
+        `SQLite 账本，最多留 ${logRetentionDays} 天。` +
+        (logDetailedEnabled ? " 已开启详细进出日志。" : " 详细进出日志默认关闭，可在 gateway.toml 的 [logs] detailed 开启。") +
+        " 时间按浏览器本机时区和 12/24 小时制显示。";
       const status = [
         card("网关版本", String(data.version ?? ""), null, "text"),
         card("上游 Cursor", upstreamOk ? "已通" : "不可用", upstreamOk ? "ok" : "bad"),
@@ -1119,14 +1243,14 @@
         card("客户端 Key", `${data.keys?.enabled ?? 0} / ${data.keys?.total ?? 0} 可用`, null, "text"),
       ];
       const metrics = [
-        card("30 天请求", fmtNum(totals.request_count ?? data.request_count ?? 0)),
+        card(`${logRetentionDays} 天请求`, fmtNum(totals.request_count ?? data.request_count ?? 0)),
         card("总 Token", fmtNum(totals.total_tokens ?? 0)),
         card("输入 Token", fmtNum(totals.input_tokens ?? 0)),
         card("输出 Token", fmtNum(totals.output_tokens ?? 0)),
       ];
       $("overview-cards").innerHTML =
         `<div class="cards-group">${status.join("")}</div>` +
-        `<div class="cards-label">近 30 天</div>` +
+        `<div class="cards-label">${windowLabel}</div>` +
         `<div class="cards-group">${metrics.join("")}</div>`;
       renderTokenModels(tokens);
       $("openai-base").textContent = openaiBase();
@@ -1542,23 +1666,120 @@
         </tr></thead>
         <tbody>${logs.map(logRow).join("")}</tbody>
       </table></div>`;
+      $("logs-view").querySelectorAll("tr.log-row").forEach((row) => {
+        row.addEventListener("click", () => {
+          const id = row.getAttribute("data-log-id");
+          if (id) void showLogDetail(id);
+        });
+        row.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          const id = row.getAttribute("data-log-id");
+          if (id) void showLogDetail(id);
+        });
+      });
       renderPager(limit);
     }
 
     function logRow(row) {
       const error = row.error_code ? escapeHtml(String(row.error_code)) : '<span class="muted">—</span>';
       const streamTag = row.stream ? '<span class="tag">流式</span>' : "";
-      return `<tr>
+      const detailTag = row.has_detail ? '<span class="tag">正文</span>' : "";
+      const id = escapeHtml(String(row.id ?? ""));
+      return `<tr class="log-row" data-log-id="${id}" tabindex="0" title="点击查看详情">
         <td class="muted nowrap">${escapeHtml(formatTime(row.created_at))}</td>
         <td class="nowrap"><code>${escapeHtml(String(row.key_prefix ?? row.key_name ?? ""))}</code></td>
-        <td class="nowrap"><code>${escapeHtml(String(row.model ?? ""))}</code></td>
+        <td class="nowrap"><code>${escapeHtml(String(row.model ?? ""))}</code>${detailTag}</td>
         <td class="status-cell"><span class="status-stack">${statusPill(row.http_status)}${streamTag}</span></td>
-        <td class="num">${row.duration_ms == null ? "—" : `${fmtNum(row.duration_ms)}ms`}</td>
+        <td class="num duration-cell">${durationCell(row)}</td>
         <td class="num">${row.input_tokens == null ? "—" : fmtNum(row.input_tokens)}</td>
         <td class="num">${row.output_tokens == null ? "—" : fmtNum(row.output_tokens)}</td>
         <td class="num">${row.total_tokens == null ? "—" : fmtNum(row.total_tokens)}</td>
         <td>${error}</td>
       </tr>`;
+    }
+
+    function durationCell(row) {
+      if (row.duration_ms == null) return "—";
+      let html = `${fmtNum(row.duration_ms)}ms`;
+      if (row.upstream_ms != null && row.gateway_ms != null) {
+        html += `<span class="hint">上游 ${fmtNum(row.upstream_ms)} · 网关 ${fmtNum(row.gateway_ms)}</span>`;
+      }
+      return html;
+    }
+
+    async function showLogDetail(id) {
+      hide("logs-error");
+      const data = await adminApi("GET", `/admin/api/logs/${encodeURIComponent(id)}`, null, "logs-error");
+      if (!data) return;
+      logModalReturnFocus = document.activeElement;
+      $("log-modal-title").textContent = `请求详情 · ${id}`;
+      $("log-modal-body").innerHTML = renderLogDetail(data);
+      $("log-modal").classList.remove("hidden");
+      $("app")?.setAttribute("inert", "");
+      $("log-modal-close").focus();
+    }
+
+    function renderLogDetail(row) {
+      const meta = [
+        ["时间", formatTime(row.created_at)],
+        ["模型", String(row.model ?? "")],
+        ["状态", String(row.http_status ?? "")],
+        ["总耗时", row.duration_ms == null ? "—" : `${fmtNum(row.duration_ms)} ms`],
+        ["上游耗时", row.upstream_ms == null ? "—" : `${fmtNum(row.upstream_ms)} ms`],
+        ["网关耗时", row.gateway_ms == null ? "—" : `${fmtNum(row.gateway_ms)} ms`],
+        ["Key", String(row.key_prefix ?? row.key_name ?? row.api_key_id ?? "")],
+        ["错误", row.error_code ? String(row.error_code) : "—"],
+      ];
+      const metaHtml = `<div class="modal-meta">${meta.map(([k, v]) =>
+        `<div class="meta-item"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div></div>`,
+      ).join("")}</div>`;
+      const requestBlock = row.request_detail
+        ? `<div class="detail-block"><h4>请求</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.request_detail))}</pre></div>`
+        : `<div class="detail-empty">未记录请求正文。在 <code>gateway.toml</code> 设置 <code>[logs] detailed = true</code> 并重启后生效。</div>`;
+      const responseBlock = row.response_detail
+        ? `<div class="detail-block"><h4>响应</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.response_detail))}</pre></div>`
+        : `<div class="detail-empty">未记录响应正文。开启详细日志后可查看助手输出与用量。</div>`;
+      return metaHtml + requestBlock + responseBlock;
+    }
+
+    function formatDetailJson(raw) {
+      if (typeof raw !== "string" || raw === "") return "";
+      try {
+        return JSON.stringify(JSON.parse(raw), null, 2);
+      } catch {
+        return raw;
+      }
+    }
+
+    function closeLogModal() {
+      $("log-modal").classList.add("hidden");
+      $("log-modal-body").innerHTML = "";
+      $("app")?.removeAttribute("inert");
+      if (logModalReturnFocus && typeof logModalReturnFocus.focus === "function") {
+        logModalReturnFocus.focus();
+      }
+      logModalReturnFocus = null;
+    }
+
+    function trapLogModalFocus(event) {
+      if (event.key !== "Tab") return;
+      if ($("log-modal").classList.contains("hidden")) return;
+      const nodes = Array.from(
+        $("log-modal").querySelectorAll(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (nodes.length === 0) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
 
     function statusPill(code) {
@@ -1588,6 +1809,15 @@
       setLoading("stats-view");
       const data = await adminApi("GET", "/admin/api/stats", null, "logs-error");
       if (!data) return;
+      const retention = Number(data.tokens?.retention_days ?? logRetentionDays);
+      if (Number.isFinite(retention) && retention > 0) {
+        logRetentionDays = retention;
+        $("stats-window-hint").textContent = `${logRetentionDays} 天`;
+        $("logs-retention-hint").textContent =
+          `SQLite 账本，最多留 ${logRetentionDays} 天。` +
+          (logDetailedEnabled ? " 已开启详细进出日志。" : " 详细进出日志默认关闭，可在 gateway.toml 的 [logs] detailed 开启。") +
+          " 时间按浏览器本机时区和 12/24 小时制显示。";
+      }
       const models = Array.isArray(data.tokens?.by_model) ? data.tokens.by_model : [];
       const statuses = Array.isArray(data.by_status) ? data.by_status : [];
       if (models.length === 0 && statuses.length === 0) {
@@ -1687,17 +1917,57 @@
     }
 
     async function copyText(value, btn) {
-      try {
-        await navigator.clipboard.writeText(value);
+      const text = String(value ?? "");
+      if (text === "") {
+        toast("没有可复制的内容");
+        return;
+      }
+      let ok = false;
+      if (window.isSecureContext && navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) {
+        ok = copyTextFallback(text);
+      }
+      if (ok) {
         toast("已复制");
         if (btn) {
           const prev = btn.textContent;
           btn.textContent = "已复制";
           window.setTimeout(() => { btn.textContent = prev; }, 1200);
         }
-      } catch {
-        toast("复制失败，请手动选中");
+        return;
       }
+      toast("复制失败，请手动选中");
+    }
+
+    function copyTextFallback(text) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "0";
+      ta.style.width = "1px";
+      ta.style.height = "1px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+      document.body.removeChild(ta);
+      return ok;
     }
 
     let toastTimer = 0;
