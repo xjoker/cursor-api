@@ -67,6 +67,9 @@ export interface RequestLogRow {
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
   error_code: string | null;
   created_at: string;
   upstream_ms: number | null;
@@ -83,11 +86,17 @@ export interface TokenTotals {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
   unknown_usage_count: number;
 }
 
 export interface ModelTokenRow extends TokenTotals {
   model: string;
+}
+
+export interface KeyTokenRow extends TokenTotals {
+  api_key_id: string;
 }
 
 export interface Usage {

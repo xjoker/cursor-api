@@ -1,7 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ApiKeyRow, LogPolicy, ModelTokenRow, RequestLogFilters, RequestLogQuery, RequestLogRow, TokenTotals } from "./contracts.js";
+import type {
+  ApiKeyRow,
+  KeyTokenRow,
+  LogPolicy,
+  ModelTokenRow,
+  RequestLogFilters,
+  RequestLogQuery,
+  RequestLogRow,
+  TokenTotals,
+} from "./contracts.js";
 
 export const DEFAULT_LOG_POLICY: LogPolicy = {
   retentionDays: 7,
@@ -9,7 +18,7 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
   maxDetailBytes: 268_435_456,
 };
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
 
@@ -36,6 +45,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
   input_tokens INTEGER,
   output_tokens INTEGER,
   total_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  reasoning_tokens INTEGER,
   error_code TEXT,
   created_at TEXT NOT NULL,
   upstream_ms INTEGER,
@@ -128,9 +140,11 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
   db.prepare(
     `INSERT INTO request_logs (
       id, api_key_id, path, model, stream, http_status, duration_ms,
-      input_tokens, output_tokens, total_tokens, error_code, created_at,
+      input_tokens, output_tokens, total_tokens,
+      cache_read_tokens, cache_write_tokens, reasoning_tokens,
+      error_code, created_at,
       upstream_ms, gateway_ms, request_detail, response_detail
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.api_key_id,
@@ -142,6 +156,9 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.input_tokens,
     row.output_tokens,
     row.total_tokens,
+    row.cache_read_tokens,
+    row.cache_write_tokens,
+    row.reasoning_tokens,
     row.error_code,
     row.created_at,
     row.upstream_ms,
@@ -161,7 +178,9 @@ export function listRequestLogs(db: DatabaseSync, query: RequestLogQuery): {
   const logs = db
     .prepare(
       `SELECT l.id, l.api_key_id, l.path, l.model, l.stream, l.http_status, l.duration_ms,
-              l.input_tokens, l.output_tokens, l.total_tokens, l.error_code, l.created_at,
+              l.input_tokens, l.output_tokens, l.total_tokens,
+              l.cache_read_tokens, l.cache_write_tokens, l.reasoning_tokens,
+              l.error_code, l.created_at,
               l.upstream_ms, l.gateway_ms,
               CASE WHEN l.request_detail IS NOT NULL OR l.response_detail IS NOT NULL THEN 1 ELSE 0 END AS has_detail,
               k.name AS key_name, k.key_prefix AS key_prefix
@@ -303,6 +322,8 @@ export function requestTokenStats(db: DatabaseSync): {
            COALESCE(SUM(input_tokens), 0) AS input_tokens,
            COALESCE(SUM(output_tokens), 0) AS output_tokens,
            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+           COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+           COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
            COALESCE(SUM(CASE WHEN total_tokens IS NULL THEN 1 ELSE 0 END), 0) AS unknown_usage_count
          FROM request_logs`,
       )
@@ -316,6 +337,8 @@ export function requestTokenStats(db: DatabaseSync): {
          COALESCE(SUM(input_tokens), 0) AS input_tokens,
          COALESCE(SUM(output_tokens), 0) AS output_tokens,
          COALESCE(SUM(total_tokens), 0) AS total_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
          COALESCE(SUM(CASE WHEN total_tokens IS NULL THEN 1 ELSE 0 END), 0) AS unknown_usage_count
        FROM request_logs
        GROUP BY model
@@ -340,6 +363,7 @@ export function requestStats(db: DatabaseSync): {
   by_model: Array<{ model: string; count: number }>;
   by_status: Array<{ http_status: number; count: number }>;
   tokens: ReturnType<typeof requestTokenStats>;
+  tokens_by_key: KeyTokenRow[];
 } {
   const by_key = db
     .prepare("SELECT api_key_id, COUNT(*) AS count FROM request_logs GROUP BY api_key_id")
@@ -362,7 +386,35 @@ export function requestStats(db: DatabaseSync): {
       http_status: asNumber(row.http_status),
       count: asNumber(row.count),
     }));
-  return { by_key, by_model, by_status, tokens: requestTokenStats(db) };
+  return {
+    by_key,
+    by_model,
+    by_status,
+    tokens: requestTokenStats(db),
+    tokens_by_key: tokenStatsByKey(db),
+  };
+}
+
+export function tokenStatsByKey(db: DatabaseSync): KeyTokenRow[] {
+  return db
+    .prepare(
+      `SELECT
+         api_key_id,
+         COUNT(*) AS request_count,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(total_tokens), 0) AS total_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(CASE WHEN total_tokens IS NULL THEN 1 ELSE 0 END), 0) AS unknown_usage_count
+       FROM request_logs
+       GROUP BY api_key_id`,
+    )
+    .all()
+    .map((row) => ({
+      api_key_id: asString(row.api_key_id),
+      ...mapTokenTotals(row),
+    }));
 }
 
 function migrateRequestLogs(db: DatabaseSync): void {
@@ -383,6 +435,15 @@ function migrateRequestLogs(db: DatabaseSync): void {
   }
   if (!columns.has("response_detail")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN response_detail TEXT");
+  }
+  if (!columns.has("cache_read_tokens")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN cache_read_tokens INTEGER");
+  }
+  if (!columns.has("cache_write_tokens")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN cache_write_tokens INTEGER");
+  }
+  if (!columns.has("reasoning_tokens")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
@@ -422,6 +483,9 @@ function mapRequestLog(row: Record<string, unknown>): RequestLogRow {
     input_tokens: asNullableNumber(row.input_tokens),
     output_tokens: asNullableNumber(row.output_tokens),
     total_tokens: asNullableNumber(row.total_tokens),
+    cache_read_tokens: asNullableNumber(row.cache_read_tokens),
+    cache_write_tokens: asNullableNumber(row.cache_write_tokens),
+    reasoning_tokens: asNullableNumber(row.reasoning_tokens),
     error_code: asNullableString(row.error_code),
     created_at: asString(row.created_at),
     upstream_ms: asNullableNumber(row.upstream_ms),
@@ -442,6 +506,8 @@ function mapTokenTotals(row: Record<string, unknown> | undefined): TokenTotals {
       input_tokens: 0,
       output_tokens: 0,
       total_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
       unknown_usage_count: 0,
     };
   }
@@ -450,6 +516,8 @@ function mapTokenTotals(row: Record<string, unknown> | undefined): TokenTotals {
     input_tokens: asNumber(row.input_tokens),
     output_tokens: asNumber(row.output_tokens),
     total_tokens: asNumber(row.total_tokens),
+    cache_read_tokens: asNumber(row.cache_read_tokens),
+    cache_write_tokens: asNumber(row.cache_write_tokens),
     unknown_usage_count: asNumber(row.unknown_usage_count),
   };
 }

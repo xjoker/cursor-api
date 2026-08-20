@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>cursor-api 管理台</title>
+  <title>cursor-api Admin</title>
   <style>
     /* ─────────────────────────────────────────────────────────────────────────
      * 视觉系统：绑定 OpenCode 设计系统 tokens（终端原生暗色主题）。
@@ -100,13 +100,17 @@
     body {
       font-family: var(--font-body);
       font-size: var(--text-sm);
-      line-height: 1.7; /* CJK 正文行高 */
+      line-height: 1.5;
       background: var(--bg);
       color: var(--fg);
       overflow: hidden;
       -webkit-font-smoothing: antialiased;
       text-rendering: optimizeLegibility;
     }
+    html.lang-zh body { line-height: 1.7; }
+    .lang-switch { display: inline-flex; gap: 4px; margin-top: 12px; }
+    .lang-switch button { min-width: 40px; }
+    nav .lang-switch { margin: 8px 12px 0; }
     code, pre, .mono {
       font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
@@ -894,124 +898,132 @@
       <header class="login-brand">
         <span class="prompt">❯</span>
         <h1>cursor-api</h1>
-        <span class="cursor">▍</span>
+        <span class="cursor">█</span>
       </header>
-      <p class="lead">填 <code>.env</code> 里的 <code>ADMIN_ACCESS_KEY</code> 连接管理台。不要填 <code>CURSOR_API_KEY</code>。</p>
+      <p class="lead" data-i18n="login.lead" data-i18n-html>Enter the <code>ADMIN_ACCESS_KEY</code> from <code>.env</code>. Do not use <code>CURSOR_API_KEY</code>.</p>
       <p class="muted" id="detected-base"></p>
       <div class="field">
-        <label for="admin-key">管理密钥</label>
+        <label for="admin-key" data-i18n="login.key">Admin key</label>
         <div class="key-wrap">
           <input id="admin-key" type="password" autocomplete="off" placeholder="ADMIN_ACCESS_KEY">
-          <button id="toggle-admin" class="btn btn-secondary" type="button">显示</button>
+          <button id="toggle-admin" class="btn btn-secondary" type="button" data-i18n="login.show">Show</button>
         </div>
       </div>
-       <button id="connect" class="btn btn-primary btn-block" type="button">连接</button>
-       <p id="login-error" class="error" hidden></p>
+      <button id="connect" class="btn btn-primary btn-block" type="button" data-i18n="login.connect">Connect</button>
+      <p id="login-error" class="error" hidden></p>
+      <div class="lang-switch" role="group" aria-label="Language">
+        <button type="button" class="btn btn-secondary btn-small" data-lang="en">EN</button>
+        <button type="button" class="btn btn-secondary btn-small" data-lang="zh">中文</button>
+      </div>
     </div>
   </section>
 
   <div id="app" class="hidden">
     <nav>
       <div class="brand"><span class="prompt">❯</span> cursor-api</div>
-      <div class="nav-label">导航</div>
-      <button class="nav-btn active" type="button" data-view="overview" aria-current="page">总览</button>
-      <button class="nav-btn" type="button" data-view="keys">客户端 Key</button>
-      <button class="nav-btn" type="button" data-view="logs">请求日志</button>
+      <div class="nav-label" data-i18n="nav.label">Nav</div>
+      <button class="nav-btn active" type="button" data-view="overview" aria-current="page" data-i18n="nav.overview">Overview</button>
+      <button class="nav-btn" type="button" data-view="keys" data-i18n="nav.keys">Client keys</button>
+      <button class="nav-btn" type="button" data-view="logs" data-i18n="nav.logs">Request logs</button>
       <div class="spacer"></div>
+      <div class="lang-switch" role="group" aria-label="Language">
+        <button type="button" class="btn btn-secondary btn-small" data-lang="en">EN</button>
+        <button type="button" class="btn btn-secondary btn-small" data-lang="zh">中文</button>
+      </div>
       <div class="nav-footer">
          <div class="nav-status">
-           <span class="dot" id="nav-dot" title="上游状态"></span>
+           <span class="dot" id="nav-dot" title="Upstream" data-i18n-title="nav.upstream"></span>
            <span id="nav-version">v—</span>
          </div>
-        <button class="nav-btn" id="logout" type="button">登出</button>
+        <button class="nav-btn" id="logout" type="button" data-i18n="nav.logout">Log out</button>
       </div>
     </nav>
 
     <main>
       <section id="view-overview">
         <div class="page-head">
-          <h2>总览</h2>
-          <p id="overview-retention-hint">网关状态、7 天 Token 账本，以及给客户端复制的 OpenAI 入口。</p>
+          <h2 data-i18n="overview.title">Overview</h2>
+          <p id="overview-retention-hint" data-i18n="overview.hint">Gateway status, token totals, and the OpenAI base URL for clients.</p>
         </div>
         <div id="overview-cards"></div>
         <div class="panel">
           <div class="panel-head">
-            <h3>各模型进出 Token</h3>
-            <span class="hint" id="token-window-hint">最近 7 天</span>
+            <h3 data-i18n="overview.tokens">Tokens by model</h3>
+            <span class="hint" id="token-window-hint" data-i18n="overview.last7">Last 7 days</span>
           </div>
           <p class="muted" id="token-unknown" hidden></p>
-          <div id="token-models"><span class="loading">加载中</span></div>
+          <div id="token-models"><span class="loading" data-i18n="common.loading">Loading</span></div>
         </div>
         <div class="panel">
           <div class="panel-head">
-            <h3>给客户端用的 OpenAI 入口</h3>
-            <span class="hint">复制给 cgk_ 客户端</span>
+            <h3 data-i18n="overview.openai">OpenAI endpoint for clients</h3>
+            <span class="hint" data-i18n="overview.copyHint">Copy for cgk_ clients</span>
           </div>
-          <p class="muted">Base URL 用下面这一行（含 <code>/v1</code>）。客户端 Key 是 <code>cgk_</code> 开头那把，不是管理密钥。</p>
+          <p class="muted" data-i18n="overview.baseHelp" data-i18n-html>Use the Base URL below (includes <code>/v1</code>). Client keys start with <code>cgk_</code>, not the admin key.</p>
           <div class="copy-row">
             <code id="openai-base"></code>
-            <button class="btn btn-secondary" type="button" id="copy-base">复制</button>
+            <button class="btn btn-secondary" type="button" id="copy-base" data-i18n="common.copy">Copy</button>
           </div>
           <pre id="openai-snippet"></pre>
-          <button class="btn btn-secondary" type="button" id="copy-snippet" style="margin-top:12px">复制配置片段</button>
+          <button class="btn btn-secondary" type="button" id="copy-snippet" style="margin-top:12px" data-i18n="overview.copySnippet">Copy snippet</button>
         </div>
       </section>
 
       <section id="view-keys" class="hidden">
         <div class="page-head">
-          <h2>客户端 Key</h2>
-          <p>创建、停用、恢复。完整明文只在创建时显示一次。发给客户端的是 <code>cgk_</code> 这把，不是管理密钥。</p>
+          <h2 data-i18n="keys.title">Client keys</h2>
+          <p data-i18n="keys.help" data-i18n-html>Create, disable, and restore. Full plaintext is shown once at creation. Clients use the <code>cgk_</code> key, not the admin key.</p>
         </div>
         <div class="panel">
           <div class="row">
             <div>
-              <label for="key-name">名称</label>
-              <input id="key-name" type="text" autocomplete="off" placeholder="例如 local-openclaw">
+              <label for="key-name" data-i18n="keys.name">Name</label>
+              <input id="key-name" type="text" autocomplete="off" placeholder="e.g. local-openclaw" data-i18n-placeholder="keys.namePh">
             </div>
-            <button id="create-key" class="btn btn-primary" type="button">创建</button>
+            <button id="create-key" class="btn btn-primary" type="button" data-i18n="keys.create">Create</button>
           </div>
           <p id="create-error" class="error" hidden></p>
           <div id="created-key" class="secret hidden"></div>
         </div>
         <div class="panel">
           <div class="toolbar">
-            <button id="refresh-keys" class="btn btn-secondary" type="button">刷新</button>
+            <button id="refresh-keys" class="btn btn-secondary" type="button" data-i18n="common.refresh">Refresh</button>
           </div>
           <p id="keys-error" class="error" hidden></p>
-          <div id="keys-table"><span class="loading">加载中</span></div>
+          <div id="keys-table"><span class="loading" data-i18n="common.loading">Loading</span></div>
         </div>
       </section>
 
       <section id="view-logs" class="hidden">
         <div class="page-head">
-          <h2>请求日志</h2>
-          <p id="logs-retention-hint">SQLite 账本，最多留 7 天。时间按浏览器本机时区和 12/24 小时制显示。</p>
+          <h2 data-i18n="logs.title">Request logs</h2>
+          <p id="logs-retention-hint" data-i18n="logs.hint">SQLite ledger, kept up to 7 days. Times use your browser timezone and 12/24h clock.</p>
         </div>
         <div class="panel logs-panel">
           <div class="filters">
             <div class="filter-item">
-              <label for="log-model">模型</label>
-              <select id="log-model"><option value="">全部</option></select>
+              <label for="log-model" data-i18n="logs.model">Model</label>
+              <select id="log-model"><option value="" data-i18n="common.all">All</option></select>
             </div>
             <div class="filter-item">
-              <label for="log-key">客户端 Key</label>
-              <select id="log-key"><option value="">全部</option></select>
+              <label for="log-key" data-i18n="logs.key">Client key</label>
+              <select id="log-key"><option value="" data-i18n="common.all">All</option></select>
             </div>
             <div class="filter-item">
-              <label for="log-status">HTTP 状态</label>
-              <select id="log-status"><option value="">全部</option></select>
+              <label for="log-status" data-i18n="logs.status">HTTP status</label>
+              <select id="log-status"><option value="" data-i18n="common.all">All</option></select>
             </div>
             <div class="filter-item range">
-              <label for="log-range-btn">时间范围 <span class="hint" id="log-clock-hint"></span></label>
+              <label for="log-range-btn"><span data-i18n="logs.range">Time range</span> <span class="hint" id="log-clock-hint"></span></label>
               <div class="range-picker" id="log-range-picker">
                 <button id="log-range-btn" class="range-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="log-range-menu">
-                  <span id="log-range-label">全部时间</span>
+                  <span id="log-range-label" data-i18n="range.all">All time</span>
                 </button>
                 <div id="log-range-menu" class="range-menu hidden" role="listbox"></div>
               </div>
             </div>
             <div class="filter-item page">
-              <label for="log-page-size">每页</label>
+              <label for="log-page-size" data-i18n="logs.perPage">Per page</label>
               <select id="log-page-size">
                 <option value="20">20</option>
                 <option value="50" selected>50</option>
@@ -1020,23 +1032,23 @@
               </select>
             </div>
             <div class="filter-actions">
-              <button id="refresh-logs" class="btn btn-secondary" type="button">刷新</button>
+              <button id="refresh-logs" class="btn btn-secondary" type="button" data-i18n="common.refresh">Refresh</button>
               <div class="check">
                 <label for="log-auto" id="log-auto-label">
-                  <input id="log-auto" type="checkbox"> 自动刷新 <span class="auto-dot"></span>
+                  <input id="log-auto" type="checkbox"> <span data-i18n="logs.auto">Auto refresh</span> <span class="auto-dot"></span>
                 </label>
               </div>
             </div>
             <div id="log-custom-range" class="custom-range hidden">
               <div>
-                <label for="log-from-date">开始</label>
+                <label for="log-from-date" data-i18n="logs.from">From</label>
                 <div class="dt-split">
                   <input id="log-from-date" type="date">
                   <input id="log-from-time" type="time" step="1">
                 </div>
               </div>
               <div>
-                <label for="log-to-date">结束</label>
+                <label for="log-to-date" data-i18n="logs.to">To</label>
                 <div class="dt-split">
                   <input id="log-to-date" type="date">
                   <input id="log-to-time" type="time" step="1">
@@ -1045,15 +1057,15 @@
             </div>
           </div>
           <p id="logs-error" class="error" hidden></p>
-          <div id="logs-view"><span class="loading">加载中</span></div>
+          <div id="logs-view"><span class="loading" data-i18n="common.loading">Loading</span></div>
           <div id="logs-pager" class="pager hidden"></div>
         </div>
         <div class="panel" style="margin-top:16px">
           <div class="panel-head">
-            <h3 class="muted" style="font-weight:600">按模型 / 状态</h3>
-            <span class="hint" id="stats-window-hint">7 天</span>
+            <h3 class="muted" style="font-weight:600" data-i18n="logs.byModel">By model / status</h3>
+            <span class="hint" id="stats-window-hint">7 days</span>
           </div>
-          <div id="stats-view"><span class="loading">加载中</span></div>
+          <div id="stats-view"><span class="loading" data-i18n="common.loading">Loading</span></div>
         </div>
       </section>
     </main>
@@ -1061,8 +1073,8 @@
   <div id="log-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="log-modal-title">
     <div class="modal-card">
       <div class="modal-head">
-        <h3 id="log-modal-title">请求详情</h3>
-        <button id="log-modal-close" class="btn btn-secondary btn-small" type="button">关闭</button>
+        <h3 id="log-modal-title" data-i18n="modal.title">Request detail</h3>
+        <button id="log-modal-close" class="btn btn-secondary btn-small" type="button" data-i18n="common.close">Close</button>
       </div>
       <div id="log-modal-body" class="modal-body"></div>
     </div>
@@ -1070,6 +1082,387 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script>
+    const LANG_STORE = "cursor-api.lang";
+    const ZH = {
+      "title": "cursor-api 管理台",
+      "login.lead": "填 <code>.env</code> 里的 <code>ADMIN_ACCESS_KEY</code> 连接管理台。不要填 <code>CURSOR_API_KEY</code>。",
+      "login.key": "管理密钥",
+      "login.show": "显示",
+      "login.hide": "隐藏",
+      "login.connect": "连接",
+      "login.needKey": "请填 ADMIN_ACCESS_KEY",
+      "login.detected": "当前页地址：{origin}。浏览器会自动连这里，不用再填 Host。",
+      "nav.label": "导航",
+      "nav.overview": "总览",
+      "nav.keys": "客户端 Key",
+      "nav.logs": "请求日志",
+      "nav.logout": "登出",
+      "nav.upstream": "上游状态",
+      "overview.title": "总览",
+      "overview.hint": "网关状态、{days} 天 Token 账本，以及给客户端复制的 OpenAI 入口。",
+      "overview.tokens": "各模型进出 Token",
+      "overview.last7": "最近 {days} 天",
+      "overview.openai": "给客户端用的 OpenAI 入口",
+      "overview.copyHint": "复制给 cgk_ 客户端",
+      "overview.baseHelp": "Base URL 用下面这一行（含 <code>/v1</code>）。客户端 Key 是 <code>cgk_</code> 开头那把，不是管理密钥。",
+      "overview.copySnippet": "复制配置片段",
+      "overview.window": "近 {days} 天",
+      "overview.version": "网关版本",
+      "overview.upstream": "上游 Cursor",
+      "overview.upstreamOk": "已通",
+      "overview.upstreamBad": "不可用",
+      "overview.upstreamKey": "上游 Key",
+      "overview.unknown": "未知",
+      "overview.clientKeys": "客户端 Key",
+      "overview.keysAvail": "{enabled} / {total} 可用",
+      "overview.reqDays": "{days} 天请求",
+      "overview.totalTok": "总 Token",
+      "overview.inTok": "输入 Token",
+      "overview.outTok": "输出 Token",
+      "overview.snippetKey": "你的cgk_客户端Key",
+      "overview.snippetAuth": "# 认证也可用请求头 X-Api-Key",
+      "overview.unknownUsage": "有 {n} 条请求上游没带回用量，合计里没算进去。",
+      "keys.title": "客户端 Key",
+      "keys.help": "创建、停用、恢复。完整明文只在创建时显示一次。发给客户端的是 <code>cgk_</code> 这把，不是管理密钥。",
+      "keys.name": "名称",
+      "keys.namePh": "例如 local-openclaw",
+      "keys.create": "创建",
+      "keys.once": "完整客户端 Key 只显示一次：",
+      "keys.copyKey": "复制 Key",
+      "keys.createdNoSecret": "已创建，但响应里没有一次性明文 Key。",
+      "keys.empty": "还没有客户端 Key。创建一把后才能让 OpenAI 客户端连上来。",
+      "keys.colName": "名称",
+      "keys.colPrefix": "前缀",
+      "keys.colStatus": "状态",
+      "keys.colReq": "请求",
+      "keys.colTok": "Token",
+      "keys.colCache": "缓存读",
+      "keys.colCreated": "创建时间",
+      "keys.disabled": "已停用",
+      "keys.enabled": "可用",
+      "keys.enable": "恢复",
+      "keys.disable": "停用",
+      "keys.confirmDisable": "确认停用",
+      "logs.title": "请求日志",
+      "logs.hint": "SQLite 账本，最多留 {days} 天。{detail} 时间按浏览器本机时区和 12/24 小时制显示。",
+      "logs.detailOn": "已开启详细进出日志。",
+      "logs.detailOff": "详细进出日志默认关闭，可在 gateway.toml 的 [logs] detailed 开启。",
+      "logs.model": "模型",
+      "logs.key": "客户端 Key",
+      "logs.status": "HTTP 状态",
+      "logs.range": "时间范围",
+      "logs.perPage": "每页",
+      "logs.auto": "自动刷新",
+      "logs.from": "开始",
+      "logs.to": "结束",
+      "logs.byModel": "按模型 / 状态",
+      "logs.empty": "暂无匹配日志。",
+      "logs.colTime": "时间",
+      "logs.colKey": "Key",
+      "logs.colModel": "模型",
+      "logs.colStatus": "状态",
+      "logs.colDur": "耗时",
+      "logs.colIn": "输入",
+      "logs.colOut": "输出",
+      "logs.colTotal": "合计",
+      "logs.colErr": "错误",
+      "logs.stream": "流式",
+      "logs.body": "正文",
+      "logs.clickDetail": "点击查看详情",
+      "logs.upGate": "上游 {up} · 网关 {gw}",
+      "logs.days": "{days} 天",
+      "logs.httpStatus": "HTTP 状态：",
+      "logs.prev": "上一页",
+      "logs.next": "下一页",
+      "logs.page": "第 {page} / {pages} 页 · 共 {total} 条",
+      "range.all": "全部时间",
+      "range.any": "不限",
+      "range.15m": "最近 15 分钟",
+      "range.1h": "最近 1 小时",
+      "range.6h": "最近 6 小时",
+      "range.24h": "最近 24 小时",
+      "range.today": "今天",
+      "range.yesterday": "昨天",
+      "range.7d": "最近 7 天",
+      "range.custom": "自定义",
+      "range.toNow": "{from} 至 现在",
+      "range.span": "{from} 至 {to}",
+      "range.customWhen": "按开始 / 结束",
+      "range.h12": "12 小时",
+      "range.h24": "24 小时",
+      "modal.title": "请求详情",
+      "modal.titleId": "请求详情 · {id}",
+      "modal.time": "时间",
+      "modal.model": "模型",
+      "modal.status": "状态",
+      "modal.dur": "总耗时",
+      "modal.up": "上游耗时",
+      "modal.gw": "网关耗时",
+      "modal.err": "错误",
+      "modal.in": "输入 Token",
+      "modal.out": "输出 Token",
+      "modal.total": "合计 Token",
+      "modal.cacheR": "缓存读",
+      "modal.cacheW": "缓存写",
+      "modal.reason": "推理 Token",
+      "modal.req": "请求",
+      "modal.res": "响应",
+      "modal.noReq": "未记录请求正文。在 <code>gateway.toml</code> 设置 <code>[logs] detailed = true</code> 并重启后生效。",
+      "modal.noRes": "未记录响应正文。开启详细日志后可查看助手输出与用量。",
+      "tok.model": "模型",
+      "tok.req": "请求",
+      "tok.in": "输入 Token",
+      "tok.out": "输出 Token",
+      "tok.total": "合计",
+      "tok.cache": "缓存读",
+      "tok.unknown": "无用量",
+      "tok.empty": "还没有请求记录。",
+      "tok.inShort": "输入",
+      "tok.outShort": "输出",
+      "common.loading": "加载中",
+      "common.copy": "复制",
+      "common.copied": "已复制",
+      "common.refresh": "刷新",
+      "common.close": "关闭",
+      "common.all": "全部",
+      "common.empty": "(空)",
+      "common.deleted": "已删除",
+      "err.notConnected": "尚未连接管理台。",
+      "err.html": "这个地址返回的是 HTML 页面，不是 cursor-api 的 JSON。请把本文件放回 cursor-api/public/admin.html，由 cursor-api 进程提供（http://localhost:8787/admin）。",
+      "err.notJson": "返回的不是 JSON。可能本文件没有被 cursor-api 进程提供，或路由不匹配。",
+      "err.badAdmin": "管理密钥不正确。请填 .env 的 ADMIN_ACCESS_KEY，不要填 CURSOR_API_KEY 或客户端 Key。",
+      "err.fetch": "连不上网关。确认 cursor-api 进程已在跑，且本文件由其进程同源提供。",
+      "err.copyEmpty": "没有可复制的内容",
+      "err.copyFail": "复制失败，请手动选中",
+    };
+    const EN = {
+      "title": "cursor-api Admin",
+      "login.lead": "Enter the <code>ADMIN_ACCESS_KEY</code> from <code>.env</code>. Do not use <code>CURSOR_API_KEY</code>.",
+      "login.key": "Admin key",
+      "login.show": "Show",
+      "login.hide": "Hide",
+      "login.connect": "Connect",
+      "login.needKey": "Enter ADMIN_ACCESS_KEY",
+      "login.detected": "This page: {origin}. The browser connects here automatically — no Host field.",
+      "nav.label": "Nav",
+      "nav.overview": "Overview",
+      "nav.keys": "Client keys",
+      "nav.logs": "Request logs",
+      "nav.logout": "Log out",
+      "nav.upstream": "Upstream",
+      "overview.title": "Overview",
+      "overview.hint": "Gateway status, {days}-day token ledger, and the OpenAI base URL for clients.",
+      "overview.tokens": "Tokens by model",
+      "overview.last7": "Last {days} days",
+      "overview.openai": "OpenAI endpoint for clients",
+      "overview.copyHint": "Copy for cgk_ clients",
+      "overview.baseHelp": "Use the Base URL below (includes <code>/v1</code>). Client keys start with <code>cgk_</code>, not the admin key.",
+      "overview.copySnippet": "Copy snippet",
+      "overview.window": "Last {days} days",
+      "overview.version": "Gateway version",
+      "overview.upstream": "Upstream Cursor",
+      "overview.upstreamOk": "OK",
+      "overview.upstreamBad": "Down",
+      "overview.upstreamKey": "Upstream key",
+      "overview.unknown": "Unknown",
+      "overview.clientKeys": "Client keys",
+      "overview.keysAvail": "{enabled} / {total} enabled",
+      "overview.reqDays": "{days}-day requests",
+      "overview.totalTok": "Total tokens",
+      "overview.inTok": "Input tokens",
+      "overview.outTok": "Output tokens",
+      "overview.snippetKey": "your_cgk_client_key",
+      "overview.snippetAuth": "# Auth also accepts X-Api-Key header",
+      "overview.unknownUsage": "{n} requests had no upstream usage and are excluded from totals.",
+      "keys.title": "Client keys",
+      "keys.help": "Create, disable, and restore. Full plaintext is shown once at creation. Clients use the <code>cgk_</code> key, not the admin key.",
+      "keys.name": "Name",
+      "keys.namePh": "e.g. local-openclaw",
+      "keys.create": "Create",
+      "keys.once": "Full client key shown once:",
+      "keys.copyKey": "Copy key",
+      "keys.createdNoSecret": "Created, but the response had no one-time plaintext key.",
+      "keys.empty": "No client keys yet. Create one so OpenAI clients can connect.",
+      "keys.colName": "Name",
+      "keys.colPrefix": "Prefix",
+      "keys.colStatus": "Status",
+      "keys.colReq": "Requests",
+      "keys.colTok": "Tokens",
+      "keys.colCache": "Cache read",
+      "keys.colCreated": "Created",
+      "keys.disabled": "Disabled",
+      "keys.enabled": "Enabled",
+      "keys.enable": "Enable",
+      "keys.disable": "Disable",
+      "keys.confirmDisable": "Confirm disable",
+      "logs.title": "Request logs",
+      "logs.hint": "SQLite ledger, kept up to {days} days. {detail} Times use your browser timezone and 12/24h clock.",
+      "logs.detailOn": "Detailed request/response logging is on.",
+      "logs.detailOff": "Detailed logging is off by default; set [logs] detailed in gateway.toml.",
+      "logs.model": "Model",
+      "logs.key": "Client key",
+      "logs.status": "HTTP status",
+      "logs.range": "Time range",
+      "logs.perPage": "Per page",
+      "logs.auto": "Auto refresh",
+      "logs.from": "From",
+      "logs.to": "To",
+      "logs.byModel": "By model / status",
+      "logs.empty": "No matching logs.",
+      "logs.colTime": "Time",
+      "logs.colKey": "Key",
+      "logs.colModel": "Model",
+      "logs.colStatus": "Status",
+      "logs.colDur": "Duration",
+      "logs.colIn": "In",
+      "logs.colOut": "Out",
+      "logs.colTotal": "Total",
+      "logs.colErr": "Error",
+      "logs.stream": "stream",
+      "logs.body": "body",
+      "logs.clickDetail": "Click for detail",
+      "logs.upGate": "up {up} · gw {gw}",
+      "logs.days": "{days} days",
+      "logs.httpStatus": "HTTP status: ",
+      "logs.prev": "Prev",
+      "logs.next": "Next",
+      "logs.page": "Page {page} / {pages} · {total} total",
+      "range.all": "All time",
+      "range.any": "Any",
+      "range.15m": "Last 15 min",
+      "range.1h": "Last 1 hour",
+      "range.6h": "Last 6 hours",
+      "range.24h": "Last 24 hours",
+      "range.today": "Today",
+      "range.yesterday": "Yesterday",
+      "range.7d": "Last 7 days",
+      "range.custom": "Custom",
+      "range.toNow": "{from} → now",
+      "range.span": "{from} → {to}",
+      "range.customWhen": "From / to",
+      "range.h12": "12-hour",
+      "range.h24": "24-hour",
+      "modal.title": "Request detail",
+      "modal.titleId": "Request detail · {id}",
+      "modal.time": "Time",
+      "modal.model": "Model",
+      "modal.status": "Status",
+      "modal.dur": "Total duration",
+      "modal.up": "Upstream",
+      "modal.gw": "Gateway",
+      "modal.err": "Error",
+      "modal.in": "Input tokens",
+      "modal.out": "Output tokens",
+      "modal.total": "Total tokens",
+      "modal.cacheR": "Cache read",
+      "modal.cacheW": "Cache write",
+      "modal.reason": "Reasoning tokens",
+      "modal.req": "Request",
+      "modal.res": "Response",
+      "modal.noReq": "Request body not recorded. Set <code>[logs] detailed = true</code> in <code>gateway.toml</code> and restart.",
+      "modal.noRes": "Response body not recorded. Enable detailed logs to see assistant output and usage.",
+      "tok.model": "Model",
+      "tok.req": "Requests",
+      "tok.in": "Input tokens",
+      "tok.out": "Output tokens",
+      "tok.total": "Total",
+      "tok.cache": "Cache read",
+      "tok.unknown": "No usage",
+      "tok.empty": "No requests yet.",
+      "tok.inShort": "In",
+      "tok.outShort": "Out",
+      "common.loading": "Loading",
+      "common.copy": "Copy",
+      "common.copied": "Copied",
+      "common.refresh": "Refresh",
+      "common.close": "Close",
+      "common.all": "All",
+      "common.empty": "(empty)",
+      "common.deleted": "Deleted",
+      "err.notConnected": "Not connected to admin.",
+      "err.html": "This URL returned HTML, not cursor-api JSON. Serve public/admin.html from the cursor-api process (http://localhost:8787/admin).",
+      "err.notJson": "Response is not JSON. This file may not be served by the cursor-api process, or the route does not match.",
+      "err.badAdmin": "Wrong admin key. Use ADMIN_ACCESS_KEY from .env — not CURSOR_API_KEY or a client key.",
+      "err.fetch": "Cannot reach the gateway. Confirm cursor-api is running and this page is same-origin.",
+      "err.copyEmpty": "Nothing to copy",
+      "err.copyFail": "Copy failed — select manually",
+    };
+
+    function browserPrefersZh() {
+      const langs = [...(navigator.languages || []), navigator.language || ""];
+      return langs.some((l) => /^zh\b/i.test(String(l)));
+    }
+    function readLangStore() {
+      try {
+        const v = localStorage.getItem(LANG_STORE);
+        if (v === "en" || v === "zh") return v;
+      } catch { /* sandbox */ }
+      return null;
+    }
+    function writeLangStore(v) {
+      try { localStorage.setItem(LANG_STORE, v); } catch { /* sandbox */ }
+    }
+    let locale = readLangStore() || (browserPrefersZh() ? "zh" : "en");
+
+    function t(key, vars) {
+      const dict = locale === "zh" ? ZH : EN;
+      let s = dict[key] ?? EN[key] ?? key;
+      if (vars) {
+        for (const [k, v] of Object.entries(vars)) s = s.replaceAll("{" + k + "}", String(v));
+      }
+      return s;
+    }
+
+    function applyStaticI18n() {
+      document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+      document.documentElement.classList.toggle("lang-zh", locale === "zh");
+      document.title = t("title");
+      document.querySelectorAll("[data-i18n]").forEach((el) => {
+        const key = el.getAttribute("data-i18n");
+        if (!key) return;
+        if (el.hasAttribute("data-i18n-html")) el.innerHTML = t(key);
+        else el.textContent = t(key);
+      });
+      document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+        const key = el.getAttribute("data-i18n-placeholder");
+        if (key) el.placeholder = t(key);
+      });
+      document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+        const key = el.getAttribute("data-i18n-title");
+        if (key) el.title = t(key);
+      });
+      document.querySelectorAll("[data-lang]").forEach((btn) => {
+        const on = btn.getAttribute("data-lang") === locale;
+        btn.classList.toggle("btn-primary", on);
+        btn.classList.toggle("btn-secondary", !on);
+      });
+    }
+
+    function setLocale(next) {
+      if (next !== "en" && next !== "zh") return;
+      if (next === locale) return;
+      locale = next;
+      writeLangStore(locale);
+      applyStaticI18n();
+      $("detected-base").textContent = t("login.detected", { origin: window.location.origin });
+      const showBtn = $("toggle-admin");
+      if (showBtn && $("admin-key")) {
+        showBtn.textContent = $("admin-key").type === "password" ? t("login.show") : t("login.hide");
+      }
+      fillClockHint();
+      syncRangeUi();
+      if (!$("app").classList.contains("hidden")) {
+        if (currentView === "overview") loadOverview();
+        if (currentView === "keys") loadKeys();
+        if (currentView === "logs") { loadLogFilters(true); loadLogs(); loadStats(); }
+      }
+    }
+
+    document.querySelectorAll("[data-lang]").forEach((btn) => {
+      btn.addEventListener("click", () => setLocale(btn.getAttribute("data-lang")));
+    });
+    applyStaticI18n();
+
     const ADMIN_STORE = "cursor-api.admin";
     let adminKey = readAdminStore();
     let logsTimer = 0;
@@ -1084,7 +1477,7 @@
 
     const $ = (id) => document.getElementById(id);
     const openaiBase = () => `${window.location.origin}/v1`;
-    const fmtNum = (value) => Number(value ?? 0).toLocaleString("zh-CN");
+    const fmtNum = (value) => Number(value ?? 0).toLocaleString(locale === "zh" ? "zh-CN" : "en-US");
 
     function readAdminStore() {
       try {
@@ -1108,7 +1501,7 @@
       try { sessionStorage.removeItem(ADMIN_STORE); } catch { /* sandbox */ }
     }
 
-    $("detected-base").textContent = `当前页地址：${window.location.origin}。浏览器会自动连这里，不用再填 Host。`;
+    $("detected-base").textContent = t("login.detected", { origin: window.location.origin });
     $("admin-key").addEventListener("keydown", (event) => {
       if (event.key === "Enter") connect();
     });
@@ -1116,7 +1509,7 @@
       const input = $("admin-key");
       const hidden = input.type === "password";
       input.type = hidden ? "text" : "password";
-      $("toggle-admin").textContent = hidden ? "隐藏" : "显示";
+      $("toggle-admin").textContent = hidden ? t("login.hide") : t("login.show");
     });
     $("connect").addEventListener("click", () => connect());
     $("logout").addEventListener("click", logout);
@@ -1173,7 +1566,7 @@
       const typed = normalizeSecret($("admin-key").value);
       if (typed) adminKey = typed;
       if (!adminKey) {
-        showError("login-error", "请填 ADMIN_ACCESS_KEY");
+        showError("login-error", t("login.needKey"));
         return;
       }
       const data = await adminApi("GET", "/admin/api/overview", null, silent ? null : "login-error");
@@ -1227,26 +1620,25 @@
       const totals = tokens.totals ?? {};
       logRetentionDays = Number(tokens.retention_days ?? data.logs?.retention_days ?? 7) || 7;
       logDetailedEnabled = Boolean(data.logs?.detailed);
-      const windowLabel = `近 ${fmtNum(logRetentionDays)} 天`;
-      $("overview-retention-hint").textContent =
-        `网关状态、${logRetentionDays} 天 Token 账本，以及给客户端复制的 OpenAI 入口。`;
+      const windowLabel = t("overview.window", { days: fmtNum(logRetentionDays) });
+      $("overview-retention-hint").textContent = t("overview.hint", { days: logRetentionDays });
       $("token-window-hint").textContent = windowLabel;
-      $("stats-window-hint").textContent = `${logRetentionDays} 天`;
-      $("logs-retention-hint").textContent =
-        `SQLite 账本，最多留 ${logRetentionDays} 天。` +
-        (logDetailedEnabled ? " 已开启详细进出日志。" : " 详细进出日志默认关闭，可在 gateway.toml 的 [logs] detailed 开启。") +
-        " 时间按浏览器本机时区和 12/24 小时制显示。";
+      $("stats-window-hint").textContent = t("logs.days", { days: logRetentionDays });
+      $("logs-retention-hint").textContent = t("logs.hint", {
+        days: logRetentionDays,
+        detail: logDetailedEnabled ? t("logs.detailOn") : t("logs.detailOff"),
+      });
       const status = [
-        card("网关版本", String(data.version ?? ""), null, "text"),
-        card("上游 Cursor", upstreamOk ? "已通" : "不可用", upstreamOk ? "ok" : "bad"),
-        card("上游 Key", data.account?.api_key_name ? String(data.account.api_key_name) : "未知", null, "text"),
-        card("客户端 Key", `${data.keys?.enabled ?? 0} / ${data.keys?.total ?? 0} 可用`, null, "text"),
+        card(t("overview.version"), String(data.version ?? ""), null, "text"),
+        card(t("overview.upstream"), upstreamOk ? t("overview.upstreamOk") : t("overview.upstreamBad"), upstreamOk ? "ok" : "bad"),
+        card(t("overview.upstreamKey"), data.account?.api_key_name ? String(data.account.api_key_name) : t("overview.unknown"), null, "text"),
+        card(t("overview.clientKeys"), t("overview.keysAvail", { enabled: data.keys?.enabled ?? 0, total: data.keys?.total ?? 0 }), null, "text"),
       ];
       const metrics = [
-        card(`${logRetentionDays} 天请求`, fmtNum(totals.request_count ?? data.request_count ?? 0)),
-        card("总 Token", fmtNum(totals.total_tokens ?? 0)),
-        card("输入 Token", fmtNum(totals.input_tokens ?? 0)),
-        card("输出 Token", fmtNum(totals.output_tokens ?? 0)),
+        card(t("overview.reqDays", { days: logRetentionDays }), fmtNum(totals.request_count ?? data.request_count ?? 0)),
+        card(t("overview.totalTok"), fmtNum(totals.total_tokens ?? 0)),
+        card(t("overview.inTok"), fmtNum(totals.input_tokens ?? 0)),
+        card(t("overview.outTok"), fmtNum(totals.output_tokens ?? 0)),
       ];
       $("overview-cards").innerHTML =
         `<div class="cards-group">${status.join("")}</div>` +
@@ -1256,8 +1648,8 @@
       $("openai-base").textContent = openaiBase();
       $("openai-snippet").textContent =
         `export OPENAI_BASE_URL=${openaiBase()}\n` +
-        `export OPENAI_API_KEY=你的cgk_客户端Key\n` +
-        `# 认证也可用请求头 X-Api-Key`;
+        `export OPENAI_API_KEY=${t("overview.snippetKey")}\n` +
+        t("overview.snippetAuth");
       $("nav-version").textContent = `v${data.version ?? "—"}`;
       $("nav-dot").className = `dot ${upstreamOk ? "ok" : "bad"}`;
     }
@@ -1267,24 +1659,25 @@
       const note = $("token-unknown");
       if (unknown > 0) {
         note.hidden = false;
-        note.textContent = `有 ${fmtNum(unknown)} 条请求上游没带回用量，合计里没算进去。`;
+        note.textContent = t("overview.unknownUsage", { n: fmtNum(unknown) });
       } else {
         note.hidden = true;
         note.textContent = "";
       }
       const rows = Array.isArray(tokens?.by_model) ? tokens.by_model : [];
       if (rows.length === 0) {
-        $("token-models").innerHTML = '<div class="empty"><span class="glyph">∅</span>还没有请求记录。</div>';
+        $("token-models").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("tok.empty") + '</div>';
         return;
       }
       $("token-models").innerHTML = `<div class="table-wrap"><table>
-        <thead><tr><th>模型</th><th class="num">请求</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">合计</th><th class="num">无用量</th></tr></thead>
+        <thead><tr><th>${t("tok.model")}</th><th class="num">${t("tok.req")}</th><th class="num">${t("tok.in")}</th><th class="num">${t("tok.out")}</th><th class="num">${t("tok.total")}</th><th class="num">${t("tok.cache")}</th><th class="num">${t("tok.unknown")}</th></tr></thead>
         <tbody>${rows.map((row) => `<tr>
-          <td><code>${escapeHtml(String(row.model || "(空)"))}</code></td>
+          <td><code>${escapeHtml(String(row.model || t("common.empty")))}</code></td>
           <td class="num">${fmtNum(row.request_count)}</td>
           <td class="num">${fmtNum(row.input_tokens)}</td>
           <td class="num">${fmtNum(row.output_tokens)}</td>
           <td class="num">${fmtNum(row.total_tokens)}</td>
+          <td class="num">${fmtNum(row.cache_read_tokens)}</td>
           <td class="num">${fmtNum(row.unknown_usage_count)}</td>
         </tr>`).join("")}</tbody>
       </table></div>`;
@@ -1308,10 +1701,10 @@
       box.classList.remove("hidden");
       box.classList.add("ok");
       if (secret) {
-        box.innerHTML = `完整客户端 Key 只显示一次：<code class="mono">${escapeHtml(secret)}</code> <button class="btn btn-secondary btn-small" type="button" id="copy-created">复制 Key</button>`;
+        box.innerHTML = `${t("keys.once")} <code class="mono">${escapeHtml(secret)}</code> <button class="btn btn-secondary btn-small" type="button" id="copy-created">${t("keys.copyKey")}</button>`;
         $("copy-created").addEventListener("click", () => copyText(secret, $("copy-created")));
       } else {
-        box.textContent = "已创建，但响应里没有一次性明文 Key。";
+        box.textContent = t("keys.createdNoSecret");
       }
       $("key-name").value = "";
       await loadKeys();
@@ -1324,11 +1717,15 @@
       if (!data) return;
       const keys = Array.isArray(data.keys) ? data.keys : [];
       if (keys.length === 0) {
-        $("keys-table").innerHTML = '<div class="empty"><span class="glyph">∅</span>还没有客户端 Key。创建一把后才能让 OpenAI 客户端连上来。</div>';
+        $("keys-table").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("keys.empty") + '</div>';
         return;
       }
       $("keys-table").innerHTML = `<div class="table-wrap"><table>
-        <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>创建时间</th><th class="num"></th></tr></thead>
+        <thead><tr>
+          <th>${t("keys.colName")}</th><th>${t("keys.colPrefix")}</th><th>${t("keys.colStatus")}</th>
+          <th class="num">${t("keys.colReq")}</th><th class="num">${t("keys.colTok")}</th><th class="num">${t("keys.colCache")}</th>
+          <th>${t("keys.colCreated")}</th><th class="num"></th>
+        </tr></thead>
         <tbody>${keys.map(keyRow).join("")}</tbody>
       </table></div>`;
       $("keys-table").querySelectorAll("[data-action]").forEach((btn) => {
@@ -1342,12 +1739,15 @@
       return `<tr>
         <td>${escapeHtml(String(row.name ?? ""))}</td>
         <td><code>${escapeHtml(String(row.key_prefix ?? ""))}</code></td>
-        <td><span class="pill ${disabled ? "bad" : "ok"}">${disabled ? "已停用" : "可用"}</span></td>
+        <td><span class="pill ${disabled ? "bad" : "ok"}">${disabled ? t("keys.disabled") : t("keys.enabled")}</span></td>
+        <td class="num">${fmtNum(row.request_count ?? 0)}</td>
+        <td class="num">${fmtNum(row.total_tokens ?? 0)}</td>
+        <td class="num">${fmtNum(row.cache_read_tokens ?? 0)}</td>
         <td class="muted">${escapeHtml(formatTime(row.created_at))}</td>
         <td class="num nowrap">
           ${disabled
-            ? `<button class="btn btn-secondary btn-small" type="button" data-action="enable" data-id="${id}">恢复</button>`
-            : `<button class="btn btn-danger btn-small" type="button" data-action="disable" data-id="${id}">停用</button>`}
+            ? `<button class="btn btn-secondary btn-small" type="button" data-action="enable" data-id="${id}">${t("keys.enable")}</button>`
+            : `<button class="btn btn-danger btn-small" type="button" data-action="disable" data-id="${id}">${t("keys.disable")}</button>`}
         </td>
       </tr>`;
     }
@@ -1359,7 +1759,7 @@
       if (action === "disable" && btn.dataset.confirm !== "1") {
         btn.dataset.confirm = "1";
         const prev = btn.textContent;
-        btn.textContent = "确认停用";
+        btn.textContent = t("keys.confirmDisable");
         btn.classList.add("is-confirming");
         window.setTimeout(() => {
           btn.dataset.confirm = "";
@@ -1468,7 +1868,7 @@
       const el = $("log-clock-hint");
       if (!el) return;
       const zone = userTimeZone().split("/").pop()?.replaceAll("_", " ") || "";
-      const clock = usesHour12() ? "12 小时" : "24 小时";
+      const clock = usesHour12() ? t("range.h12") : t("range.h24");
       el.textContent = zone ? `${zone} · ${clock}` : clock;
     }
 
@@ -1477,15 +1877,15 @@
       const yesterday = new Date(now.getTime());
       yesterday.setDate(yesterday.getDate() - 1);
       return [
-        { value: "all", title: "全部时间", when: "不限" },
-        { value: "15m", title: "最近 15 分钟", when: `${formatShort(new Date(now.getTime() - 15 * 60 * 1000))} 至 现在` },
-        { value: "1h", title: "最近 1 小时", when: `${formatShort(new Date(now.getTime() - 60 * 60 * 1000))} 至 现在` },
-        { value: "6h", title: "最近 6 小时", when: `${formatShort(new Date(now.getTime() - 6 * 60 * 60 * 1000))} 至 现在` },
-        { value: "24h", title: "最近 24 小时", when: `${formatShort(new Date(now.getTime() - 24 * 60 * 60 * 1000))} 至 现在` },
-        { value: "today", title: "今天", when: `${formatShort(todayStart)} 至 现在` },
-        { value: "yesterday", title: "昨天", when: `${formatShort(startOfLocalDay(yesterday))} 至 ${formatShort(endOfLocalDay(yesterday))}` },
-        { value: "7d", title: "最近 7 天", when: `${formatShort(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000))} 至 现在` },
-        { value: "custom", title: "自定义", when: "按开始 / 结束" },
+        { value: "all", title: t("range.all"), when: t("range.any") },
+        { value: "15m", title: t("range.15m"), when: t("range.toNow", { from: formatShort(new Date(now.getTime() - 15 * 60 * 1000)) }) },
+        { value: "1h", title: t("range.1h"), when: t("range.toNow", { from: formatShort(new Date(now.getTime() - 60 * 60 * 1000)) }) },
+        { value: "6h", title: t("range.6h"), when: t("range.toNow", { from: formatShort(new Date(now.getTime() - 6 * 60 * 60 * 1000)) }) },
+        { value: "24h", title: t("range.24h"), when: t("range.toNow", { from: formatShort(new Date(now.getTime() - 24 * 60 * 60 * 1000)) }) },
+        { value: "today", title: t("range.today"), when: t("range.toNow", { from: formatShort(todayStart) }) },
+        { value: "yesterday", title: t("range.yesterday"), when: t("range.span", { from: formatShort(startOfLocalDay(yesterday)), to: formatShort(endOfLocalDay(yesterday)) }) },
+        { value: "7d", title: t("range.7d"), when: t("range.toNow", { from: formatShort(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)) }) },
+        { value: "custom", title: t("range.custom"), when: t("range.customWhen") },
       ];
     }
 
@@ -1520,7 +1920,7 @@
     }
 
     function rangeTitle(value) {
-      return rangeOptionMeta(new Date()).find((opt) => opt.value === value)?.title ?? "全部时间";
+      return rangeOptionMeta(new Date()).find((opt) => opt.value === value)?.title ?? t("range.all");
     }
 
     function syncRangeUi() {
@@ -1532,7 +1932,7 @@
         const fromDate = partsToLocalDate($("log-from-date").value, $("log-from-time").value, "start");
         const toDate = partsToLocalDate($("log-to-date").value, $("log-to-time").value, "end");
         if (fromDate && toDate) {
-          label.textContent = `${formatShort(fromDate)} 至 ${formatShort(toDate)}`;
+          label.textContent = t("range.span", { from: formatShort(fromDate), to: formatShort(toDate) });
           return;
         }
       }
@@ -1614,7 +2014,7 @@
 
     function fillSelect(id, items, current) {
       const el = $(id);
-      el.innerHTML = `<option value="">全部</option>` + items.map((item) => {
+      el.innerHTML = `<option value="">${t("common.all")}</option>` + items.map((item) => {
         const value = typeof item === "string" || typeof item === "number" ? String(item) : item.value;
         const label = typeof item === "string" || typeof item === "number" ? String(item) : item.label;
         return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
@@ -1630,10 +2030,10 @@
       const model = $("log-model").value;
       const key = $("log-key").value;
       const status = $("log-status").value;
-      fillSelect("log-model", (data.models ?? []).map((m) => ({ value: m, label: m || "(空)" })), model);
+      fillSelect("log-model", (data.models ?? []).map((m) => ({ value: m, label: m || t("common.empty") })), model);
       fillSelect("log-key", (data.keys ?? []).map((row) => ({
         value: row.id,
-        label: `${row.name ?? "已删除"} · ${row.key_prefix ?? row.id.slice(0, 8)}`,
+        label: `${row.name ?? t("common.deleted")} · ${row.key_prefix ?? row.id.slice(0, 8)}`,
       })), key);
       fillSelect("log-status", (data.statuses ?? []).map((code) => ({ value: String(code), label: String(code) })), status);
     }
@@ -1655,14 +2055,14 @@
         }
       }
       if (logs.length === 0) {
-        $("logs-view").innerHTML = '<div class="empty"><span class="glyph">∅</span>暂无匹配日志。</div>';
+        $("logs-view").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("logs.empty") + '</div>';
         renderPager(limit);
         return;
       }
       $("logs-view").innerHTML = `<div class="table-wrap"><table class="logs-table">
         <thead><tr>
-          <th>时间</th><th>Key</th><th>模型</th><th>状态</th><th class="num">耗时</th>
-          <th class="num">输入</th><th class="num">输出</th><th class="num">合计</th><th>错误</th>
+          <th>${t("logs.colTime")}</th><th>${t("logs.colKey")}</th><th>${t("logs.colModel")}</th><th>${t("logs.colStatus")}</th><th class="num">${t("logs.colDur")}</th>
+          <th class="num">${t("logs.colIn")}</th><th class="num">${t("logs.colOut")}</th><th class="num">${t("logs.colTotal")}</th><th>${t("logs.colErr")}</th>
         </tr></thead>
         <tbody>${logs.map(logRow).join("")}</tbody>
       </table></div>`;
@@ -1683,10 +2083,10 @@
 
     function logRow(row) {
       const error = row.error_code ? escapeHtml(String(row.error_code)) : '<span class="muted">—</span>';
-      const streamTag = row.stream ? '<span class="tag">流式</span>' : "";
-      const detailTag = row.has_detail ? '<span class="tag">正文</span>' : "";
+      const streamTag = row.stream ? '<span class="tag">' + t("logs.stream") + '</span>' : "";
+      const detailTag = row.has_detail ? '<span class="tag">' + t("logs.body") + '</span>' : "";
       const id = escapeHtml(String(row.id ?? ""));
-      return `<tr class="log-row" data-log-id="${id}" tabindex="0" title="点击查看详情">
+      return `<tr class="log-row" data-log-id="${id}" tabindex="0" title="${escapeHtml(t("logs.clickDetail"))}">
         <td class="muted nowrap">${escapeHtml(formatTime(row.created_at))}</td>
         <td class="nowrap"><code>${escapeHtml(String(row.key_prefix ?? row.key_name ?? ""))}</code></td>
         <td class="nowrap"><code>${escapeHtml(String(row.model ?? ""))}</code>${detailTag}</td>
@@ -1703,7 +2103,7 @@
       if (row.duration_ms == null) return "—";
       let html = `${fmtNum(row.duration_ms)}ms`;
       if (row.upstream_ms != null && row.gateway_ms != null) {
-        html += `<span class="hint">上游 ${fmtNum(row.upstream_ms)} · 网关 ${fmtNum(row.gateway_ms)}</span>`;
+        html += `<span class="hint">${t("logs.upGate", { up: fmtNum(row.upstream_ms), gw: fmtNum(row.gateway_ms) })}</span>`;
       }
       return html;
     }
@@ -1713,7 +2113,7 @@
       const data = await adminApi("GET", `/admin/api/logs/${encodeURIComponent(id)}`, null, "logs-error");
       if (!data) return;
       logModalReturnFocus = document.activeElement;
-      $("log-modal-title").textContent = `请求详情 · ${id}`;
+      $("log-modal-title").textContent = t("modal.titleId", { id });
       $("log-modal-body").innerHTML = renderLogDetail(data);
       $("log-modal").classList.remove("hidden");
       $("app")?.setAttribute("inert", "");
@@ -1722,24 +2122,30 @@
 
     function renderLogDetail(row) {
       const meta = [
-        ["时间", formatTime(row.created_at)],
-        ["模型", String(row.model ?? "")],
-        ["状态", String(row.http_status ?? "")],
-        ["总耗时", row.duration_ms == null ? "—" : `${fmtNum(row.duration_ms)} ms`],
-        ["上游耗时", row.upstream_ms == null ? "—" : `${fmtNum(row.upstream_ms)} ms`],
-        ["网关耗时", row.gateway_ms == null ? "—" : `${fmtNum(row.gateway_ms)} ms`],
+        [t("modal.time"), formatTime(row.created_at)],
+        [t("modal.model"), String(row.model ?? "")],
+        [t("modal.status"), String(row.http_status ?? "")],
+        [t("modal.dur"), row.duration_ms == null ? "—" : `${fmtNum(row.duration_ms)} ms`],
+        [t("modal.up"), row.upstream_ms == null ? "—" : `${fmtNum(row.upstream_ms)} ms`],
+        [t("modal.gw"), row.gateway_ms == null ? "—" : `${fmtNum(row.gateway_ms)} ms`],
         ["Key", String(row.key_prefix ?? row.key_name ?? row.api_key_id ?? "")],
-        ["错误", row.error_code ? String(row.error_code) : "—"],
+        [t("modal.err"), row.error_code ? String(row.error_code) : "—"],
+        [t("modal.in"), row.input_tokens == null ? "—" : fmtNum(row.input_tokens)],
+        [t("modal.out"), row.output_tokens == null ? "—" : fmtNum(row.output_tokens)],
+        [t("modal.total"), row.total_tokens == null ? "—" : fmtNum(row.total_tokens)],
+        [t("modal.cacheR"), row.cache_read_tokens == null ? "—" : fmtNum(row.cache_read_tokens)],
+        [t("modal.cacheW"), row.cache_write_tokens == null ? "—" : fmtNum(row.cache_write_tokens)],
+        [t("modal.reason"), row.reasoning_tokens == null ? "—" : fmtNum(row.reasoning_tokens)],
       ];
       const metaHtml = `<div class="modal-meta">${meta.map(([k, v]) =>
         `<div class="meta-item"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div></div>`,
       ).join("")}</div>`;
       const requestBlock = row.request_detail
-        ? `<div class="detail-block"><h4>请求</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.request_detail))}</pre></div>`
-        : `<div class="detail-empty">未记录请求正文。在 <code>gateway.toml</code> 设置 <code>[logs] detailed = true</code> 并重启后生效。</div>`;
+        ? `<div class="detail-block"><h4>${t("modal.req")}</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.request_detail))}</pre></div>`
+        : `<div class="detail-empty">${t("modal.noReq")}</div>`;
       const responseBlock = row.response_detail
-        ? `<div class="detail-block"><h4>响应</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.response_detail))}</pre></div>`
-        : `<div class="detail-empty">未记录响应正文。开启详细日志后可查看助手输出与用量。</div>`;
+        ? `<div class="detail-block"><h4>${t("modal.res")}</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.response_detail))}</pre></div>`
+        : `<div class="detail-empty">${t("modal.noRes")}</div>`;
       return metaHtml + requestBlock + responseBlock;
     }
 
@@ -1797,9 +2203,9 @@
       const pages = Math.max(1, Math.ceil(logTotal / limit) || 1);
       pager.classList.toggle("hidden", logTotal === 0 && logPage === 1);
       pager.innerHTML = `
-        <button class="btn btn-secondary btn-small" type="button" id="log-prev" ${logPage <= 1 ? "disabled" : ""}>上一页</button>
-        <span class="muted">第 ${fmtNum(logPage)} / ${fmtNum(pages)} 页 · 共 ${fmtNum(logTotal)} 条</span>
-        <button class="btn btn-secondary btn-small" type="button" id="log-next" ${logPage >= pages ? "disabled" : ""}>下一页</button>
+        <button class="btn btn-secondary btn-small" type="button" id="log-prev" ${logPage <= 1 ? "disabled" : ""}>${t("logs.prev")}</button>
+        <span class="muted">${t("logs.page", { page: fmtNum(logPage), pages: fmtNum(pages), total: fmtNum(logTotal) })}</span>
+        <button class="btn btn-secondary btn-small" type="button" id="log-next" ${logPage >= pages ? "disabled" : ""}>${t("logs.next")}</button>
       `;
       $("log-prev")?.addEventListener("click", () => { if (logPage > 1) { logPage -= 1; loadLogs(); } });
       $("log-next")?.addEventListener("click", () => { if (logPage < pages) { logPage += 1; loadLogs(); } });
@@ -1812,22 +2218,22 @@
       const retention = Number(data.tokens?.retention_days ?? logRetentionDays);
       if (Number.isFinite(retention) && retention > 0) {
         logRetentionDays = retention;
-        $("stats-window-hint").textContent = `${logRetentionDays} 天`;
-        $("logs-retention-hint").textContent =
-          `SQLite 账本，最多留 ${logRetentionDays} 天。` +
-          (logDetailedEnabled ? " 已开启详细进出日志。" : " 详细进出日志默认关闭，可在 gateway.toml 的 [logs] detailed 开启。") +
-          " 时间按浏览器本机时区和 12/24 小时制显示。";
+        $("stats-window-hint").textContent = t("logs.days", { days: logRetentionDays });
+        $("logs-retention-hint").textContent = t("logs.hint", {
+          days: logRetentionDays,
+          detail: logDetailedEnabled ? t("logs.detailOn") : t("logs.detailOff"),
+        });
       }
       const models = Array.isArray(data.tokens?.by_model) ? data.tokens.by_model : [];
       const statuses = Array.isArray(data.by_status) ? data.by_status : [];
       if (models.length === 0 && statuses.length === 0) {
-        $("stats-view").innerHTML = '<div class="empty"><span class="glyph">∅</span>还没有请求记录。</div>';
+        $("stats-view").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("tok.empty") + '</div>';
         return;
       }
       const modelTable = models.length === 0 ? "" : `<div class="table-wrap"><table>
-        <thead><tr><th>模型</th><th class="num">请求</th><th class="num">输入</th><th class="num">输出</th><th class="num">合计</th></tr></thead>
+        <thead><tr><th>${t("tok.model")}</th><th class="num">${t("tok.req")}</th><th class="num">${t("tok.inShort")}</th><th class="num">${t("tok.outShort")}</th><th class="num">${t("tok.total")}</th></tr></thead>
         <tbody>${models.map((row) => `<tr>
-          <td><code>${escapeHtml(String(row.model || "(空)"))}</code></td>
+          <td><code>${escapeHtml(String(row.model || t("common.empty")))}</code></td>
           <td class="num">${fmtNum(row.request_count)}</td>
           <td class="num">${fmtNum(row.input_tokens)}</td>
           <td class="num">${fmtNum(row.output_tokens)}</td>
@@ -1836,7 +2242,7 @@
       </table></div>`;
       const statusLine = statuses.length === 0
         ? ""
-        : `<p class="muted" style="margin:12px 0 0">HTTP 状态：${statuses.map((row) => `${statusPill(row.http_status)} × ${fmtNum(row.count)}`).join("  ")}</p>`;
+        : `<p class="muted" style="margin:12px 0 0">${t("logs.httpStatus")}${statuses.map((row) => `${statusPill(row.http_status)} × ${fmtNum(row.count)}`).join("  ")}</p>`;
       $("stats-view").innerHTML = modelTable + statusLine;
     }
 
@@ -1857,7 +2263,7 @@
 
     async function adminApi(method, path, body, errorId) {
       if (!adminKey) {
-        if (errorId) showError(errorId, "尚未连接管理台。");
+        if (errorId) showError(errorId, t("err.notConnected"));
         return null;
       }
       try {
@@ -1878,8 +2284,8 @@
               showError(
                 errorId,
                 /^[\s\S]*<(!doctype|html|head|body)\b/i.test(text)
-                  ? "这个地址返回的是 HTML 页面，不是 cursor-api 的 JSON。请把本文件放回 cursor-api/public/admin.html，由 cursor-api 进程提供（http://localhost:8787/admin）。"
-                  : "返回的不是 JSON。可能本文件没有被 cursor-api 进程提供，或路由不匹配。",
+                  ? t("err.html")
+                  : t("err.notJson"),
               );
             }
             return null;
@@ -1896,7 +2302,7 @@
             showError(
               errorId,
               message === "Invalid API key" || message === "Invalid ADMIN_ACCESS_KEY"
-                ? "管理密钥不正确。请填 .env 的 ADMIN_ACCESS_KEY，不要填 CURSOR_API_KEY 或客户端 Key。"
+                ? t("err.badAdmin")
                 : message,
             );
           }
@@ -1908,7 +2314,7 @@
           showError(
             errorId,
             err instanceof Error && err.message.includes("Failed to fetch")
-              ? "连不上网关。确认 cursor-api 进程已在跑，且本文件由其进程同源提供。"
+              ? t("err.fetch")
               : (err instanceof Error ? err.message : String(err)),
           );
         }
@@ -1919,7 +2325,7 @@
     async function copyText(value, btn) {
       const text = String(value ?? "");
       if (text === "") {
-        toast("没有可复制的内容");
+        toast(t("err.copyEmpty"));
         return;
       }
       let ok = false;
@@ -1935,15 +2341,15 @@
         ok = copyTextFallback(text);
       }
       if (ok) {
-        toast("已复制");
+        toast(t("common.copied"));
         if (btn) {
           const prev = btn.textContent;
-          btn.textContent = "已复制";
+          btn.textContent = t("common.copied");
           window.setTimeout(() => { btn.textContent = prev; }, 1200);
         }
         return;
       }
-      toast("复制失败，请手动选中");
+      toast(t("err.copyFail"));
     }
 
     function copyTextFallback(text) {
@@ -1979,7 +2385,7 @@
       toastTimer = window.setTimeout(() => el.classList.add("hidden"), 1400);
     }
 
-    function setLoading(id, label = "加载中") {
+    function setLoading(id, label = t("common.loading")) {
       const el = $(id);
       if (el) el.innerHTML = `<span class="loading">${label}</span>`;
     }

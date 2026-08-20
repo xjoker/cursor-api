@@ -14,6 +14,7 @@ import {
   listRequestLogs,
   requestStats,
   SCHEMA_VERSION,
+  tokenStatsByKey,
 } from "./db.js";
 import { GatewayError, invalidRequest } from "./errors.js";
 import { readJsonBody, sendJson, sendSimpleError } from "./http.js";
@@ -85,7 +86,22 @@ async function dispatch(
   }
 
   if (method === "GET" && pathname === "/admin/api/keys") {
-    sendJson(res, 200, { keys: listApiKeys(ctx.db).map(publicKey) });
+    const usageById = new Map(tokenStatsByKey(ctx.db).map((row) => [row.api_key_id, row]));
+    sendJson(res, 200, {
+      keys: listApiKeys(ctx.db).map((key) => {
+        const usage = usageById.get(key.id);
+        return {
+          ...publicKey(key),
+          request_count: usage?.request_count ?? 0,
+          input_tokens: usage?.input_tokens ?? 0,
+          output_tokens: usage?.output_tokens ?? 0,
+          total_tokens: usage?.total_tokens ?? 0,
+          cache_read_tokens: usage?.cache_read_tokens ?? 0,
+          cache_write_tokens: usage?.cache_write_tokens ?? 0,
+          unknown_usage_count: usage?.unknown_usage_count ?? 0,
+        };
+      }),
+    });
     return;
   }
 

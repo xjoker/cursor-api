@@ -361,6 +361,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       input_tokens: usage?.prompt_tokens ?? null,
       output_tokens: usage?.completion_tokens ?? null,
       total_tokens: usage?.total_tokens ?? null,
+      cache_read_tokens: usage?.cache_read_tokens ?? null,
+      cache_write_tokens: usage?.cache_write_tokens ?? null,
+      reasoning_tokens: usage?.reasoning_tokens ?? null,
       error_code: errorCode,
       created_at: new Date().toISOString(),
       upstream_ms: upstreamMs,
@@ -380,6 +383,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       input_tokens: usage?.prompt_tokens ?? null,
       output_tokens: usage?.completion_tokens ?? null,
       total_tokens: usage?.total_tokens ?? null,
+      cache_read_tokens: usage?.cache_read_tokens ?? null,
+      cache_write_tokens: usage?.cache_write_tokens ?? null,
       error_code: errorCode,
     });
   }

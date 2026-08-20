@@ -9,6 +9,22 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260820.4] — 2026-08-20
+
+Admin bilingual UI, per-key token/cache stats, and English-only docs hygiene.
+
+### Added
+
+- Admin UI bilingual: default English; browser `zh*` (incl. Traditional Chinese) selects Chinese; EN / 中文 toggle with `localStorage` override.
+- Persist `cache_read_tokens` / `cache_write_tokens` / `reasoning_tokens` on request logs (schema v4).
+- Per-key token and cache-read totals on `GET /admin/api/keys` and admin key table.
+
+### Changed
+
+- English docs (`README.md`, `CHANGELOG.md`, `.env.example`) no longer mix Chinese prose; Chinese readers use `README.zh-CN.md`.
+
+---
+
 ## [20260820.3] — 2026-08-20
 
 OpenAI chat contract fixes for cancelled runs and unknown usage.
@@ -129,14 +145,3 @@ When cutting a release, update in one commit:
 4. Docker tag / `/health` — confirm `version` and `git_commit` after deploy.
 
 See [`README.md`](./README.md) for deploy commands.
-
----
-
-## 变更说明（中文摘要）
-
-| 版本 | 要点 |
-|------|------|
-| **20260820.1** | 配置合并为单个 `gateway.toml`；容器可自动创建空配置；TOML 部署、双语文档、测试与 Compose UID 说明。 |
-| **20260819.1** | 首个 MVP：OpenAI 兼容 Chat、客户端 Key、管理台、请求日志、Docker 部署。 |
-
-完整英文条目见各版本节；使用说明见 [`README.md`](./README.md) / [`README.zh-CN.md`](./README.zh-CN.md).

@@ -118,7 +118,7 @@ curl -s http://127.0.0.1:8787/health
 ## 4. 接入客户端
 
 1. 浏览器打开 **http://127.0.0.1:8787/admin/**，填入 `admin_access_key`。
-2. **Client Keys** → 创建 Key（`cgk_` 开头），只显示一次。
+2. **客户端 Key** → 创建 Key（`cgk_` 开头），只显示一次。
 3. 客户端配置：
 
 ```text

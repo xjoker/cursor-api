@@ -138,6 +138,9 @@ test("request logs are pruned to max_rows", async () => {
     error_code: null,
     upstream_ms: 1,
     gateway_ms: 0,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    reasoning_tokens: null,
     request_detail: null,
     response_detail: null,
   };
@@ -186,6 +189,9 @@ test("request logs are pruned by max_detail_bytes", async () => {
       created_at: new Date(Date.now() - (4 - i) * 60_000).toISOString(),
       upstream_ms: 1,
       gateway_ms: 0,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+      reasoning_tokens: null,
       request_detail: payload,
       response_detail: null,
     });

@@ -4,7 +4,7 @@
 
 ![Built-in admin: overview, client keys, request logs, and OpenAI base URL for clients](./docs/images/admin-overview.png)
 
-**中文文档：** [`README.zh-CN.md`](./README.zh-CN.md) · **Changelog:** [`CHANGELOG.md`](./CHANGELOG.md)
+**Chinese:** [`README.zh-CN.md`](./README.zh-CN.md) · **Changelog:** [`CHANGELOG.md`](./CHANGELOG.md)
 
 **You need:** [Docker Compose](https://docs.docker.com/compose/) and a [Cursor User API Key](https://cursor.com/settings).
 
@@ -41,7 +41,7 @@ services:
         max-file: "3"
 ```
 
-启动：
+Start:
 
 ```bash
 mkdir -p cursor-api && cd cursor-api
