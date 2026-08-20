@@ -1,0 +1,13 @@
+node_modules/
+dist/
+data/*
+!data/config/
+data/config/*
+!data/config/*.example
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+temp/
+.AIINFO/

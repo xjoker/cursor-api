@@ -1,0 +1,15 @@
+# Copy to gateway.toml, fill values, then: chmod 600 gateway.toml
+# Do not commit gateway.toml with real secrets.
+
+host = "0.0.0.0"
+port = 8787
+
+cursor_api_key = ""
+admin_access_key = ""
+api_key_pepper = ""
+
+# data_dir = "data"
+# cursor_workspace = "data/workspace"
+
+# Docker (NODE_ENV=production): missing gateway.toml is auto-created empty on first start.
+# Local npm dev defaults to 127.0.0.1:8787 when host/port are omitted.
