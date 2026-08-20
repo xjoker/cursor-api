@@ -1,33 +1,45 @@
 # cursor-api
 
-Minimal **OpenAI-compatible Chat Completions gateway** backed by the official [`@cursor/sdk`](https://cursor.com/docs/sdk/typescript). Expose Cursor models to standard OpenAI clients, issue per-client API keys, and review traffic in a built-in admin UI.
+**OpenAI-compatible gateway for Cursor models.** Point any OpenAI client at `/v1`; manage client keys and logs in a built-in admin UI.
 
-**中文文档：** [`README.zh-CN.md`](./README.zh-CN.md)
+**中文文档：** [`README.zh-CN.md`](./README.zh-CN.md) · **Changelog:** [`CHANGELOG.md`](./CHANGELOG.md)
 
-**Version:** [`VERSION`](./VERSION) · **Changelog:** [`CHANGELOG.md`](./CHANGELOG.md)
+**You need:** [Docker Compose](https://docs.docker.com/compose/) and a [Cursor User API Key](https://cursor.com/settings).
+
+## Deploy in 4 steps
+
+1. **Start the container** — `docker compose up -d`
+2. **Config is created for you** — `data/config/gateway.toml` (empty template on first run)
+3. **Edit that file** — fill in three secrets (see below)
+4. **Restart** — `docker compose restart` → gateway listens on `http://127.0.0.1:8787`
+
+No manual copy of example files. No secrets in the image or in git.
 
 ---
 
-## Quick start (Docker Compose)
-
-Fastest path from zero to a working endpoint on `http://127.0.0.1:8787`.
-
-### 1. Prerequisites
-
-- Docker with Compose
-- A **Cursor User API Key** ([Cursor dashboard](https://cursor.com/settings))
-- Node **22.13+** only if you run from source (see [Local development](#local-development))
-
-### 2. Configure secrets
-
-All settings live in one file: `data/config/gateway.toml` (**not in git**).
+## 1. Start the container
 
 ```bash
-cp data/config/gateway.toml.example data/config/gateway.toml
-chmod 600 data/config/gateway.toml
+cd cursor-api   # clone this repository first
+export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)   # Linux: set before the first start
+docker compose up -d
 ```
 
-Edit `data/config/gateway.toml`:
+The first start may exit until secrets are filled in — that is expected. It still creates `data/config/gateway.toml` under the mounted `data/` folder.
+
+**Linux:** run the `GATEWAY_UID` / `GATEWAY_GID` lines **before** the first `docker compose up -d`, so the auto-created config file is owned by your user. If you already started once as UID 1000, fix ownership then restart:
+
+```bash
+sudo chown "$(id -u):$(id -g)" data/config/gateway.toml
+export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)
+docker compose up -d
+```
+
+---
+
+## 2. Edit `data/config/gateway.toml`
+
+Open the file the container created (or create it from [`gateway.toml.example`](./data/config/gateway.toml.example) if you run from source).
 
 ```toml
 host = "0.0.0.0"
@@ -38,48 +50,41 @@ admin_access_key = "pick-a-long-random-admin-secret"
 api_key_pepper = "pick-another-long-random-string"
 ```
 
-| Key | Purpose |
-|-----|---------|
-| `cursor_api_key` | Upstream Cursor credential (single account) |
-| `admin_access_key` | Unlocks `/admin/` and `/admin/api/*` |
-| `api_key_pepper` | HMAC salt for stored client key digests |
-| `host`, `port` | Listen address (optional; see defaults below) |
-
-> **Do not commit** `gateway.toml`. Template: `data/config/gateway.toml.example`.  
-> **Docker:** if `gateway.toml` is missing on first start, the container creates an empty file under the mounted `data/` volume — fill secrets and restart.
-
-### 3. Start the gateway
+| Key | What it is |
+|-----|------------|
+| `cursor_api_key` | Your Cursor account key (upstream) |
+| `admin_access_key` | Password for `/admin/` |
+| `api_key_pepper` | Random string used to hash client keys |
 
 ```bash
-# Stop anything else bound to 8787 first.
-docker compose build --build-arg GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
-docker compose up -d
+chmod 600 data/config/gateway.toml
+```
+
+---
+
+## 3. Restart
+
+```bash
+docker compose restart
 curl -s http://127.0.0.1:8787/health
 ```
 
-Expected: JSON with `status`, `version`, `git_commit`, `schema_version`.
+You should see `"status":"ok"`.
 
-**Linux bind-mount:** if the container cannot read `gateway.toml` (`chmod 600`), match the file owner:
+---
 
-```bash
-export GATEWAY_UID=$(id -u) GATEWAY_GID=$(id -g)
-docker compose up -d
-```
-
-Optional overrides: [`.env.example`](./.env.example).
-
-### 4. Client key & connect
+## 4. Connect a client
 
 1. Open **http://127.0.0.1:8787/admin/** → enter `admin_access_key`.
-2. **Client Keys** → create a key (`cgk_…`). Copy once; only a hash is stored.
-3. Point any OpenAI-compatible client at:
+2. **Client Keys** → create a key (`cgk_…`). Copy it once.
+3. Configure your OpenAI-compatible app:
 
 ```text
 OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 OPENAI_API_KEY=<your cgk_ client key>
 ```
 
-**Smoke test:**
+**Quick test:**
 
 ```bash
 curl -s http://127.0.0.1:8787/v1/chat/completions \
@@ -88,150 +93,65 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model":"composer-2.5","messages":[{"role":"user","content":"Reply with PONG only."}]}'
 ```
 
-Browsers on `/` → `/admin/`; `curl /` → JSON discovery.
-
 ---
 
 ## Client integration
 
-### Authentication
+**Auth:** `Authorization: Bearer cgk_...` or `X-Api-Key: cgk_...`
 
-Either header works:
+| Method | Path |
+|--------|------|
+| `POST` | `/v1/chat/completions` |
+| `GET` | `/v1/models`, `/v1/models/{id}` |
 
-```http
-Authorization: Bearer cgk_...
-X-Api-Key: cgk_...
-```
-
-### Supported OpenAI surface
-
-| Method | Path | Auth |
-|--------|------|------|
-| `POST` | `/v1/chat/completions` | Client key |
-| `GET` | `/v1/models` | Client key |
-| `GET` | `/v1/models/{id}` | Client key |
-| `OPTIONS` | `/v1/*` | CORS preflight |
-
-**Request body (essentials)**
-
-- **Required:** `model`, non-empty `messages`
-- **Streaming:** `stream: true` (boolean only)
-- **Vision:** `image_url` with `data:` or `http(s):` URLs
-- **Forwarded to Cursor:** `params`, `variant`, `reasoning_effort`, `verbosity`, `fast`, `optimize_for`
-- **Accepted but ignored:** `temperature`, `top_p`, …
-- **Not supported:** tools / function calling, audio, `n > 1`, non-text `response_format`
-
-Responses may include `cursor.cost` and usage from the SDK.
-
-### Example: OpenAI Python SDK
+Streaming (`stream: true`), vision (`image_url`), and Cursor knobs (`params`, `variant`, `reasoning_effort`, …) are supported. Tool calling and audio are not.
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:8787/v1",
-    api_key="cgk_YOUR_KEY",
-)
-
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="cgk_YOUR_KEY")
 print(client.chat.completions.create(
     model="composer-2.5",
     messages=[{"role": "user", "content": "Hello"}],
 ).choices[0].message.content)
 ```
 
-### Example: environment variables
-
-```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
-export OPENAI_API_KEY=cgk_YOUR_KEY
-```
-
 ---
 
 ## Admin UI
 
-Single-page console: `/admin/` (alias `/management.html`).
+Browser console at `/admin/`: overview, client keys, request logs (time filters, pagination).
 
-| Area | Description |
-|------|-------------|
-| **Overview** | Gateway status, base URL hint, recent activity |
-| **Client Keys** | Create, enable/disable client keys |
-| **Request logs** | Filter by time range, status, model; paginated history |
-
-Admin REST API: `/admin/api/*`
-
-```http
-Authorization: Bearer <admin_access_key>
-X-Management-Key: <admin_access_key>
-```
-
-`GET /v1/usage` and `x-ratelimit-*` headers, when present, reflect **gateway client-key quotas**, not Cursor account balance.
+Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`).
 
 ---
 
-## Configuration
+## Configuration reference
 
-**Priority (highest wins):** environment variables → `.env` → `data/config/gateway.toml` → defaults
+Single file: `data/config/gateway.toml`. Optional overrides: [`.env.example`](./.env.example).
 
-| File | Contents |
-|------|----------|
-| `data/config/gateway.toml` | Secrets + `host`, `port`, optional `data_dir`, `cursor_workspace` |
+**Priority:** environment variables → `.env` → TOML → defaults.
 
-**Listen defaults**
-
-| Context | Address | Port |
-|---------|---------|------|
-| `npm run dev` | `127.0.0.1` | `8787` |
-| Docker (`NODE_ENV=production`) | `0.0.0.0` | `8787` |
-
-SQLite and workspace live under `data/` (Compose volume). Do not bake secrets into the image or Compose `environment` for routine deploys.
-
-See [`.env.example`](./.env.example) for optional env keys.
+All runtime data (SQLite, workspace) lives in `./data` and persists across restarts.
 
 ---
 
 ## Local development
 
+Requires Node **22.13+**. Copy and fill `data/config/gateway.toml`, then:
+
 ```bash
-npm ci
-cp data/config/gateway.toml.example data/config/gateway.toml
-chmod 600 data/config/gateway.toml
-npm run dev          # node --experimental-strip-types
-npm run build && npm start
-npm test
-npm run typecheck
+npm ci && npm run dev
 ```
-
-| Check | Path |
-|-------|------|
-| Health | `GET /health` |
-| Discovery | `GET /` (JSON) or browser → `/admin/` |
 
 ---
 
-## Operations
+## Health
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Liveness, `version`, `git_commit`, `schema_version` |
-| `GET /` | JSON API map |
-
-**Docker:** multi-stage, `linux/amd64`, `TZ=UTC`. Tag with [`VERSION`](./VERSION). Pass `GIT_COMMIT` at build time.
-
-**Upgrade:** read [`CHANGELOG.md`](./CHANGELOG.md), back up `data/` if needed, rebuild, confirm `/health`.
-
----
-
-## Architecture
-
-```text
-OpenAI client  --Bearer cgk_*-->  cursor-api  --Cursor SDK-->  Cursor Cloud
-                                      |
-                                      +-- SQLite (keys, request logs)
-                                      +-- Admin UI (/admin/)
-```
-
-Single upstream Cursor account. No multi-upstream routing in this MVP.
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Version and liveness |
+| `GET /` | JSON API map (`curl`) or redirect to admin (browser) |
 
 ---
 

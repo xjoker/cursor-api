@@ -11,6 +11,10 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ## [Unreleased]
 
+### Added
+
+- GitHub Actions workflow `.github/workflows/docker-publish.yml` (job name **Release**): tests + `linux/amd64` GHCR push **only** on version tags or `workflow_dispatch` — no runs on branch push.
+
 ---
 
 ## [20260820.1] — 2026-08-20
@@ -93,7 +97,7 @@ When cutting a release, update in one commit:
 3. [`README.md`](./README.md) / [`README.zh-CN.md`](./README.zh-CN.md) — only if setup or integration steps changed.
 4. Docker tag / `/health` — confirm `version` and `git_commit` after deploy.
 
-See [`README.md#operations`](./README.md#operations) for deploy commands.
+See [`README.md`](./README.md) for deploy commands.
 
 ---
 
