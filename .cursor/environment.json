@@ -1,0 +1,4 @@
+{
+  "name": "cursor-api",
+  "install": "npm ci"
+}
