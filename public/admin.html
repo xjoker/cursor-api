@@ -446,6 +446,31 @@
       color: var(--meta);
       margin: 8px 0 0;
     }
+    .call-chart {
+      width: 100%;
+      height: 180px;
+      display: block;
+    }
+    .call-chart .bar { fill: var(--accent); }
+    .call-chart .bar:hover { fill: var(--accent-hover); }
+    .call-chart .axis {
+      fill: var(--muted);
+      font-size: 11px;
+      font-family: var(--font-mono);
+    }
+    .call-chart .count {
+      fill: var(--fg-2);
+      font-size: 11px;
+      font-family: var(--font-mono);
+    }
+    .syslog-fields {
+      color: var(--fg-2);
+      font-size: 12px;
+      max-width: 48ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -925,6 +950,7 @@
       <button class="nav-btn active" type="button" data-view="overview" aria-current="page" data-i18n="nav.overview">Overview</button>
       <button class="nav-btn" type="button" data-view="keys" data-i18n="nav.keys">Client keys</button>
       <button class="nav-btn" type="button" data-view="logs" data-i18n="nav.logs">Request logs</button>
+      <button class="nav-btn" type="button" data-view="syslog" data-i18n="nav.syslog">System logs</button>
       <div class="spacer"></div>
       <div class="lang-switch" role="group" aria-label="Language">
         <button type="button" class="btn btn-secondary btn-small" data-lang="en">EN</button>
@@ -946,6 +972,13 @@
           <p id="overview-retention-hint" data-i18n="overview.hint">Gateway status, token totals, and the OpenAI base URL for clients.</p>
         </div>
         <div id="overview-cards"></div>
+        <div class="panel" id="calls-panel">
+          <div class="panel-head">
+            <h3 data-i18n="overview.calls">Calls last 7 days</h3>
+            <span class="hint" data-i18n="overview.callsHint">UTC days</span>
+          </div>
+          <div id="calls-chart"><span class="loading" data-i18n="common.loading">Loading</span></div>
+        </div>
         <div class="panel">
           <div class="panel-head">
             <h3 data-i18n="overview.tokens">Tokens by model</h3>
@@ -966,6 +999,40 @@
           </div>
           <pre id="openai-snippet"></pre>
           <button class="btn btn-secondary" type="button" id="copy-snippet" style="margin-top:12px" data-i18n="overview.copySnippet">Copy snippet</button>
+        </div>
+      </section>
+
+      <section id="view-syslog" class="hidden">
+        <div class="page-head">
+          <h2 data-i18n="syslog.title">System logs</h2>
+          <p data-i18n="syslog.hint">Gateway stdout/stderr events stored in SQLite with the same retention as request logs. Secrets are redacted.</p>
+        </div>
+        <div class="panel logs-panel">
+          <div class="filters">
+            <div class="filter-item">
+              <label for="syslog-level" data-i18n="syslog.level">Level</label>
+              <select id="syslog-level">
+                <option value="" data-i18n="common.all">All</option>
+                <option value="info">info</option>
+                <option value="error">error</option>
+              </select>
+            </div>
+            <div class="filter-item page">
+              <label for="syslog-page-size" data-i18n="logs.perPage">Per page</label>
+              <select id="syslog-page-size">
+                <option value="20">20</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+              </select>
+            </div>
+            <div class="filter-actions">
+              <button id="refresh-syslog" class="btn btn-secondary" type="button" data-i18n="common.refresh">Refresh</button>
+            </div>
+          </div>
+          <p id="syslog-error" class="error" hidden></p>
+          <div id="syslog-view"><span class="loading" data-i18n="common.loading">Loading</span></div>
+          <div id="syslog-pager" class="pager hidden"></div>
         </div>
       </section>
 
@@ -1096,6 +1163,7 @@
       "nav.overview": "总览",
       "nav.keys": "客户端 Key",
       "nav.logs": "请求日志",
+      "nav.syslog": "系统日志",
       "nav.logout": "登出",
       "nav.upstream": "上游状态",
       "overview.title": "总览",
@@ -1122,8 +1190,11 @@
       "overview.snippetKey": "你的cgk_客户端Key",
       "overview.snippetAuth": "# 认证也可用请求头 X-Api-Key",
       "overview.unknownUsage": "有 {n} 条请求上游没带回用量，合计里没算进去。",
+      "overview.calls": "近 7 天调用",
+      "overview.callsHint": "按 UTC 自然日",
+      "overview.callsEmpty": "这 7 天还没有调用。",
       "keys.title": "客户端 Key",
-      "keys.help": "创建、停用、恢复。完整明文只在创建时显示一次。发给客户端的是 <code>cgk_</code> 这把，不是管理密钥。",
+      "keys.help": "创建、停用、恢复、删除。完整明文只在创建时显示一次。发给客户端的是 <code>cgk_</code> 这把，不是管理密钥。删除后历史请求日志会保留，Key 显示为已删除。",
       "keys.name": "名称",
       "keys.namePh": "例如 local-openclaw",
       "keys.create": "创建",
@@ -1143,6 +1214,16 @@
       "keys.enable": "恢复",
       "keys.disable": "停用",
       "keys.confirmDisable": "确认停用",
+      "keys.delete": "删除",
+      "keys.confirmDelete": "确认删除",
+      "syslog.title": "系统日志",
+      "syslog.hint": "网关 stdout/stderr 事件写入 SQLite，保留天数与请求日志相同。密钥类字段已打码。",
+      "syslog.level": "级别",
+      "syslog.empty": "暂无系统日志。",
+      "syslog.colTime": "时间",
+      "syslog.colLevel": "级别",
+      "syslog.colMsg": "消息",
+      "syslog.colFields": "字段",
       "logs.title": "请求日志",
       "logs.hint": "SQLite 账本，最多留 {days} 天。{detail} 时间按浏览器本机时区和 12/24 小时制显示。",
       "logs.detailOn": "已开启详细进出日志。",
@@ -1248,6 +1329,7 @@
       "nav.overview": "Overview",
       "nav.keys": "Client keys",
       "nav.logs": "Request logs",
+      "nav.syslog": "System logs",
       "nav.logout": "Log out",
       "nav.upstream": "Upstream",
       "overview.title": "Overview",
@@ -1274,8 +1356,11 @@
       "overview.snippetKey": "your_cgk_client_key",
       "overview.snippetAuth": "# Auth also accepts X-Api-Key header",
       "overview.unknownUsage": "{n} requests had no upstream usage and are excluded from totals.",
+      "overview.calls": "Calls last 7 days",
+      "overview.callsHint": "UTC calendar days",
+      "overview.callsEmpty": "No calls in these 7 days.",
       "keys.title": "Client keys",
-      "keys.help": "Create, disable, and restore. Full plaintext is shown once at creation. Clients use the <code>cgk_</code> key, not the admin key.",
+      "keys.help": "Create, disable, restore, and delete. Full plaintext is shown once at creation. Clients use the <code>cgk_</code> key, not the admin key. Deleting a key keeps its request logs (shown as deleted).",
       "keys.name": "Name",
       "keys.namePh": "e.g. local-openclaw",
       "keys.create": "Create",
@@ -1295,6 +1380,16 @@
       "keys.enable": "Enable",
       "keys.disable": "Disable",
       "keys.confirmDisable": "Confirm disable",
+      "keys.delete": "Delete",
+      "keys.confirmDelete": "Confirm delete",
+      "syslog.title": "System logs",
+      "syslog.hint": "Gateway stdout/stderr events stored in SQLite with the same retention as request logs. Secrets are redacted.",
+      "syslog.level": "Level",
+      "syslog.empty": "No system logs yet.",
+      "syslog.colTime": "Time",
+      "syslog.colLevel": "Level",
+      "syslog.colMsg": "Message",
+      "syslog.colFields": "Fields",
       "logs.title": "Request logs",
       "logs.hint": "SQLite ledger, kept up to {days} days. {detail} Times use your browser timezone and 12/24h clock.",
       "logs.detailOn": "Detailed request/response logging is on.",
@@ -1468,6 +1563,7 @@
     let logsTimer = 0;
     let currentView = "overview";
     let logPage = 1;
+    let syslogPage = 1;
     let logTotal = 0;
     let logRetentionDays = 7;
     let logDetailedEnabled = false;
@@ -1516,6 +1612,9 @@
     $("create-key").addEventListener("click", createKey);
     $("refresh-keys").addEventListener("click", loadKeys);
     $("refresh-logs").addEventListener("click", () => { loadLogFilters(true); loadLogs(); loadStats(); });
+    $("refresh-syslog").addEventListener("click", () => { syslogPage = 1; loadSyslog(); });
+    $("syslog-level").addEventListener("change", () => { syslogPage = 1; loadSyslog(); });
+    $("syslog-page-size").addEventListener("change", () => { syslogPage = 1; loadSyslog(); });
     $("copy-base").addEventListener("click", () => copyText(openaiBase(), $("copy-base")));
     $("copy-snippet").addEventListener("click", () => copyText($("openai-snippet").textContent, $("copy-snippet")));
     $("log-modal-close").addEventListener("click", closeLogModal);
@@ -1610,6 +1709,7 @@
       });
       if (name === "keys") loadKeys();
       if (name === "logs") { loadLogFilters(false); loadLogs(); loadStats(); }
+      if (name === "syslog") loadSyslog();
       if (name === "overview") loadOverview();
       syncLogTimer();
     }
@@ -1644,6 +1744,7 @@
         `<div class="cards-group">${status.join("")}</div>` +
         `<div class="cards-label">${windowLabel}</div>` +
         `<div class="cards-group">${metrics.join("")}</div>`;
+      renderCallChart(Array.isArray(data.calls_by_day) ? data.calls_by_day : []);
       renderTokenModels(tokens);
       $("openai-base").textContent = openaiBase();
       $("openai-snippet").textContent =
@@ -1652,6 +1753,39 @@
         t("overview.snippetAuth");
       $("nav-version").textContent = `v${data.version ?? "—"}`;
       $("nav-dot").className = `dot ${upstreamOk ? "ok" : "bad"}`;
+    }
+
+    function renderCallChart(series) {
+      const host = $("calls-chart");
+      if (!host) return;
+      if (!Array.isArray(series) || series.length === 0) {
+        host.innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("overview.callsEmpty") + "</div>";
+        return;
+      }
+      const max = Math.max(1, ...series.map((row) => Number(row.count) || 0));
+      const w = 640;
+      const h = 180;
+      const padL = 8;
+      const padR = 8;
+      const padT = 22;
+      const padB = 28;
+      const slot = (w - padL - padR) / series.length;
+      const barW = Math.max(8, slot - 10);
+      const innerH = h - padT - padB;
+      const bars = series.map((row, index) => {
+        const count = Number(row.count) || 0;
+        const bh = Math.round((count / max) * innerH);
+        const x = padL + index * slot + (slot - barW) / 2;
+        const y = padT + innerH - bh;
+        const label = String(row.day ?? "").slice(5);
+        const nY = bh > 14 ? y + 14 : y - 4;
+        return `<rect class="bar" x="${x.toFixed(1)}" y="${y}" width="${barW}" height="${Math.max(bh, count > 0 ? 2 : 0)}" rx="2">
+            <title>${escapeHtml(String(row.day ?? ""))}: ${fmtNum(count)}</title>
+          </rect>
+          <text class="count" x="${(x + barW / 2).toFixed(1)}" y="${nY}" text-anchor="middle">${fmtNum(count)}</text>
+          <text class="axis" x="${(x + barW / 2).toFixed(1)}" y="${h - 8}" text-anchor="middle">${escapeHtml(label)}</text>`;
+      }).join("");
+      host.innerHTML = `<svg class="call-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(t("overview.calls"))}">${bars}</svg>`;
     }
 
     function renderTokenModels(tokens) {
@@ -1748,6 +1882,7 @@
           ${disabled
             ? `<button class="btn btn-secondary btn-small" type="button" data-action="enable" data-id="${id}">${t("keys.enable")}</button>`
             : `<button class="btn btn-danger btn-small" type="button" data-action="disable" data-id="${id}">${t("keys.disable")}</button>`}
+          <button class="btn btn-danger btn-small" type="button" data-action="delete" data-id="${id}">${t("keys.delete")}</button>
         </td>
       </tr>`;
     }
@@ -1756,10 +1891,10 @@
       const id = btn.getAttribute("data-id");
       const action = btn.getAttribute("data-action");
       if (!id || !action) return;
-      if (action === "disable" && btn.dataset.confirm !== "1") {
+      if ((action === "disable" || action === "delete") && btn.dataset.confirm !== "1") {
         btn.dataset.confirm = "1";
         const prev = btn.textContent;
-        btn.textContent = t("keys.confirmDisable");
+        btn.textContent = action === "delete" ? t("keys.confirmDelete") : t("keys.confirmDisable");
         btn.classList.add("is-confirming");
         window.setTimeout(() => {
           btn.dataset.confirm = "";
@@ -1777,6 +1912,8 @@
         await adminApi("POST", `/admin/api/keys/${encodeURIComponent(id)}/disable`, {}, "keys-error");
       } else if (action === "enable") {
         await adminApi("POST", `/admin/api/keys/${encodeURIComponent(id)}/enable`, {}, "keys-error");
+      } else if (action === "delete") {
+        await adminApi("DELETE", `/admin/api/keys/${encodeURIComponent(id)}`, null, "keys-error");
       }
       await loadKeys();
     }
@@ -2209,6 +2346,62 @@
       `;
       $("log-prev")?.addEventListener("click", () => { if (logPage > 1) { logPage -= 1; loadLogs(); } });
       $("log-next")?.addEventListener("click", () => { if (logPage < pages) { logPage += 1; loadLogs(); } });
+    }
+
+    let syslogTotal = 0;
+
+    async function loadSyslog() {
+      hide("syslog-error");
+      setLoading("syslog-view");
+      const limit = Number($("syslog-page-size").value) || 50;
+      const level = $("syslog-level").value;
+      const qs = new URLSearchParams({
+        limit: String(limit),
+        offset: String((syslogPage - 1) * limit),
+      });
+      if (level) qs.set("level", level);
+      const data = await adminApi("GET", `/admin/api/system-logs?${qs}`, null, "syslog-error");
+      if (!data) return;
+      const rows = Array.isArray(data.logs) ? data.logs : [];
+      syslogTotal = Number(data.total) || 0;
+      if (rows.length === 0) {
+        $("syslog-view").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("syslog.empty") + "</div>";
+        $("syslog-pager").classList.add("hidden");
+        return;
+      }
+      $("syslog-view").innerHTML = `<div class="table-wrap"><table>
+        <thead><tr>
+          <th>${t("syslog.colTime")}</th>
+          <th>${t("syslog.colLevel")}</th>
+          <th>${t("syslog.colMsg")}</th>
+          <th>${t("syslog.colFields")}</th>
+        </tr></thead>
+        <tbody>${rows.map((row) => {
+          const levelName = String(row.level ?? "");
+          const pill = levelName === "error" ? "bad" : "ok";
+          let fieldsText = "";
+          if (row.fields) {
+            try { fieldsText = typeof row.fields === "string" ? row.fields : JSON.stringify(row.fields); }
+            catch { fieldsText = String(row.fields); }
+          }
+          return `<tr>
+            <td class="muted nowrap">${escapeHtml(formatTime(row.created_at))}</td>
+            <td><span class="pill ${pill}">${escapeHtml(levelName)}</span></td>
+            <td>${escapeHtml(String(row.message ?? ""))}</td>
+            <td><span class="syslog-fields" title="${escapeHtml(fieldsText)}">${escapeHtml(fieldsText)}</span></td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table></div>`;
+      const pages = Math.max(1, Math.ceil(syslogTotal / limit) || 1);
+      const pager = $("syslog-pager");
+      pager.classList.toggle("hidden", syslogTotal === 0 && syslogPage === 1);
+      pager.innerHTML = `
+        <button class="btn btn-secondary btn-small" type="button" id="syslog-prev" ${syslogPage <= 1 ? "disabled" : ""}>${t("logs.prev")}</button>
+        <span class="muted">${t("logs.page", { page: fmtNum(syslogPage), pages: fmtNum(pages), total: fmtNum(syslogTotal) })}</span>
+        <button class="btn btn-secondary btn-small" type="button" id="syslog-next" ${syslogPage >= pages ? "disabled" : ""}>${t("logs.next")}</button>
+      `;
+      $("syslog-prev")?.addEventListener("click", () => { if (syslogPage > 1) { syslogPage -= 1; loadSyslog(); } });
+      $("syslog-next")?.addEventListener("click", () => { if (syslogPage < pages) { syslogPage += 1; loadSyslog(); } });
     }
 
     async function loadStats() {

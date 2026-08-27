@@ -162,9 +162,9 @@ print(client.chat.completions.create(
 
 ## 管理台
 
-浏览器访问 `/admin/`：总览、客户端 Key、请求日志（时间筛选、翻页）。
+浏览器访问 `/admin/`：总览（含近 7 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除）、请求日志、系统日志。
 
-管理 API：`/admin/api/*`，用同一把 `admin_access_key`（`Authorization: Bearer` 或 `X-Management-Key`）。
+管理 API：`/admin/api/*`，用同一把 `admin_access_key`（`Authorization: Bearer` 或 `X-Management-Key`）。`DELETE /admin/api/keys/{id}` 删除客户端 Key，历史请求日志保留。`GET /admin/api/system-logs` 列出写入 SQLite 的网关 stdout/stderr 事件。
 
 ---
 
@@ -174,7 +174,7 @@ print(client.chat.completions.create(
 
 **优先级：** 环境变量 → `.env` → TOML → 默认值。
 
-SQLite 与工作区在 `./data`。请求日志按 `[logs]` 在写入时和启动时自动清理。容器 stdout 由 compose 的 `logging.options` 轮转（约 30 MB 上限）。
+SQLite 与工作区在 `./data`。请求日志和系统日志按 `[logs]` 在写入时和启动时自动清理。容器 stdout 由 compose 的 `logging.options` 轮转（约 30 MB 上限）。
 
 ---
 

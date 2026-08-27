@@ -162,9 +162,9 @@ print(client.chat.completions.create(
 
 ## Admin UI
 
-Browser console at `/admin/`: overview, client keys, request logs (time filters, pagination).
+Browser console at `/admin/`: overview (including a 7-day call chart), client keys (create / disable / enable / delete), request logs, and system logs.
 
-Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`).
+Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`). `DELETE /admin/api/keys/{id}` removes a client key and keeps its request logs. `GET /admin/api/system-logs` lists gateway stdout/stderr events stored in SQLite.
 
 ---
 
@@ -174,7 +174,7 @@ Single file: `data/config/gateway.toml`. Optional overrides: [`.env.example`](./
 
 **Priority:** environment variables → `.env` → TOML → defaults.
 
-SQLite and workspace live under `./data`. Request logs are pruned by `[logs]` limits on each write and at startup. Container stdout is rotated by compose `logging.options` (max ~30 MB).
+SQLite and workspace live under `./data`. Request logs and system logs are pruned by `[logs]` limits on each write and at startup. Container stdout is rotated by compose `logging.options` (max ~30 MB).
 
 ---
 

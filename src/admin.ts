@@ -5,6 +5,7 @@ import type { ApiKeyRow, AppConfig } from "./contracts.js";
 import { generateClientKey, requireAdminKey } from "./auth.js";
 import {
   disableApiKey,
+  deleteApiKey,
   enableApiKey,
   getApiKeyById,
   getRequestLogById,
@@ -12,6 +13,8 @@ import {
   listApiKeys,
   listRequestLogFilters,
   listRequestLogs,
+  listSystemLogs,
+  requestCallsByDay,
   requestStats,
   SCHEMA_VERSION,
   tokenStatsByKey,
@@ -51,6 +54,7 @@ async function dispatch(
   const pathname = url.pathname;
   const disableMatch = /^\/admin\/api\/keys\/([^/]+)\/disable$/.exec(pathname);
   const enableMatch = /^\/admin\/api\/keys\/([^/]+)\/enable$/.exec(pathname);
+  const deleteMatch = /^\/admin\/api\/keys\/([^/]+)$/.exec(pathname);
 
   if (method === "GET" && pathname === "/admin/api/overview") {
     const keys = listApiKeys(ctx.db);
@@ -74,6 +78,7 @@ async function dispatch(
       request_count: stats.tokens.totals.request_count,
       tokens: stats.tokens,
       stats,
+      calls_by_day: requestCallsByDay(ctx.db, 7),
       logs: {
         retention_days: ctx.config.logRetentionDays,
         max_rows: ctx.config.logMaxRows,
@@ -145,6 +150,15 @@ async function dispatch(
     return;
   }
 
+  if (method === "DELETE" && deleteMatch) {
+    const deleted = deleteApiKey(ctx.db, decodeURIComponent(deleteMatch[1] ?? ""));
+    if (!deleted) {
+      throw notFound("API key not found");
+    }
+    sendJson(res, 200, publicKey(deleted));
+    return;
+  }
+
   if (method === "GET" && pathname === "/admin/api/logs/filters") {
     sendJson(res, 200, listRequestLogFilters(ctx.db));
     return;
@@ -163,6 +177,18 @@ async function dispatch(
   if (method === "GET" && pathname === "/admin/api/logs") {
     const query = parseLogQuery(url);
     const { logs, total } = listRequestLogs(ctx.db, query);
+    sendJson(res, 200, {
+      logs,
+      total,
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return;
+  }
+
+  if (method === "GET" && pathname === "/admin/api/system-logs") {
+    const query = parseSystemLogQuery(url);
+    const { logs, total } = listSystemLogs(ctx.db, query);
     sendJson(res, 200, {
       logs,
       total,
@@ -231,6 +257,21 @@ function parseLogQuery(url: URL): {
   if (from !== null && from !== "") query.from = parseTimeBound(from, "from");
   const to = url.searchParams.get("to");
   if (to !== null && to !== "") query.to = parseTimeBound(to, "to");
+  return query;
+}
+
+function parseSystemLogQuery(url: URL): { limit: number; offset: number; level?: string } {
+  const query: { limit: number; offset: number; level?: string } = {
+    limit: parseLimit(url),
+    offset: parseOffset(url),
+  };
+  const level = url.searchParams.get("level");
+  if (level !== null && level !== "") {
+    if (level !== "info" && level !== "error") {
+      throw invalidRequest("level must be 'info' or 'error'");
+    }
+    query.level = level;
+  }
   return query;
 }
 

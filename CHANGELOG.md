@@ -9,6 +9,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.6] — 2026-08-27
+
+### Added
+
+- Admin overview shows a 7-day UTC call chart (`calls_by_day` on `GET /admin/api/overview`).
+- System logs: `logInfo` / `logError` still go to stdout/stderr, and are also stored in SQLite (`GET /admin/api/system-logs`). Secrets stay redacted.
+- Client keys can be deleted (`DELETE /admin/api/keys/{id}`). Request logs for that key remain.
+
 ## [20260827.5] — 2026-08-27
 
 ### Fixed

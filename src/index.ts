@@ -5,10 +5,10 @@ import path from "node:path";
 import { handleAdminRequest } from "./admin.js";
 import { requireClientKey } from "./auth.js";
 import { loadConfig } from "./config.js";
-import { insertRequestLog, openDb, SCHEMA_VERSION } from "./db.js";
+import { insertRequestLog, insertSystemLog, openDb, SCHEMA_VERSION } from "./db.js";
 import { GatewayError, cancelledError, httpStatusOf, modelNotFound } from "./errors.js";
 import { beginSse, corsHeaders, readJsonBody, sendJson, sendOpenAiError, writeSse } from "./http.js";
-import { logError, logInfo, truncateUtf8 } from "./log.js";
+import { logError, logInfo, setSystemLogWriter, truncateUtf8 } from "./log.js";
 import {
   encodeNonStreamCompletion,
   encodeStreamChunk,
@@ -31,6 +31,9 @@ const db = openDb(config.dataDir, {
   retentionDays: config.logRetentionDays,
   maxRows: config.logMaxRows,
   maxDetailBytes: config.logMaxDetailBytes,
+});
+setSystemLogWriter((entry) => {
+  insertSystemLog(db, entry);
 });
 if (config.logDetailed) {
   logInfo("detailed request logs enabled", {

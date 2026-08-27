@@ -603,3 +603,103 @@ test("classifyChatTurn splits user vs tool result rounds", async () => {
   assert.equal(toolTurn.results[0]?.toolCallId, "call_1");
   assert.equal(hashMessages(toolTurn.stem), hashMessages(userTurn.stem.concat([userTurn.user])));
 });
+
+function seedKey(id = "key-1") {
+  const now = new Date().toISOString();
+  return {
+    id,
+    name: "test",
+    key_prefix: "cgk_test",
+    key_digest: `digest-${id}`,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function seedLog(overrides) {
+  return {
+    api_key_id: "key-1",
+    path: "/v1/chat/completions",
+    model: "grok-4.5",
+    stream: 0,
+    http_status: 200,
+    duration_ms: 1,
+    input_tokens: 1,
+    output_tokens: 1,
+    total_tokens: 2,
+    error_code: null,
+    created_at: new Date().toISOString(),
+    upstream_ms: 1,
+    gateway_ms: 0,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    reasoning_tokens: null,
+    request_detail: null,
+    response_detail: null,
+    ...overrides,
+  };
+}
+
+test("deleteApiKey removes the key and keeps request logs", async () => {
+  const { openDb, insertApiKey, insertRequestLog, listApiKeys, listRequestLogs, deleteApiKey } =
+    await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-del-key-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
+  insertApiKey(db, seedKey("key-1"));
+  insertRequestLog(db, seedLog({ id: "req-keep" }));
+  const deleted = deleteApiKey(db, "key-1");
+  assert.equal(deleted?.id, "key-1");
+  assert.equal(listApiKeys(db).length, 0);
+  const { logs, total } = listRequestLogs(db, { limit: 10, offset: 0 });
+  assert.equal(total, 1);
+  assert.equal(logs[0]?.id, "req-keep");
+  assert.equal(logs[0]?.key_name, null);
+});
+
+test("requestCallsByDay fills seven UTC days including zeros", async () => {
+  const { openDb, insertApiKey, insertRequestLog, requestCallsByDay } = await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-calls-day-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
+  insertApiKey(db, seedKey("key-1"));
+  const today = new Date();
+  const utcDay = (offset) => {
+    const d = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - offset));
+    return d.toISOString().slice(0, 10);
+  };
+  insertRequestLog(db, seedLog({ id: "req-today", created_at: `${utcDay(0)}T12:00:00.000Z` }));
+  insertRequestLog(db, seedLog({ id: "req-today-2", created_at: `${utcDay(0)}T18:00:00.000Z` }));
+  insertRequestLog(db, seedLog({ id: "req-3d", created_at: `${utcDay(3)}T08:00:00.000Z` }));
+  const series = requestCallsByDay(db, 7);
+  assert.equal(series.length, 7);
+  assert.equal(series[0]?.day, utcDay(6));
+  assert.equal(series[6]?.day, utcDay(0));
+  assert.equal(series[6]?.count, 2);
+  assert.equal(series.find((row) => row.day === utcDay(3))?.count, 1);
+  assert.equal(series.find((row) => row.day === utcDay(1))?.count, 0);
+});
+
+test("system logs persist from logInfo and list with level filter", async () => {
+  const { openDb, listSystemLogs, pruneSystemLogs } = await import("../dist/db.js");
+  const { setSystemLogWriter, logInfo, logError } = await import("../dist/log.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-syslog-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
+  const { insertSystemLog } = await import("../dist/db.js");
+  setSystemLogWriter((entry) => insertSystemLog(db, entry));
+  try {
+    logInfo("gateway listening", { port: 8787, api_key: "should-hide" });
+    logError("cursor account lookup failed", { code: "upstream_error" });
+    const all = listSystemLogs(db, { limit: 20, offset: 0 });
+    assert.equal(all.total, 2);
+    assert.equal(all.logs[0]?.message, "cursor account lookup failed");
+    assert.equal(all.logs[1]?.message, "gateway listening");
+    const infoOnly = listSystemLogs(db, { limit: 20, offset: 0, level: "info" });
+    assert.equal(infoOnly.total, 1);
+    const fields = JSON.parse(infoOnly.logs[0]?.fields ?? "{}");
+    assert.equal(fields.api_key, "[redacted]");
+    assert.equal(fields.port, 8787);
+    const removed = pruneSystemLogs(db);
+    assert.equal(removed, 0);
+  } finally {
+    setSystemLogWriter(undefined);
+  }
+});

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type {
   ApiKeyRow,
@@ -9,6 +10,8 @@ import type {
   RequestLogFilters,
   RequestLogQuery,
   RequestLogRow,
+  SystemLogQuery,
+  SystemLogRow,
   TokenTotals,
 } from "./contracts.js";
 
@@ -18,7 +21,7 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
   maxDetailBytes: 268_435_456,
 };
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
 
@@ -57,6 +60,14 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);
+CREATE TABLE IF NOT EXISTS system_logs (
+  id TEXT PRIMARY KEY,
+  level TEXT NOT NULL,
+  message TEXT NOT NULL,
+  fields TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_system_logs_created_at ON system_logs(created_at);
 `;
 
 export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
@@ -67,8 +78,10 @@ export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY):
   db.exec("PRAGMA foreign_keys=ON");
   db.exec(SCHEMA);
   migrateRequestLogs(db);
+  migrateSystemLogs(db);
   logPolicies.set(db, policy);
   pruneRequestLogs(db);
+  pruneSystemLogs(db);
   chmodOwnerOnly(dbPath);
   chmodOwnerOnly(`${dbPath}-wal`);
   chmodOwnerOnly(`${dbPath}-shm`);
@@ -126,6 +139,18 @@ export function disableApiKey(db: DatabaseSync, id: string): ApiKeyRow | undefin
 
 export function enableApiKey(db: DatabaseSync, id: string): ApiKeyRow | undefined {
   return setApiKeyEnabled(db, id, 1);
+}
+
+export function deleteApiKey(db: DatabaseSync, id: string): ApiKeyRow | undefined {
+  const existing = getApiKeyById(db, id);
+  if (!existing) return undefined;
+  db.exec("PRAGMA foreign_keys=OFF");
+  try {
+    db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
+  } finally {
+    db.exec("PRAGMA foreign_keys=ON");
+  }
+  return existing;
 }
 
 function setApiKeyEnabled(db: DatabaseSync, id: string, enabled: 0 | 1): ApiKeyRow | undefined {
@@ -395,6 +420,31 @@ export function requestStats(db: DatabaseSync): {
   };
 }
 
+export function requestCallsByDay(db: DatabaseSync, days = 7): Array<{ day: string; count: number }> {
+  const span = Math.max(1, Math.min(Math.trunc(days), 366));
+  const now = new Date();
+  const endUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const startMs = endUtc - (span - 1) * 86_400_000;
+  const startDay = new Date(startMs).toISOString().slice(0, 10);
+  const counted = new Map(
+    db
+      .prepare(
+        `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
+         FROM request_logs
+         WHERE created_at >= ?
+         GROUP BY day`,
+      )
+      .all(`${startDay}T00:00:00.000Z`)
+      .map((row) => [asString(row.day), asNumber(row.count)] as const),
+  );
+  const series: Array<{ day: string; count: number }> = [];
+  for (let i = 0; i < span; i += 1) {
+    const day = new Date(startMs + i * 86_400_000).toISOString().slice(0, 10);
+    series.push({ day, count: counted.get(day) ?? 0 });
+  }
+  return series;
+}
+
 export function tokenStatsByKey(db: DatabaseSync): KeyTokenRow[] {
   return db
     .prepare(
@@ -447,6 +497,104 @@ function migrateRequestLogs(db: DatabaseSync): void {
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
+}
+
+function migrateSystemLogs(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS system_logs (
+      id TEXT PRIMARY KEY,
+      level TEXT NOT NULL,
+      message TEXT NOT NULL,
+      fields TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_system_logs_created_at ON system_logs(created_at);
+  `);
+}
+
+export function insertSystemLog(
+  db: DatabaseSync,
+  entry: {
+    level: string;
+    message: string;
+    fields?: Record<string, unknown> | string | null;
+    id?: string;
+    created_at?: string;
+  },
+): void {
+  const fieldsJson =
+    entry.fields === undefined || entry.fields === null
+      ? null
+      : typeof entry.fields === "string"
+        ? entry.fields
+        : JSON.stringify(entry.fields);
+  db.prepare(
+    `INSERT INTO system_logs (id, level, message, fields, created_at) VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    entry.id ?? randomUUID(),
+    entry.level,
+    entry.message,
+    fieldsJson,
+    entry.created_at ?? new Date().toISOString(),
+  );
+  pruneSystemLogs(db);
+}
+
+export function listSystemLogs(
+  db: DatabaseSync,
+  query: SystemLogQuery,
+): { logs: SystemLogRow[]; total: number } {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+  if (query.level !== undefined && query.level !== "") {
+    clauses.push("level = ?");
+    params.push(query.level);
+  }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  const totalRow = db.prepare(`SELECT COUNT(*) AS count FROM system_logs ${where}`).get(...params);
+  const logs = db
+    .prepare(
+      `SELECT id, level, message, fields, created_at
+       FROM system_logs
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(...params, query.limit, query.offset)
+    .map(mapSystemLog);
+  return { logs, total: totalRow ? asNumber(totalRow.count) : 0 };
+}
+
+export function pruneSystemLogs(db: DatabaseSync): number {
+  const policy = logPolicies.get(db) ?? DEFAULT_LOG_POLICY;
+  const cutoff = new Date(Date.now() - policy.retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  let removed = asNumber(db.prepare("DELETE FROM system_logs WHERE created_at < ?").run(cutoff).changes);
+  const countRow = db.prepare("SELECT COUNT(*) AS count FROM system_logs").get();
+  const count = countRow ? asNumber(countRow.count) : 0;
+  if (count > policy.maxRows) {
+    const excess = count - policy.maxRows;
+    removed += asNumber(
+      db
+        .prepare(
+          `DELETE FROM system_logs
+           WHERE id IN (
+             SELECT id FROM system_logs ORDER BY created_at ASC LIMIT ?
+           )`,
+        )
+        .run(excess).changes,
+    );
+  }
+  return removed;
+}
+
+function mapSystemLog(row: Record<string, unknown>): SystemLogRow {
+  return {
+    id: asString(row.id),
+    level: asString(row.level),
+    message: asString(row.message),
+    fields: asNullableString(row.fields),
+    created_at: asString(row.created_at),
+  };
 }
 
 function mapRequestLogList(row: Record<string, unknown>): RequestLogRow {

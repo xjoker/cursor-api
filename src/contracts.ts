@@ -50,6 +50,20 @@ export interface RequestLogQuery {
   to?: string;
 }
 
+export interface SystemLogRow {
+  id: string;
+  level: string;
+  message: string;
+  fields: string | null;
+  created_at: string;
+}
+
+export interface SystemLogQuery {
+  limit: number;
+  offset: number;
+  level?: string;
+}
+
 export interface RequestLogFilters {
   models: string[];
   keys: Array<{ id: string; name: string | null; key_prefix: string | null }>;
