@@ -59,7 +59,9 @@ interface LiveSession {
   parks: Map<string, ParkedCall>;
   batch: OpenAiToolCall[];
   batchReady: Deferred<OpenAiToolCall[]> | undefined;
-  flushTimer: ReturnType<typeof setImmediate> | undefined;
+  lastFlushed: string[];
+  awaitingClient: boolean;
+  flushTimer: ReturnType<typeof setTimeout> | undefined;
   parkTimer: ReturnType<typeof setTimeout> | undefined;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
   indexKeys: string[];
@@ -123,6 +125,12 @@ export function toOpenAiToolCallId(raw: string | undefined): string {
   if (cleaned.length === 0) return fallback;
   const sliced = cleaned.slice(0, 64);
   return sliced.startsWith("call") ? sliced : `call_${sliced}`;
+}
+
+/** IDs we already sent as tool_calls but the client did not return. */
+export function missingFlushedToolResults(flushedIds: string[], receivedIds: string[]): string[] {
+  const got = new Set(receivedIds);
+  return flushedIds.filter((id) => !got.has(id));
 }
 
 export function hashMessages(messages: ParsedChatMessage[]): string {
@@ -195,6 +203,8 @@ async function startNewSession(
     parks: new Map(),
     batch: [],
     batchReady: undefined,
+    lastFlushed: [],
+    awaitingClient: false,
     flushTimer: undefined,
     parkTimer: undefined,
     idleTimer: undefined,
@@ -231,6 +241,8 @@ async function sendOnSession(
 ): Promise<CursorChatResult> {
   session.text = "";
   session.batch = [];
+  session.lastFlushed = [];
+  session.awaitingClient = false;
   session.batchReady = new Deferred<OpenAiToolCall[]>();
   session.sink = options.sink;
   session.lastRequestMessages = options.request.messages;
@@ -257,10 +269,14 @@ async function sendOnSession(
 }
 
 async function continueRun(session: LiveSession, abortSignal: AbortSignal): Promise<CursorChatResult> {
-  session.batch = [];
+  session.awaitingClient = false;
+  session.lastFlushed = [];
   session.batchReady = new Deferred<OpenAiToolCall[]>();
   clearParkTimer(session);
   bindAbort(session, abortSignal);
+  if (session.batch.length > 0) {
+    flushBatch(session);
+  }
   return await raceTurn(session);
 }
 
@@ -302,6 +318,13 @@ function applyToolResults(
   session: LiveSession,
   results: Array<{ toolCallId: string; content: string }>,
 ): void {
+  const missing = missingFlushedToolResults(
+    session.lastFlushed,
+    results.map((result) => result.toolCallId),
+  );
+  if (missing.length > 0) {
+    throw invalidRequest(`Missing tool results for: ${missing.join(", ")}`);
+  }
   for (const result of results) {
     const parked = session.parks.get(result.toolCallId);
     if (!parked) {
@@ -309,10 +332,6 @@ function applyToolResults(
     }
     parked.resolve(result.content);
     session.parks.delete(result.toolCallId);
-  }
-  if (session.parks.size > 0) {
-    const missing = [...session.parks.keys()].join(", ");
-    throw invalidRequest(`Missing tool results for: ${missing}`);
   }
 }
 
@@ -347,21 +366,35 @@ function parkTool(
     name: tool.name,
     arguments: JSON.stringify(args),
   });
-  scheduleFlush(session);
+  if (!session.awaitingClient) {
+    scheduleFlush(session);
+  }
   return new Promise<string>((resolve, reject) => {
     session.parks.set(id, { resolve, reject });
   });
 }
 
+const FLUSH_DEBOUNCE_MS = 50;
+
 function scheduleFlush(session: LiveSession): void {
   if (session.flushTimer !== undefined) return;
-  session.flushTimer = setImmediate(() => {
+  session.flushTimer = setTimeout(() => {
     session.flushTimer = undefined;
-    if (session.batch.length === 0) return;
-    const calls = session.batch;
-    session.batch = [];
-    session.batchReady?.resolve(calls);
-  });
+    flushBatch(session);
+  }, FLUSH_DEBOUNCE_MS);
+}
+
+function flushBatch(session: LiveSession): void {
+  if (session.flushTimer !== undefined) {
+    clearTimeout(session.flushTimer);
+    session.flushTimer = undefined;
+  }
+  if (session.batch.length === 0) return;
+  const calls = session.batch;
+  session.batch = [];
+  session.lastFlushed = calls.map((call) => call.id);
+  session.awaitingClient = true;
+  session.batchReady?.resolve(calls);
 }
 
 async function emitDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
@@ -492,7 +525,7 @@ function indexSession(session: LiveSession, apiKeyId: string, hash: string): voi
 async function dropSession(session: LiveSession): Promise<void> {
   clearIdle(session);
   clearParkTimer(session);
-  if (session.flushTimer) clearImmediate(session.flushTimer);
+  if (session.flushTimer) clearTimeout(session.flushTimer);
   for (const key of session.indexKeys) {
     if (sessions.get(key) === session) sessions.delete(key);
   }

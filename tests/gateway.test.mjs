@@ -382,6 +382,13 @@ test("stream chunk encodes tool_calls deltas", () => {
   assert.equal(done.choices[0].finish_reason, "tool_calls");
 });
 
+test("missingFlushedToolResults only requires IDs already sent to the client", async () => {
+  const { missingFlushedToolResults } = await import("../dist/session.js");
+  assert.deepEqual(missingFlushedToolResults(["call_a"], ["call_a"]), []);
+  assert.deepEqual(missingFlushedToolResults(["call_a", "call_b"], ["call_a"]), ["call_b"]);
+  assert.deepEqual(missingFlushedToolResults(["call_a"], ["call_a", "call_late"]), []);
+});
+
 test("toOpenAiToolCallId strips newlines and unsafe characters", async () => {
   const { toOpenAiToolCallId } = await import("../dist/session.js");
   const cleaned = toOpenAiToolCallId("call-abc-1\nfc_def_0");

@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.3] — 2026-08-27
+
+### Fixed
+
+- Tool-result rounds only require results for `tool_calls` already sent on the wire. A second Cursor custom-tool park after the first flush no longer 400s (`Missing tool results`); leftover parks are returned on the next hop. Flush is debounced 50ms so true parallel calls still batch.
+
 ## [20260827.2] — 2026-08-27
 
 ### Fixed
