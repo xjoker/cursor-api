@@ -15,7 +15,7 @@ import {
   parseChatCompletionsRequest,
 } from "./openai.js";
 import { getCursorModel, listCursorModels, validateChatRequestModel, warmCursorAccount } from "./cursor.js";
-import { runChatTurn } from "./session.js";
+import { runChatTurn, validateChatTurnRequest } from "./session.js";
 import type { AppConfig, CursorChatResult, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
 
 let config: AppConfig;
@@ -198,6 +198,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     const parsed = parseChatCompletionsRequest(body);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
+    validateChatTurnRequest(parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }

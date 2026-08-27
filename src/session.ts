@@ -187,6 +187,12 @@ export function filterToolsForChoice(
   return [selected];
 }
 
+export function validateChatTurnRequest(request: ParsedChatRequest): ChatTurnKind {
+  const turn = classifyChatTurn(request.messages);
+  filterToolsForChoice(request.tools, request.tool_choice);
+  return turn;
+}
+
 export function conversationKey(apiKeyId: string, conversationId: string): string {
   return `${apiKeyId}:conv:${conversationId}`;
 }
@@ -201,7 +207,7 @@ export async function runChatTurn(options: {
   parkTimeoutMs?: number;
   db?: DatabaseSync;
 }): Promise<CursorChatResult> {
-  const turn = classifyChatTurn(options.request.messages);
+  const turn = validateChatTurnRequest(options.request);
   const lookupKey = sessionKey(options.apiKeyId, hashMessages(turn.stem));
   const conversationId = options.request.conversation_id;
   const convKey = conversationId ? conversationKey(options.apiKeyId, conversationId) : undefined;
@@ -440,7 +446,11 @@ async function sendOnSession(
   return await raceTurn(session);
 }
 
-async function continueRun(session: LiveSession, abortSignal: AbortSignal): Promise<CursorChatResult> {
+export async function continueRun(
+  session: LiveSession,
+  abortSignal: AbortSignal,
+): Promise<CursorChatResult> {
+  session.text = "";
   session.thinking = "";
   session.awaitingClient = false;
   session.lastFlushed = [];
@@ -453,16 +463,24 @@ async function continueRun(session: LiveSession, abortSignal: AbortSignal): Prom
   return await raceTurn(session);
 }
 
-async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
+export async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
   const waitPromise = session.waitPromise;
   const batchPromise = session.batchReady?.promise;
   if (!waitPromise) {
     throw new GatewayError(500, "server_error", "No active Cursor run", "server_error");
   }
-  const outcome = await Promise.race([
-    waitPromise.then((result) => ({ kind: "done" as const, result })),
-    (batchPromise ?? neverSettle()).then((calls) => ({ kind: "tools" as const, calls })),
-  ]);
+  let outcome:
+    | { kind: "done"; result: CursorChatResult }
+    | { kind: "tools"; calls: OpenAiToolCall[] };
+  try {
+    outcome = await Promise.race([
+      waitPromise.then((result) => ({ kind: "done" as const, result })),
+      (batchPromise ?? neverSettle()).then((calls) => ({ kind: "tools" as const, calls })),
+    ]);
+  } catch (error) {
+    await dropSession(session);
+    throw error;
+  }
   if (outcome.kind === "tools") {
     armParkTimeout(session);
     indexSession(
@@ -492,7 +510,7 @@ async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
   return withThinking(session, outcome.result);
 }
 
-function applyToolResults(
+export function applyToolResults(
   session: LiveSession,
   results: Array<{ toolCallId: string; content: string }>,
 ): void {
@@ -503,10 +521,20 @@ function applyToolResults(
   if (missing.length > 0) {
     throw invalidRequest(`Missing tool results for: ${missing.join(", ")}`);
   }
+  const received = new Set<string>();
+  for (const result of results) {
+    if (received.has(result.toolCallId)) {
+      throw invalidRequest(`Duplicate tool_call_id '${result.toolCallId}'`);
+    }
+    received.add(result.toolCallId);
+    if (!session.parks.has(result.toolCallId)) {
+      throw invalidRequest(`Unknown tool_call_id '${result.toolCallId}'`);
+    }
+  }
   for (const result of results) {
     const parked = session.parks.get(result.toolCallId);
     if (!parked) {
-      throw invalidRequest(`Unknown tool_call_id '${result.toolCallId}'`);
+      throw new GatewayError(500, "server_error", "Validated tool call disappeared", "server_error");
     }
     parked.resolve(result.content);
     session.parks.delete(result.toolCallId);

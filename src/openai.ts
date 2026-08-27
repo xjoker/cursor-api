@@ -79,6 +79,10 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
     throw invalidRequest("Only n=1 is supported");
   }
 
+  if ("parallel_tool_calls" in body && body.parallel_tool_calls !== true) {
+    throw invalidRequest("Only parallel_tool_calls=true is supported");
+  }
+
   if ("response_format" in body) {
     const format = body.response_format;
     if (!isPlainObject(format) || format.type !== "text") {
@@ -605,7 +609,9 @@ function parseTools(value: unknown): OpenAiToolFunction[] | undefined {
 function parseToolChoice(value: unknown): "auto" | "none" | { name: string } | undefined {
   if (value === undefined) return undefined;
   if (value === "auto" || value === "none") return value;
-  if (value === "required") return "auto";
+  if (value === "required") {
+    throw invalidRequest("tool_choice 'required' is not supported");
+  }
   if (isPlainObject(value) && value.type === "function") {
     const spec = isPlainObject(value.function) ? value.function : value;
     if (typeof spec.name !== "string" || spec.name.length === 0) {

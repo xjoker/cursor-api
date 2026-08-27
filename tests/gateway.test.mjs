@@ -555,6 +555,112 @@ test("tool_choice named function keeps only that tool", async () => {
   ]);
 });
 
+test("unsupported tool routing controls are rejected", () => {
+  const base = {
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      { type: "function", function: { name: "grep", parameters: { type: "object", properties: {} } } },
+    ],
+  };
+  assert.throws(
+    () => parseChatCompletionsRequest({ ...base, tool_choice: "required" }),
+    (error) => error instanceof Error && error.message.includes("tool_choice"),
+  );
+  assert.throws(
+    () => parseChatCompletionsRequest({ ...base, parallel_tool_calls: false }),
+    (error) => error instanceof Error && error.message.includes("parallel_tool_calls"),
+  );
+  assert.equal(parseChatCompletionsRequest({ ...base, parallel_tool_calls: true }).model, "grok-4.5");
+});
+
+test("chat turn validation rejects an unknown named tool before streaming", async () => {
+  const parsed = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "hi" }],
+    stream: true,
+    tools: [
+      { type: "function", function: { name: "grep", parameters: { type: "object", properties: {} } } },
+    ],
+    tool_choice: { type: "function", function: { name: "bash" } },
+  });
+  const { validateChatTurnRequest } = await import("../dist/session.js");
+  assert.throws(
+    () => validateChatTurnRequest(parsed),
+    (error) => error instanceof Error && error.message.includes("not in tools"),
+  );
+});
+
+test("tool results are validated atomically before parked calls resolve", async () => {
+  const { applyToolResults } = await import("../dist/session.js");
+  let resolved = 0;
+  const session = {
+    lastFlushed: ["call_1", "call_2"],
+    parks: new Map([
+      ["call_1", { resolve: () => { resolved += 1; }, reject: () => undefined }],
+      ["call_2", { resolve: () => { resolved += 1; }, reject: () => undefined }],
+    ]),
+  };
+  assert.throws(
+    () =>
+      applyToolResults(session, [
+        { toolCallId: "call_1", content: "one" },
+        { toolCallId: "call_1", content: "duplicate" },
+        { toolCallId: "call_2", content: "two" },
+      ]),
+    (error) => error instanceof Error && error.message.includes("Duplicate tool_call_id"),
+  );
+  assert.equal(resolved, 0);
+  assert.equal(session.parks.size, 2);
+});
+
+test("failed and continued runs clean up or reset session state", async () => {
+  const { continueRun, raceTurn } = await import("../dist/session.js");
+  let disposed = 0;
+  const base = {
+    apiKeyId: "key-1",
+    agent: {
+      agentId: "agent-1",
+      [Symbol.asyncDispose]: async () => {
+        disposed += 1;
+      },
+    },
+    run: undefined,
+    parks: new Map(),
+    batch: [],
+    batchReady: undefined,
+    lastFlushed: [],
+    awaitingClient: false,
+    flushTimer: undefined,
+    parkTimer: undefined,
+    indexKeys: [],
+    modelParams: undefined,
+    text: "previous",
+    thinking: "old thought",
+    sink: undefined,
+    lastRequestMessages: [],
+    parkTimeoutMs: 1_000,
+  };
+  await assert.rejects(() =>
+    raceTurn({
+      ...base,
+      waitPromise: Promise.reject(new Error("upstream failed")),
+    }),
+  );
+  assert.equal(disposed, 1);
+
+  const continued = { ...base, agent: { ...base.agent }, text: "first round", parks: new Map() };
+  continued.waitPromise = Promise.resolve().then(() => ({
+    text: continued.text,
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usageKnown: false,
+    status: "finished",
+    finish_reason: "stop",
+  }));
+  const result = await continueRun(continued, new AbortController().signal);
+  assert.equal(result.text, "");
+});
+
 test("conversation_id is accepted on the body or in metadata", () => {
   const direct = parseChatCompletionsRequest({
     model: "grok-4.5",
