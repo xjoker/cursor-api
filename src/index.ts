@@ -229,6 +229,18 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
                 }),
               );
             },
+            onThinking: async (text: string): Promise<void> => {
+              if (text === "") return;
+              await writeSse(
+                res,
+                encodeStreamChunk({
+                  id: requestId,
+                  created,
+                  model: parsed.model,
+                  reasoning_content: text,
+                }),
+              );
+            },
             onToolCalls: async (calls: OpenAiToolCall[]): Promise<void> => {
               collectedTools.push(...calls);
               for (const [index, call] of calls.entries()) {
@@ -255,6 +267,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
           }
         : {
             onText: async (): Promise<void> => undefined,
+            onThinking: async (): Promise<void> => undefined,
             onToolCalls: async (calls: OpenAiToolCall[]): Promise<void> => {
               collectedTools.push(...calls);
             },
@@ -355,6 +368,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             params: result.params,
             tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
             finish_reason: finishReason,
+            ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
           }),
           { "x-request-id": requestId, ...headers },
         );

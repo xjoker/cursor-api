@@ -146,7 +146,18 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` |
 | `GET` | `/v1/models`、`/v1/models/{id}` |
 
-支持流式（`stream: true`）、视觉（`image_url`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。
+支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。
+
+OpenCode 要用 `-f` 贴图和 `--thinking` 时，在 `opencode.json` 里给模型打开能力：
+
+```json
+"grok-4.5": {
+  "name": "Cursor Grok 4.5",
+  "attachment": true,
+  "reasoning": true,
+  "modalities": { "input": ["text", "image"], "output": ["text"] }
+}
+```
 
 ```python
 from openai import OpenAI

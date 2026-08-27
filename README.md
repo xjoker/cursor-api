@@ -146,7 +146,18 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` |
 | `GET` | `/v1/models`, `/v1/models/{id}` |
 
-Streaming (`stream: true`), vision (`image_url`), and Cursor knobs (`params`, `variant`, `reasoning_effort`, …) are supported. `variant` matches a unique catalog display name, or an effort/reasoning/fast value when Cursor repeats the same display name (OpenCode `--variant high`). OpenAI tool calling (`tools` / `tool_calls` / `role: tool`) is supported so clients like OpenCode can run tools locally. Cursor shell/file tools stay off; MCP is enabled only to surface those client tools. Audio is not.
+Streaming (`stream: true`), vision (`image_url`, plus OpenCode `image` / image `file` parts), thinking (`delta.reasoning_content`), and Cursor knobs (`params`, `variant`, `reasoning_effort`, …) are supported. `variant` matches a unique catalog display name, or an effort/reasoning/fast value when Cursor repeats the same display name (OpenCode `--variant high` does not send this field on `@ai-sdk/openai-compatible`; send `variant` or `reasoning_effort` on the body). OpenAI tool calling (`tools` / `tool_calls` / `role: tool`) is supported so clients like OpenCode can run tools locally. Cursor shell/file tools stay off; MCP is enabled only to surface those client tools. Audio is not.
+
+For OpenCode `-f` images and `--thinking`, set the model flags in `opencode.json`:
+
+```json
+"grok-4.5": {
+  "name": "Cursor Grok 4.5",
+  "attachment": true,
+  "reasoning": true,
+  "modalities": { "input": ["text", "image"], "output": ["text"] }
+}
+```
 
 ```python
 from openai import OpenAI

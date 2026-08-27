@@ -382,6 +382,110 @@ test("stream chunk encodes tool_calls deltas", () => {
   assert.equal(done.choices[0].finish_reason, "tool_calls");
 });
 
+const TINY_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("chat completions accepts OpenAI image_url and OpenCode file/image parts", () => {
+  const dataUrl = `data:image/png;base64,${TINY_PNG}`;
+  const imageUrl = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "color?" },
+          { type: "image_url", image_url: { url: dataUrl, detail: "auto" } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(imageUrl.images, [{ data: TINY_PNG, mimeType: "image/png" }]);
+  assert.equal(imageUrl.messages[0]?.content, "color?");
+
+  const filePart = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "file", file: { filename: "swatch.png", file_data: dataUrl } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(filePart.images, [{ data: TINY_PNG, mimeType: "image/png" }]);
+
+  const imagePart = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "image", url: "https://example.test/red.png" }],
+      },
+    ],
+  });
+  assert.deepEqual(imagePart.images, [{ url: "https://example.test/red.png" }]);
+
+  const skippedReasoning = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "reasoning", text: "hidden" },
+          { type: "text", text: "hi" },
+        ],
+      },
+    ],
+  });
+  assert.equal(skippedReasoning.messages[0]?.content, "hi");
+  assert.equal(skippedReasoning.images, undefined);
+
+  assert.throws(
+    () =>
+      parseChatCompletionsRequest({
+        model: "grok-4.5",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "file", file: { filename: "notes.txt", file_data: "hello" } }],
+          },
+        ],
+      }),
+    (error) => error instanceof Error && error.message.includes("not an image"),
+  );
+  assert.throws(
+    () =>
+      parseChatCompletionsRequest({
+        model: "grok-4.5",
+        messages: [{ role: "user", content: [{ type: "audio", data: "x" }] }],
+      }),
+    (error) => error instanceof Error && error.message.includes("audio"),
+  );
+});
+
+test("stream and non-stream encode reasoning_content for OpenCode thinking blocks", () => {
+  const chunk = encodeStreamChunk({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "grok-4.5",
+    reasoning_content: "step 1",
+  });
+  assert.equal(chunk.choices[0].delta.reasoning_content, "step 1");
+  assert.equal(Object.hasOwn(chunk.choices[0].delta, "content"), false);
+
+  const body = encodeNonStreamCompletion({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "grok-4.5",
+    content: "red",
+    usage: null,
+    reasoning_content: "looked at pixels",
+  });
+  assert.equal(body.choices[0].message.content, "red");
+  assert.equal(body.choices[0].message.reasoning_content, "looked at pixels");
+});
+
 test("identical conversation prefixes hash to the same stem", async () => {
   const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
   const sys = { role: "system", content: "sys" };

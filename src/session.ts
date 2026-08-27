@@ -42,6 +42,7 @@ export type ChatTurnKind =
 
 export interface ChatTurnSink {
   onText(text: string): Promise<void>;
+  onThinking(text: string): Promise<void>;
   onToolCalls(calls: OpenAiToolCall[]): Promise<void>;
 }
 
@@ -65,6 +66,7 @@ interface LiveSession {
   indexKeys: string[];
   modelParams: CursorChatResult["params"];
   text: string;
+  thinking: string;
   sink: ChatTurnSink | undefined;
   lastRequestMessages: ParsedChatMessage[];
 }
@@ -203,6 +205,7 @@ async function startNewSession(
     indexKeys: [],
     modelParams: model.params,
     text: "",
+    thinking: "",
     sink: options.sink,
     lastRequestMessages: options.request.messages,
   };
@@ -232,6 +235,7 @@ async function sendOnSession(
   },
 ): Promise<CursorChatResult> {
   session.text = "";
+  session.thinking = "";
   session.batch = [];
   session.lastFlushed = [];
   session.awaitingClient = false;
@@ -261,6 +265,7 @@ async function sendOnSession(
 }
 
 async function continueRun(session: LiveSession, abortSignal: AbortSignal): Promise<CursorChatResult> {
+  session.thinking = "";
   session.awaitingClient = false;
   session.lastFlushed = [];
   session.batchReady = new Deferred<OpenAiToolCall[]>();
@@ -297,7 +302,7 @@ async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
       ]),
     );
     if (session.sink) await session.sink.onToolCalls(outcome.calls);
-    return {
+    return withThinking(session, {
       text: session.text,
       usage: toChatUsage(undefined),
       usageKnown: false,
@@ -305,10 +310,10 @@ async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
       status: "finished",
       finish_reason: "tool_calls",
       tool_calls: outcome.calls,
-    };
+    });
   }
   await dropSession(session);
-  return outcome.result;
+  return withThinking(session, outcome.result);
 }
 
 function applyToolResults(
@@ -395,10 +400,21 @@ function flushBatch(session: LiveSession): void {
 }
 
 async function emitDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
+  if (update.type === "thinking-delta") {
+    if (update.text === "") return;
+    session.thinking += update.text;
+    if (session.sink) await session.sink.onThinking(update.text);
+    return;
+  }
   if (update.type !== "text-delta") return;
   if (update.text === "") return;
   session.text += update.text;
   if (session.sink) await session.sink.onText(update.text);
+}
+
+function withThinking(session: LiveSession, result: CursorChatResult): CursorChatResult {
+  if (session.thinking.length === 0) return result;
+  return { ...result, reasoning: session.thinking };
 }
 
 async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promise<CursorChatResult> {

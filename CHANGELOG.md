@@ -9,6 +9,13 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.7] — 2026-08-27
+
+### Added
+
+- Chat Completions vision accepts OpenCode/AI SDK `image` and image `file` parts in addition to OpenAI `image_url` (`data:` and http(s)). Non-image files and audio stay rejected. `reasoning` content parts are ignored.
+- Streaming `thinking-delta` from Cursor is forwarded as OpenAI-compatible `delta.reasoning_content` (and on non-stream `message.reasoning_content`) so OpenCode `--thinking` can render thinking blocks.
+
 ## [20260827.6] — 2026-08-27
 
 ### Added

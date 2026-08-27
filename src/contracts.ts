@@ -201,4 +201,6 @@ export interface CursorChatResult {
   status: "finished" | "error" | "cancelled";
   finish_reason: "stop" | "tool_calls" | "cancelled" | "error";
   tool_calls?: OpenAiToolCall[];
+  /** Cursor `thinking-delta` text; OpenCode reads this as `reasoning_content`. */
+  reasoning?: string;
 }

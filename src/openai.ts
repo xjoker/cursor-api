@@ -56,7 +56,8 @@ const REJECTED_FIELDS = [
 
 const ALLOWED_ROLES = new Set(["system", "developer", "user", "assistant", "tool"]);
 const REJECTED_ROLES = new Set(["function"]);
-const REJECTED_MEDIA_TYPES = new Set(["image", "audio", "input_audio", "file"]);
+const REJECTED_MEDIA_TYPES = new Set(["audio", "input_audio"]);
+const SKIPPED_CONTENT_TYPES = new Set(["reasoning", "reasoning_content"]);
 
 export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
   if (!isPlainObject(body)) {
@@ -156,6 +157,7 @@ export function encodeNonStreamCompletion(input: {
   params?: ModelParam[];
   tool_calls?: OpenAiToolCall[];
   finish_reason?: "stop" | "tool_calls";
+  reasoning_content?: string;
 }): Record<string, unknown> {
   const toolCalls = input.tool_calls;
   const finishReason =
@@ -164,6 +166,9 @@ export function encodeNonStreamCompletion(input: {
     role: "assistant",
     content: finishReason === "tool_calls" && input.content === "" ? null : input.content,
   };
+  if (input.reasoning_content) {
+    message.reasoning_content = input.reasoning_content;
+  }
   if (toolCalls && toolCalls.length > 0) {
     message.tool_calls = toolCalls.map(encodeToolCall);
   }
@@ -192,6 +197,7 @@ export function encodeStreamChunk(input: {
   created: number;
   model: string;
   content?: string | null;
+  reasoning_content?: string | null;
   role?: "assistant";
   finish_reason?: "stop" | "tool_calls" | null;
   usage?: Usage | null;
@@ -206,6 +212,7 @@ export function encodeStreamChunk(input: {
 }): Record<string, unknown> {
   const hasRole = input.role !== undefined;
   const hasContent = input.content !== undefined && input.content !== null;
+  const hasReasoning = input.reasoning_content !== undefined && input.reasoning_content !== null;
   const hasFinish = input.finish_reason !== undefined && input.finish_reason !== null;
   const hasTools = input.tool_calls !== undefined && input.tool_calls.length > 0;
   const usage = input.usage ?? null;
@@ -217,7 +224,7 @@ export function encodeStreamChunk(input: {
     model: input.model,
   };
 
-  if (usage !== null && !hasRole && !hasContent && !hasFinish && !hasTools) {
+  if (usage !== null && !hasRole && !hasContent && !hasReasoning && !hasFinish && !hasTools) {
     payload.choices = [];
     payload.usage = encodeUsage(usage);
     payload.cursor = encodeCursorExtra(input.cost, input.params);
@@ -226,6 +233,7 @@ export function encodeStreamChunk(input: {
 
   const delta: Record<string, unknown> = {};
   if (hasRole) delta.role = input.role;
+  if (hasReasoning) delta.reasoning_content = input.reasoning_content;
   if (hasContent) delta.content = input.content;
   if (hasTools) {
     delta.tool_calls = input.tool_calls?.map((call) => {
@@ -315,8 +323,21 @@ function parseContent(
         `messages[${String(index)}].content[${String(partIndex)}] is invalid`,
       );
     }
-    if (part.type === "image_url") {
-      images.push(parseImageUrlPart(part, index, partIndex));
+    if (part.type === "text") {
+      if (typeof part.text !== "string") {
+        throw invalidRequest(
+          `messages[${String(index)}].content[${String(partIndex)}] must be {type:"text", text:string} or an image part`,
+        );
+      }
+      parts.push(part.text);
+      continue;
+    }
+    if (SKIPPED_CONTENT_TYPES.has(part.type)) {
+      continue;
+    }
+    const image = tryParseImagePart(part, index, partIndex);
+    if (image) {
+      images.push(image);
       continue;
     }
     if (REJECTED_MEDIA_TYPES.has(part.type)) {
@@ -324,26 +345,100 @@ function parseContent(
         `messages[${String(index)}].content type '${part.type}' is not supported`,
       );
     }
-    if (part.type !== "text" || typeof part.text !== "string") {
-      throw invalidRequest(
-        `messages[${String(index)}].content[${String(partIndex)}] must be {type:"text", text:string} or {type:"image_url", image_url:{url:string}}`,
-      );
-    }
-    parts.push(part.text);
+    throw invalidRequest(
+      `messages[${String(index)}].content[${String(partIndex)}] must be {type:"text", text:string} or an image part (image_url, image, or image file)`,
+    );
   }
   if (parts.length === 0 && images.length === 0 && !options.allowEmpty) {
-    throw invalidRequest(`messages[${String(index)}].content must include text or image_url`);
+    throw invalidRequest(`messages[${String(index)}].content must include text or an image`);
   }
   return { text: parts.join(""), images };
 }
 
-function parseImageUrlPart(part: Record<string, unknown>, index: number, partIndex: number): ParsedImage {
+function tryParseImagePart(
+  part: Record<string, unknown>,
+  index: number,
+  partIndex: number,
+): ParsedImage | undefined {
   const label = `messages[${String(index)}].content[${String(partIndex)}]`;
+  if (part.type === "image_url") {
+    return parseImageUrlPart(part, label);
+  }
+  if (part.type === "image") {
+    return parseGenericImagePart(part, label);
+  }
+  if (part.type === "file") {
+    return parseFileImagePart(part, label);
+  }
+  return undefined;
+}
+
+function parseImageUrlPart(part: Record<string, unknown>, label: string): ParsedImage {
   const spec = part.image_url;
   const url = typeof spec === "string" ? spec : isPlainObject(spec) && typeof spec.url === "string" ? spec.url : "";
   if (url.length === 0) {
     throw invalidRequest(`${label}.image_url.url must be a non-empty string`);
   }
+  return parseImageUrlString(url, `${label}.image_url.url`);
+}
+
+function parseGenericImagePart(part: Record<string, unknown>, label: string): ParsedImage {
+  if ("image_url" in part) {
+    return parseImageUrlPart(part, label);
+  }
+  const direct = firstNonEmptyString(part.url, part.image);
+  if (direct) {
+    return parseImageUrlString(direct, label);
+  }
+  const source = isPlainObject(part.source) ? part.source : undefined;
+  const data = firstNonEmptyString(part.data, source?.data);
+  const mimeType = firstNonEmptyString(
+    part.mediaType,
+    part.media_type,
+    part.mimeType,
+    part.mime_type,
+    source?.media_type,
+    source?.mime_type,
+  );
+  if (data) {
+    if (data.startsWith("data:")) {
+      return parseImageUrlString(data, label);
+    }
+    if (!mimeType || !mimeType.startsWith("image/")) {
+      throw invalidRequest(`${label} image data requires an image media type`);
+    }
+    return { data, mimeType };
+  }
+  throw invalidRequest(`${label} must include image_url, url, or image data`);
+}
+
+function parseFileImagePart(part: Record<string, unknown>, label: string): ParsedImage {
+  const spec = isPlainObject(part.file) ? part.file : part;
+  const mediaType = firstNonEmptyString(
+    spec.mediaType,
+    spec.media_type,
+    spec.mimeType,
+    spec.mime_type,
+    spec.mime,
+    part.mediaType,
+    part.media_type,
+  );
+  const filename = firstNonEmptyString(spec.filename, spec.name, part.filename);
+  const data = firstNonEmptyString(spec.file_data, spec.data, part.data);
+  const url = firstNonEmptyString(spec.url, part.url);
+  if (data?.startsWith("data:")) {
+    return parseImageUrlString(data, `${label}.file_data`);
+  }
+  if (url && isImageMedia(mediaType, filename, url)) {
+    return parseImageUrlString(url, `${label}.url`);
+  }
+  if (data && isImageMedia(mediaType, filename, data)) {
+    return { data, mimeType: mediaType && mediaType.startsWith("image/") ? mediaType : mimeFromFilename(filename) };
+  }
+  throw invalidRequest(`${label} file part is not an image`);
+}
+
+function parseImageUrlString(url: string, label: string): ParsedImage {
   const dataUrl = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/]+=*)$/.exec(url);
   if (dataUrl) {
     return { data: dataUrl[2] ?? "", mimeType: dataUrl[1] ?? "image/png" };
@@ -351,7 +446,31 @@ function parseImageUrlPart(part: Record<string, unknown>, index: number, partInd
   if (url.startsWith("https://") || url.startsWith("http://")) {
     return { url };
   }
-  throw invalidRequest(`${label}.image_url.url must be http(s) or a data:image/...;base64 URL`);
+  throw invalidRequest(`${label} must be http(s) or a data:image/...;base64 URL`);
+}
+
+function isImageMedia(mediaType: string | undefined, filename: string | undefined, data: string): boolean {
+  if (mediaType?.startsWith("image/")) return true;
+  if (data.startsWith("data:image/")) return true;
+  return filename !== undefined && mimeFromFilename(filename).startsWith("image/");
+}
+
+function mimeFromFilename(filename: string | undefined): string {
+  const ext = filename?.split(".").pop()?.toLowerCase();
+  if (ext === "png") return "image/png";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "bmp") return "image/bmp";
+  if (ext === "svg") return "image/svg+xml";
+  return "application/octet-stream";
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
 }
 
 function parseStreamOptions(value: unknown): boolean {
