@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.5] — 2026-08-27
+
+### Fixed
+
+- `variant` now matches Cursor effort/reasoning/fast values when every catalog variant shares the same display name (Grok, Claude, GPT, …). `variant: "high"` sets effort/reasoning to high and keeps the default `fast` flag; unknown names 400 with `low, medium, high, fast` instead of repeating “Cursor Grok 4.5”. OpenCode `--variant` still does not send this field on `@ai-sdk/openai-compatible`; send `variant` or `reasoning_effort` on the Chat Completions body.
+
 ## [20260827.4] — 2026-08-27
 
 ### Fixed

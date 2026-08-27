@@ -153,11 +153,15 @@ async function resolveModelSelection(apiKey: string, request: ParsedChatRequest)
   const item = findCatalogModel(catalog, request.model);
   return {
     id: item?.id ?? request.model,
-    params: resolveParams(item, request),
+    params: resolveChatParams(item, request),
   };
 }
 
-function resolveParams(model: ModelListItem | undefined, request: ParsedChatRequest): ModelParameterValue[] | undefined {
+/** Map OpenAI `variant` / `reasoning_effort` / `fast` onto Cursor catalog params. */
+export function resolveChatParams(
+  model: ModelListItem | undefined,
+  request: ParsedChatRequest,
+): ModelParameterValue[] | undefined {
   const merged = new Map<string, string>();
 
   if (model) {
@@ -212,6 +216,23 @@ function resolveParams(model: ModelListItem | undefined, request: ParsedChatRequ
   return [...merged.entries()].map(([id, value]) => ({ id, value }));
 }
 
+function foldKey(value: string): string {
+  return value.replace(/[\u200b\u200c\u200d\ufeff]/g, "").trim().toLowerCase();
+}
+
+function isBooleanParam(parameter: ModelParameterDefinition): boolean {
+  return parameter.values.every((item) => {
+    const key = foldKey(item.value);
+    return key === "true" || key === "false";
+  });
+}
+
+function applyVariantParams(params: ModelParameterValue[], merged: Map<string, string>): void {
+  for (const param of params) {
+    merged.set(param.id, param.value);
+  }
+}
+
 function applyVariant(
   model: ModelListItem | undefined,
   requestedId: string,
@@ -221,16 +242,79 @@ function applyVariant(
   if (!model) {
     throw invalidRequest(`Cannot apply variant '${variantName}' because model '${requestedId}' is not in the catalog`);
   }
-  const variant = model.variants?.find(
-    (item) => item.displayName.toLowerCase() === variantName.toLowerCase(),
+
+  const needle = foldKey(variantName);
+  const named = (model.variants ?? []).filter((item) => foldKey(item.displayName) === needle);
+  if (named.length === 1) {
+    applyVariantParams(named[0].params, merged);
+    return;
+  }
+
+  const hits: Array<{ id: string; value: string }> = [];
+  for (const parameter of model.parameters ?? []) {
+    const nameMatch = foldKey(parameter.id) === needle || foldKey(parameter.displayName ?? "") === needle;
+    if (nameMatch && isBooleanParam(parameter)) {
+      const on =
+        parameter.values.find((item) => foldKey(item.value) === "true") ??
+        parameter.values.find((item) => foldKey(item.displayName ?? "") === needle);
+      if (on) hits.push({ id: parameter.id, value: on.value });
+      continue;
+    }
+    const matched = parameter.values.find(
+      (item) => foldKey(item.value) === needle || foldKey(item.displayName ?? "") === needle,
+    );
+    if (matched) hits.push({ id: parameter.id, value: matched.value });
+  }
+
+  const chosen = pickVariantParamHit(hits);
+  if (chosen) {
+    merged.set(chosen.id, chosen.value);
+    return;
+  }
+
+  throw invalidRequest(
+    `Unknown variant '${variantName}' for model '${model.id}'. Allowed: ${allowedVariantNames(model)}`,
   );
-  if (!variant) {
-    const allowed = (model.variants ?? []).map((item) => item.displayName).join(", ") || "(none)";
-    throw invalidRequest(`Unknown variant '${variantName}' for model '${model.id}'. Allowed: ${allowed}`);
+}
+
+function pickVariantParamHit(
+  hits: Array<{ id: string; value: string }>,
+): { id: string; value: string } | undefined {
+  if (hits.length === 0) return undefined;
+  const uniqueIds = [...new Set(hits.map((hit) => hit.id))];
+  if (uniqueIds.length === 1) return hits[0];
+  const preferred = hits.find((hit) => /^(effort|reasoning|reasoning_effort)$/i.test(hit.id));
+  if (preferred && hits.filter((hit) => hit.id === preferred.id).length === 1) {
+    return preferred;
   }
-  for (const param of variant.params) {
-    merged.set(param.id, param.value);
+  return undefined;
+}
+
+function allowedVariantNames(model: ModelListItem): string {
+  const variants = model.variants ?? [];
+  if (variants.length === 0) return "(none)";
+  const displayNames = variants.map((item) => item.displayName);
+  if (new Set(displayNames.map(foldKey)).size === displayNames.length) {
+    return displayNames.join(", ");
   }
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string): void => {
+    const key = foldKey(raw);
+    if (!key || seen.has(key) || key === "true" || key === "false") return;
+    seen.add(key);
+    names.push(raw);
+  };
+  for (const parameter of model.parameters ?? []) {
+    if (isBooleanParam(parameter)) {
+      push(parameter.id);
+      continue;
+    }
+    for (const value of parameter.values) {
+      push(value.value);
+    }
+  }
+  return names.join(", ") || displayNames.join(", ");
 }
 
 function applyNamedParam(

@@ -415,6 +415,171 @@ test("localChatAgentTools enables mcp only when client tools exist", async () =>
   assert.deepEqual(localChatAgentTools(true), ["mcp"]);
 });
 
+function grok45Catalog() {
+  return {
+    id: "grok-4.5",
+    displayName: "Cursor Grok 4.5",
+    parameters: [
+      {
+        id: "effort",
+        displayName: "Effort",
+        values: [
+          { value: "low", displayName: "Low" },
+          { value: "medium", displayName: "Medium" },
+          { value: "high", displayName: "High" },
+        ],
+      },
+      {
+        id: "fast",
+        displayName: "Fast",
+        values: [{ value: "false" }, { value: "true", displayName: "Fast\u200b" }],
+      },
+    ],
+    variants: [
+      { displayName: "Cursor Grok 4.5", params: [{ id: "effort", value: "low" }, { id: "fast", value: "false" }] },
+      { displayName: "Cursor Grok 4.5", params: [{ id: "effort", value: "low" }, { id: "fast", value: "true" }] },
+      { displayName: "Cursor Grok 4.5", params: [{ id: "effort", value: "medium" }, { id: "fast", value: "false" }] },
+      { displayName: "Cursor Grok 4.5", params: [{ id: "effort", value: "medium" }, { id: "fast", value: "true" }] },
+      { displayName: "Cursor Grok 4.5", params: [{ id: "effort", value: "high" }, { id: "fast", value: "false" }] },
+      {
+        displayName: "Cursor Grok 4.5",
+        isDefault: true,
+        params: [{ id: "effort", value: "high" }, { id: "fast", value: "true" }],
+      },
+    ],
+  };
+}
+
+function chatRequest(overrides) {
+  return {
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "hi" }],
+    stream: false,
+    includeUsage: false,
+    ...overrides,
+  };
+}
+
+test("variant high/low maps onto effort when Cursor repeats display names", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  const model = grok45Catalog();
+  const high = resolveChatParams(model, chatRequest({ variant: "high" }));
+  assert.deepEqual(high, [
+    { id: "effort", value: "high" },
+    { id: "fast", value: "true" },
+  ]);
+  const low = resolveChatParams(model, chatRequest({ variant: "low" }));
+  assert.deepEqual(low, [
+    { id: "effort", value: "low" },
+    { id: "fast", value: "true" },
+  ]);
+});
+
+test("variant fast toggles the fast param without changing default effort", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  const model = grok45Catalog();
+  model.variants = model.variants.map((variant) =>
+    variant.isDefault
+      ? { ...variant, params: [{ id: "effort", value: "medium" }, { id: "fast", value: "false" }] }
+      : variant,
+  );
+  const params = resolveChatParams(model, chatRequest({ variant: "fast" }));
+  assert.deepEqual(params, [
+    { id: "effort", value: "medium" },
+    { id: "fast", value: "true" },
+  ]);
+});
+
+test("unknown variant lists distinctive effort names instead of repeated display names", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  assert.throws(
+    () => resolveChatParams(grok45Catalog(), chatRequest({ variant: "turbo" })),
+    (error) =>
+      error instanceof Error &&
+      error.message.includes("Unknown variant 'turbo'") &&
+      error.message.includes("high") &&
+      error.message.includes("low") &&
+      !error.message.includes("Cursor Grok 4.5, Cursor Grok 4.5"),
+  );
+});
+
+test("shared catalog display name is not treated as the first variant", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  assert.throws(
+    () => resolveChatParams(grok45Catalog(), chatRequest({ variant: "Cursor Grok 4.5" })),
+    (error) => error instanceof Error && error.message.includes("Unknown variant"),
+  );
+});
+
+test("unique variant display names still apply the full param set", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  const model = {
+    id: "demo",
+    displayName: "Demo",
+    parameters: [
+      {
+        id: "effort",
+        displayName: "Effort",
+        values: [
+          { value: "low", displayName: "Low" },
+          { value: "high", displayName: "High" },
+        ],
+      },
+    ],
+    variants: [
+      { displayName: "Quick", isDefault: true, params: [{ id: "effort", value: "low" }] },
+      { displayName: "Deep", params: [{ id: "effort", value: "high" }] },
+    ],
+  };
+  assert.deepEqual(resolveChatParams(model, chatRequest({ model: "demo", variant: "Deep" })), [
+    { id: "effort", value: "high" },
+  ]);
+});
+
+test("gpt-style reasoning=high is selected from variant high", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  const model = {
+    id: "gpt-5.4",
+    displayName: "GPT-5.4",
+    parameters: [
+      {
+        id: "reasoning",
+        displayName: "Reasoning",
+        values: [
+          { value: "none", displayName: "None" },
+          { value: "high", displayName: "High" },
+        ],
+      },
+      {
+        id: "fast",
+        displayName: "Fast",
+        values: [{ value: "false" }, { value: "true", displayName: "Fast" }],
+      },
+    ],
+    variants: [
+      {
+        displayName: "GPT-5.4",
+        isDefault: true,
+        params: [
+          { id: "reasoning", value: "none" },
+          { id: "fast", value: "true" },
+        ],
+      },
+      {
+        displayName: "GPT-5.4",
+        params: [
+          { id: "reasoning", value: "high" },
+          { id: "fast", value: "true" },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(resolveChatParams(model, chatRequest({ model: "gpt-5.4", variant: "high" })), [
+    { id: "reasoning", value: "high" },
+    { id: "fast", value: "true" },
+  ]);
+});
+
 test("classifyChatTurn splits user vs tool result rounds", async () => {
   const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
   const userTurn = classifyChatTurn([
