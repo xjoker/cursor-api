@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
 import {
   type InteractionUpdate,
   type Run,
@@ -12,7 +13,6 @@ import type {
   OpenAiToolFunction,
   ParsedChatMessage,
   ParsedChatRequest,
-  ParsedImage,
 } from "./contracts.js";
 import {
   billedUsageOf,
@@ -20,13 +20,15 @@ import {
   disposeAgent,
   mapCursorError,
   resolveChatModel,
+  resumeLocalChatAgent,
   toChatUsage,
 } from "./cursor.js";
+import { getConversationAgentId, upsertConversation } from "./db.js";
 import { GatewayError, invalidRequest } from "./errors.js";
 import { logInfo } from "./log.js";
-import { renderTranscript } from "./openai.js";
+import { imagesOfLastUser, renderTranscript } from "./openai.js";
 
-const PARK_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_PARK_TIMEOUT_MS = 5 * 60 * 1000;
 
 export type ChatTurnKind =
   | {
@@ -69,6 +71,8 @@ interface LiveSession {
   thinking: string;
   sink: ChatTurnSink | undefined;
   lastRequestMessages: ParsedChatMessage[];
+  conversationId?: string;
+  parkTimeoutMs: number;
 }
 
 const sessions = new Map<string, LiveSession>();
@@ -149,6 +153,44 @@ export function hashMessages(messages: ParsedChatMessage[]): string {
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
+export type TurnAction = "continue_park" | "replay_transcript" | "resume_user" | "new_user";
+
+export function resolveTurnAction(input: {
+  turn: ChatTurnKind;
+  hasParkedSession: boolean;
+  conversationId?: string;
+  canResumeConversation: boolean;
+}): TurnAction {
+  if (input.turn.kind === "tool_results") {
+    return input.hasParkedSession ? "continue_park" : "replay_transcript";
+  }
+  if (input.conversationId && input.canResumeConversation) {
+    return "resume_user";
+  }
+  return "new_user";
+}
+
+export function filterToolsForChoice(
+  tools: OpenAiToolFunction[] | undefined,
+  toolChoice: ParsedChatRequest["tool_choice"],
+): OpenAiToolFunction[] | undefined {
+  if (typeof toolChoice !== "object") {
+    return tools;
+  }
+  if (!tools || tools.length === 0) {
+    throw invalidRequest(`tool_choice function '${toolChoice.name}' is not in tools`);
+  }
+  const selected = tools.find((tool) => tool.name === toolChoice.name);
+  if (!selected) {
+    throw invalidRequest(`tool_choice function '${toolChoice.name}' is not in tools`);
+  }
+  return [selected];
+}
+
+export function conversationKey(apiKeyId: string, conversationId: string): string {
+  return `${apiKeyId}:conv:${conversationId}`;
+}
+
 export async function runChatTurn(options: {
   apiKey: string;
   apiKeyId: string;
@@ -156,26 +198,114 @@ export async function runChatTurn(options: {
   request: ParsedChatRequest;
   abortSignal: AbortSignal;
   sink?: ChatTurnSink;
+  parkTimeoutMs?: number;
+  db?: DatabaseSync;
 }): Promise<CursorChatResult> {
   const turn = classifyChatTurn(options.request.messages);
   const lookupKey = sessionKey(options.apiKeyId, hashMessages(turn.stem));
+  const conversationId = options.request.conversation_id;
+  const convKey = conversationId ? conversationKey(options.apiKeyId, conversationId) : undefined;
+  const byStem = sessions.get(lookupKey);
+  const byConv = convKey ? sessions.get(convKey) : undefined;
+  const parked =
+    byStem && byStem.parks.size > 0 ? byStem : byConv && byConv.parks.size > 0 ? byConv : undefined;
+  const liveConv = byConv;
+  if (turn.kind === "user" && liveConv && liveConv.parks.size > 0) {
+    throw invalidRequest("Pending tool calls; send tool results before the next user message");
+  }
+  const storedAgentId =
+    options.db && conversationId
+      ? getConversationAgentId(options.db, options.apiKeyId, conversationId)
+      : undefined;
+  const action = resolveTurnAction({
+    turn,
+    hasParkedSession: Boolean(parked),
+    conversationId,
+    canResumeConversation: liveConv ? liveConv.parks.size === 0 : Boolean(storedAgentId),
+  });
 
-  if (turn.kind === "tool_results") {
-    const session = sessions.get(lookupKey);
-    if (!session || session.parks.size === 0) {
-      throw invalidRequest("No pending tool calls for this conversation");
-    }
-    session.sink = options.sink;
-    applyToolResults(session, turn.results);
-    session.lastRequestMessages = options.request.messages;
-    indexSession(session, options.apiKeyId, hashMessages(options.request.messages));
-    return await continueRun(session, options.abortSignal);
+  if (action === "continue_park" && turn.kind === "tool_results" && parked) {
+    parked.sink = options.sink;
+    parked.parkTimeoutMs = options.parkTimeoutMs ?? parked.parkTimeoutMs;
+    applyToolResults(parked, turn.results);
+    parked.lastRequestMessages = options.request.messages;
+    indexSession(parked, options.apiKeyId, hashMessages(options.request.messages));
+    if (convKey) indexSession(parked, options.apiKeyId, `conv:${conversationId}`);
+    return await continueRun(parked, options.abortSignal);
   }
 
-  // User turns always start a fresh Cursor agent from the HTTP transcript.
-  // Reusing an idle agent by stem hash mixes OpenCode sessions that share a
-  // prefix: lookup ignores the new user line, and agent.send only gets that line.
+  if (action === "replay_transcript") {
+    logInfo("replaying tool results from transcript", {
+      api_key_id: options.apiKeyId,
+      conversation_id: conversationId ?? null,
+    });
+    return await startAgentSession(renderTranscript(options.request.messages), options);
+  }
+
+  if (action === "resume_user" && turn.kind === "user") {
+    return await resumeUserTurn(turn, options, liveConv, storedAgentId);
+  }
+
+  if (turn.kind !== "user") {
+    throw invalidRequest("Last message must be role 'user' or 'tool'");
+  }
   return await startNewSession(turn, options);
+}
+
+async function resumeUserTurn(
+  turn: Extract<ChatTurnKind, { kind: "user" }>,
+  options: {
+    apiKey: string;
+    apiKeyId: string;
+    workspaceDir: string;
+    request: ParsedChatRequest;
+    abortSignal: AbortSignal;
+    sink?: ChatTurnSink;
+    parkTimeoutMs?: number;
+    db?: DatabaseSync;
+  },
+  live: LiveSession | undefined,
+  storedAgentId: string | undefined,
+): Promise<CursorChatResult> {
+  if (live && live.parks.size === 0) {
+    logInfo("resumed live conversation", {
+      api_key_id: options.apiKeyId,
+      conversation_id: options.request.conversation_id ?? null,
+      agent_id: live.agent.agentId,
+    });
+    live.parkTimeoutMs = options.parkTimeoutMs ?? live.parkTimeoutMs;
+    return await sendOnSession(live, turn.user.content, options);
+  }
+  if (!storedAgentId) {
+    return await startNewSession(turn, options);
+  }
+  const model = await resolveChatModel(options.apiKey, options.request);
+  const session = emptySession(options, model.params);
+  const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
+  try {
+    session.agent = await resumeLocalChatAgent({
+      agentId: storedAgentId,
+      apiKey: options.apiKey,
+      workspaceDir: options.workspaceDir,
+      model,
+      customTools,
+    });
+  } catch (error) {
+    logInfo("conversation resume failed, starting new", {
+      api_key_id: options.apiKeyId,
+      conversation_id: options.request.conversation_id ?? null,
+      agent_id: storedAgentId,
+      code: error instanceof GatewayError ? error.code : "upstream_error",
+    });
+    return await startNewSession(turn, options);
+  }
+  logInfo("resumed stored conversation", {
+    api_key_id: options.apiKeyId,
+    conversation_id: options.request.conversation_id ?? null,
+    agent_id: storedAgentId,
+  });
+  rememberConversation(session, options);
+  return await sendOnSession(session, turn.user.content, options);
 }
 
 async function startNewSession(
@@ -187,10 +317,55 @@ async function startNewSession(
     request: ParsedChatRequest;
     abortSignal: AbortSignal;
     sink?: ChatTurnSink;
+    parkTimeoutMs?: number;
+    db?: DatabaseSync;
+  },
+): Promise<CursorChatResult> {
+  const prompt =
+    turn.stem.length === 0 ? turn.user.content : renderTranscript([...turn.stem, turn.user]);
+  return await startAgentSession(prompt, options);
+}
+
+async function startAgentSession(
+  prompt: string,
+  options: {
+    apiKey: string;
+    apiKeyId: string;
+    workspaceDir: string;
+    request: ParsedChatRequest;
+    abortSignal: AbortSignal;
+    sink?: ChatTurnSink;
+    parkTimeoutMs?: number;
+    db?: DatabaseSync;
   },
 ): Promise<CursorChatResult> {
   const model = await resolveChatModel(options.apiKey, options.request);
-  const session: LiveSession = {
+  const session = emptySession(options, model.params);
+  const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
+  try {
+    session.agent = await createLocalChatAgent({
+      apiKey: options.apiKey,
+      workspaceDir: options.workspaceDir,
+      model,
+      customTools,
+    });
+  } catch (error) {
+    throw mapCursorError(error);
+  }
+  rememberConversation(session, options);
+  return await sendOnSession(session, prompt, options);
+}
+
+function emptySession(
+  options: {
+    apiKeyId: string;
+    request: ParsedChatRequest;
+    sink?: ChatTurnSink;
+    parkTimeoutMs?: number;
+  },
+  modelParams: CursorChatResult["params"],
+): LiveSession {
+  return {
     apiKeyId: options.apiKeyId,
     agent: undefined as unknown as SDKAgent,
     run: undefined,
@@ -203,26 +378,27 @@ async function startNewSession(
     flushTimer: undefined,
     parkTimer: undefined,
     indexKeys: [],
-    modelParams: model.params,
+    modelParams,
     text: "",
     thinking: "",
     sink: options.sink,
     lastRequestMessages: options.request.messages,
+    conversationId: options.request.conversation_id,
+    parkTimeoutMs: options.parkTimeoutMs ?? DEFAULT_PARK_TIMEOUT_MS,
   };
-  const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
-  try {
-    session.agent = await createLocalChatAgent({
-      apiKey: options.apiKey,
-      workspaceDir: options.workspaceDir,
-      model,
-      customTools,
-    });
-  } catch (error) {
-    throw mapCursorError(error);
+}
+
+function rememberConversation(
+  session: LiveSession,
+  options: { apiKeyId: string; request: ParsedChatRequest; db?: DatabaseSync },
+): void {
+  const conversationId = options.request.conversation_id;
+  if (!conversationId || !session.agent) return;
+  session.conversationId = conversationId;
+  indexSession(session, options.apiKeyId, `conv:${conversationId}`);
+  if (options.db) {
+    upsertConversation(options.db, options.apiKeyId, conversationId, session.agent.agentId);
   }
-  const prompt =
-    turn.stem.length === 0 ? turn.user.content : renderTranscript([...turn.stem, turn.user]);
-  return await sendOnSession(session, prompt, options);
 }
 
 async function sendOnSession(
@@ -243,7 +419,7 @@ async function sendOnSession(
   session.sink = options.sink;
   session.lastRequestMessages = options.request.messages;
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
-  const images = options.request.images;
+  const images = imagesOfLastUser(options.request.messages);
 
   let run: Run;
   try {
@@ -340,12 +516,13 @@ function applyToolResults(
 function buildCustomTools(
   session: LiveSession,
   tools: OpenAiToolFunction[] | undefined,
-  toolChoice: "auto" | "none" | undefined,
+  toolChoice: ParsedChatRequest["tool_choice"],
 ): Record<string, SDKCustomTool> | undefined {
   if (toolChoice === "none") return undefined;
-  if (!tools || tools.length === 0) return undefined;
+  const selected = filterToolsForChoice(tools, toolChoice);
+  if (!selected || selected.length === 0) return undefined;
   const custom: Record<string, SDKCustomTool> = {};
-  for (const tool of tools) {
+  for (const tool of selected) {
     custom[tool.name] = {
       description: tool.description ?? "",
       inputSchema: tool.parameters as Record<string, SDKJsonValue>,
@@ -501,7 +678,7 @@ function armParkTimeout(session: LiveSession): void {
     }
     session.parks.clear();
     void dropSession(session);
-  }, PARK_TIMEOUT_MS);
+  }, session.parkTimeoutMs);
 }
 
 function clearParkTimer(session: LiveSession): void {

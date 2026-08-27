@@ -15,15 +15,7 @@ const ACCEPTED_FIELDS = new Set([
   "messages",
   "stream",
   "stream_options",
-  "temperature",
-  "top_p",
-  "top_k",
-  "presence_penalty",
-  "frequency_penalty",
   "user",
-  "seed",
-  "stop",
-  "logit_bias",
   "n",
   "max_tokens",
   "max_completion_tokens",
@@ -43,6 +35,7 @@ const ACCEPTED_FIELDS = new Set([
   "tools",
   "tool_choice",
   "parallel_tool_calls",
+  "conversation_id",
 ]);
 
 const REJECTED_FIELDS = [
@@ -52,6 +45,14 @@ const REJECTED_FIELDS = [
   "audio",
   "prediction",
   "web_search_options",
+  "temperature",
+  "top_p",
+  "top_k",
+  "presence_penalty",
+  "frequency_penalty",
+  "seed",
+  "stop",
+  "logit_bias",
 ] as const;
 
 const ALLOWED_ROLES = new Set(["system", "developer", "user", "assistant", "tool"]);
@@ -103,21 +104,21 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
     throw invalidRequest("Field 'stream' must be a boolean");
   }
 
-  const parsedMessages = body.messages.map((item, index) => parseMessage(item, index));
+  const messages = body.messages.map((item, index) => parseMessage(item, index));
   const includeUsage = parseStreamOptions(body.stream_options);
-  const images = parsedMessages.flatMap((message) => message.images);
-  const messages: ParsedChatMessage[] = parsedMessages.map(
-    ({ images: _images, ...message }) => message,
-  );
+  const images = imagesOfLastUser(messages);
   const tools = parseTools(body.tools);
   const toolChoice = parseToolChoice(body.tool_choice);
+  const conversationId =
+    optionalNonEmptyString(body.conversation_id, "conversation_id") ??
+    parseMetadataConversationId(body.metadata);
 
   return {
     model: body.model,
     messages,
     stream: body.stream === true,
     includeUsage,
-    ...(images.length > 0 ? { images } : {}),
+    ...(images && images.length > 0 ? { images } : {}),
     params: parseParams(body.params),
     variant: optionalNonEmptyString(body.variant, "variant"),
     reasoning_effort: optionalNonEmptyString(body.reasoning_effort, "reasoning_effort"),
@@ -126,7 +127,27 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
     optimize_for: optionalNonEmptyString(body.optimize_for, "optimize_for"),
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
+    ...(conversationId ? { conversation_id: conversationId } : {}),
   };
+}
+
+/** 只取最后一条 user 上的图，避免把历史轮次的图摊到本次 send。 */
+export function imagesOfLastUser(messages: ParsedChatMessage[]): ParsedImage[] | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    return message.images && message.images.length > 0 ? message.images : undefined;
+  }
+  return undefined;
+}
+
+function parseMetadataConversationId(metadata: unknown): string | undefined {
+  if (metadata === undefined) return undefined;
+  if (!isPlainObject(metadata)) {
+    throw invalidRequest("Field 'metadata' must be an object");
+  }
+  if (!("conversation_id" in metadata)) return undefined;
+  return optionalNonEmptyString(metadata.conversation_id, "metadata.conversation_id");
 }
 
 export function renderTranscript(messages: ParsedChatMessage[]): string {
@@ -581,11 +602,17 @@ function parseTools(value: unknown): OpenAiToolFunction[] | undefined {
   });
 }
 
-function parseToolChoice(value: unknown): "auto" | "none" | undefined {
+function parseToolChoice(value: unknown): "auto" | "none" | { name: string } | undefined {
   if (value === undefined) return undefined;
   if (value === "auto" || value === "none") return value;
   if (value === "required") return "auto";
-  if (isPlainObject(value) && value.type === "function") return "auto";
+  if (isPlainObject(value) && value.type === "function") {
+    const spec = isPlainObject(value.function) ? value.function : value;
+    if (typeof spec.name !== "string" || spec.name.length === 0) {
+      throw invalidRequest("Field 'tool_choice.function.name' must be a non-empty string");
+    }
+    return { name: spec.name };
+  }
   throw invalidRequest("Field 'tool_choice' must be 'auto', 'none', 'required', or {type:'function'}");
 }
 

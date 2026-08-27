@@ -486,6 +486,144 @@ test("stream and non-stream encode reasoning_content for OpenCode thinking block
   assert.equal(body.choices[0].message.reasoning_content, "looked at pixels");
 });
 
+test("sampling fields without Cursor primitives are rejected; max_tokens stays accepted", () => {
+  assert.throws(
+    () =>
+      parseChatCompletionsRequest({
+        model: "grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        temperature: 0.2,
+      }),
+    (error) => error instanceof Error && error.message.includes("temperature"),
+  );
+  const parsed = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 32000,
+  });
+  assert.equal(parsed.model, "grok-4.5");
+});
+
+test("only the last user message images are attached", () => {
+  const parsed = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "https://example.test/old.png" } }],
+      },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: "color?" },
+    ],
+  });
+  assert.equal(parsed.images, undefined);
+  assert.equal(parsed.messages[0]?.images?.[0]?.url, "https://example.test/old.png");
+  const latest = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "https://example.test/old.png" } }],
+      },
+      { role: "assistant", content: "ok" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "now this" },
+          { type: "image_url", image_url: { url: "https://example.test/new.png" } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(latest.images, [{ url: "https://example.test/new.png" }]);
+});
+
+test("tool_choice named function keeps only that tool", async () => {
+  const parsed = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      { type: "function", function: { name: "grep", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "bash", parameters: { type: "object", properties: {} } } },
+    ],
+    tool_choice: { type: "function", function: { name: "grep" } },
+  });
+  assert.deepEqual(parsed.tool_choice, { name: "grep" });
+  const { filterToolsForChoice } = await import("../dist/session.js");
+  assert.deepEqual(filterToolsForChoice(parsed.tools, parsed.tool_choice)?.map((tool) => tool.name), [
+    "grep",
+  ]);
+});
+
+test("conversation_id is accepted on the body or in metadata", () => {
+  const direct = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    conversation_id: "thread-1",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(direct.conversation_id, "thread-1");
+  const nested = parseChatCompletionsRequest({
+    model: "grok-4.5",
+    metadata: { conversation_id: "thread-2" },
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(nested.conversation_id, "thread-2");
+});
+
+test("resolveTurnAction replays tool results when the park is gone", async () => {
+  const { classifyChatTurn, resolveTurnAction } = await import("../dist/session.js");
+  const toolTurn = classifyChatTurn([
+    { role: "user", content: "list" },
+    { role: "assistant", content: "", tool_calls: [{ id: "call_1", name: "bash", arguments: "{}" }] },
+    { role: "tool", tool_call_id: "call_1", content: "ok" },
+  ]);
+  assert.equal(
+    resolveTurnAction({ turn: toolTurn, hasParkedSession: false }),
+    "replay_transcript",
+  );
+  assert.equal(
+    resolveTurnAction({ turn: toolTurn, hasParkedSession: true }),
+    "continue_park",
+  );
+  const userTurn = classifyChatTurn([{ role: "user", content: "hi" }]);
+  assert.equal(
+    resolveTurnAction({
+      turn: userTurn,
+      hasParkedSession: false,
+      conversationId: "c1",
+      canResumeConversation: true,
+    }),
+    "resume_user",
+  );
+  assert.equal(
+    resolveTurnAction({ turn: userTurn, hasParkedSession: false }),
+    "new_user",
+  );
+});
+
+test("PARK_TIMEOUT_MS and git_commit come from env or git HEAD", () => {
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-park-"));
+  mkdirSync(join(root, "data", "config"), { recursive: true });
+  mkdirSync(join(root, ".git", "refs", "heads"), { recursive: true });
+  writeFileSync(
+    join(root, "data", "config", "gateway.toml"),
+    [
+      'cursor_api_key = "key"',
+      'admin_access_key = "admin"',
+      'api_key_pepper = "pepper"',
+      "park_timeout_ms = 12000",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(root, ".git", "refs", "heads", "main"), "abcdef1234567890abcdef1234567890abcdef12\n");
+  const cfg = loadConfig({ DATA_DIR: "data" }, root);
+  assert.equal(cfg.parkTimeoutMs, 12000);
+  assert.equal(cfg.gitCommit, "abcdef1234567890abcdef1234567890abcdef12");
+  const fromEnv = loadConfig({ DATA_DIR: "data", GIT_COMMIT: "deadbeef" }, root);
+  assert.equal(fromEnv.gitCommit, "deadbeef");
+});
+
 test("identical conversation prefixes hash to the same stem", async () => {
   const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
   const sys = { role: "system", content: "sys" };
@@ -743,6 +881,20 @@ function seedLog(overrides) {
     ...overrides,
   };
 }
+
+test("conversations persist agent ids and are removed with the key", async () => {
+  const { openDb, insertApiKey, deleteApiKey, upsertConversation, getConversationAgentId } =
+    await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-conv-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
+  insertApiKey(db, seedKey("key-1"));
+  upsertConversation(db, "key-1", "thread-1", "agent-abc");
+  assert.equal(getConversationAgentId(db, "key-1", "thread-1"), "agent-abc");
+  upsertConversation(db, "key-1", "thread-1", "agent-xyz");
+  assert.equal(getConversationAgentId(db, "key-1", "thread-1"), "agent-xyz");
+  deleteApiKey(db, "key-1");
+  assert.equal(getConversationAgentId(db, "key-1", "thread-1"), undefined);
+});
 
 test("deleteApiKey removes the key and keeps request logs", async () => {
   const { openDb, insertApiKey, insertRequestLog, listApiKeys, listRequestLogs, deleteApiKey } =

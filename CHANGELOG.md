@@ -9,6 +9,20 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.8] — 2026-08-27
+
+### Added
+
+- Pending tool rounds: `park_timeout_ms` / `PARK_TIMEOUT_MS` (default 5 minutes). If the in-memory park is gone (gateway restart), the next `role: tool` request replays the full `messages` transcript on a new agent instead of 400 `No pending tool calls`.
+- `conversation_id` (or `metadata.conversation_id`) reuses the same Cursor agent: in-process `send` of only the new user line, or `Agent.resume` after restart. Isolated per client key.
+- `tool_choice: {type:"function", function:{name}}` registers only that client tool.
+- `/health` `git_commit` falls back to `.git/HEAD` when `GIT_COMMIT` is unset.
+
+### Fixed
+
+- Vision attaches only images from the last user message, not every historical image.
+- Sampling knobs with no Cursor equivalent (`temperature`, `top_p`, `seed`, …) now 400 instead of being silently dropped. OpenCode’s `max_tokens` is still accepted.
+
 ## [20260827.7] — 2026-08-27
 
 ### Added
@@ -188,8 +202,9 @@ Initial public MVP.
 - Single upstream Cursor account only.
 - No audio, Claude `/v1/messages`, or Gemini APIs.
 - No Cursor account balance endpoint (Enterprise Admin APIs not integrated).
-- Common OpenAI sampling fields accepted but not forwarded upstream.
-- Tool calling is OpenAI-protocol only (client executes). Pending tool rounds live in memory and do not survive gateway restart.
+- Common OpenAI sampling fields (`temperature`, `top_p`, `seed`, …) 400; `max_tokens` is accepted but not forwarded.
+- Tool parking is in-memory. After a gateway restart, the next tool-result request continues from the HTTP transcript instead of the original Cursor run.
+- `conversation_id` is required to resume the same Cursor agent across user turns. OpenCode does not send it by default.
 
 ---
 

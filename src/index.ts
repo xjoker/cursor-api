@@ -294,6 +294,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         request: parsed,
         abortSignal: abort.signal,
         sink,
+        parkTimeoutMs: config.parkTimeoutMs,
+        db,
       });
       upstreamMs = Date.now() - upstreamStarted;
       chatResult = result;

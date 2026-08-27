@@ -21,7 +21,7 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
   maxDetailBytes: 268_435_456,
 };
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
 
@@ -68,6 +68,13 @@ CREATE TABLE IF NOT EXISTS system_logs (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_system_logs_created_at ON system_logs(created_at);
+CREATE TABLE IF NOT EXISTS conversations (
+  api_key_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (api_key_id, conversation_id)
+);
 `;
 
 export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
@@ -79,6 +86,7 @@ export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY):
   db.exec(SCHEMA);
   migrateRequestLogs(db);
   migrateSystemLogs(db);
+  migrateConversations(db);
   logPolicies.set(db, policy);
   pruneRequestLogs(db);
   pruneSystemLogs(db);
@@ -146,6 +154,7 @@ export function deleteApiKey(db: DatabaseSync, id: string): ApiKeyRow | undefine
   if (!existing) return undefined;
   db.exec("PRAGMA foreign_keys=OFF");
   try {
+    db.prepare("DELETE FROM conversations WHERE api_key_id = ?").run(id);
     db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
   } finally {
     db.exec("PRAGMA foreign_keys=ON");
@@ -510,6 +519,46 @@ function migrateSystemLogs(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_system_logs_created_at ON system_logs(created_at);
   `);
+}
+
+function migrateConversations(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      api_key_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (api_key_id, conversation_id)
+    );
+  `);
+}
+
+export function getConversationAgentId(
+  db: DatabaseSync,
+  apiKeyId: string,
+  conversationId: string,
+): string | undefined {
+  const row = db
+    .prepare(
+      "SELECT agent_id FROM conversations WHERE api_key_id = ? AND conversation_id = ?",
+    )
+    .get(apiKeyId, conversationId);
+  return row ? asString(row.agent_id) : undefined;
+}
+
+export function upsertConversation(
+  db: DatabaseSync,
+  apiKeyId: string,
+  conversationId: string,
+  agentId: string,
+): void {
+  db.prepare(
+    `INSERT INTO conversations (api_key_id, conversation_id, agent_id, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(api_key_id, conversation_id) DO UPDATE SET
+       agent_id = excluded.agent_id,
+       updated_at = excluded.updated_at`,
+  ).run(apiKeyId, conversationId, agentId, new Date().toISOString());
 }
 
 export function insertSystemLog(

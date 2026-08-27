@@ -10,6 +10,7 @@ const DEFAULT_LOG_MAX_ROWS = 100_000;
 const DEFAULT_LOG_DETAILED = false;
 const DEFAULT_LOG_DETAILED_MAX_BYTES = 65_536;
 const DEFAULT_LOG_MAX_DETAIL_BYTES = 268_435_456; // 256 MiB across all detail columns
+const DEFAULT_PARK_TIMEOUT_MS = 300_000;
 const CONFIG_FILE_NAME = "gateway.toml";
 
 const EMPTY_CONFIG_TEMPLATE = `# cursor-api configuration (auto-created in container)
@@ -21,6 +22,8 @@ port = 8787
 cursor_api_key = ""
 admin_access_key = ""
 api_key_pepper = ""
+
+# park_timeout_ms = 300000
 
 [logs]
 retention_days = 7
@@ -90,6 +93,7 @@ export function loadConfig(
     gitCommit:
       pickString(env.GIT_COMMIT, undefined) ??
       pickString(env.SOURCE_COMMIT, undefined) ??
+      readGitCommit(cwd) ??
       "unknown",
     maxBodyBytes: MAX_BODY_BYTES,
     logRetentionDays: parseBoundedInt(
@@ -125,6 +129,16 @@ export function loadConfig(
       ),
       DEFAULT_LOG_MAX_DETAIL_BYTES,
       { min: 1_048_576, max: 10_737_418_240 },
+    ),
+    parkTimeoutMs: parseBoundedInt(
+      pickConfigured(
+        env,
+        "PARK_TIMEOUT_MS",
+        intToString(tomlInt(toml, "park_timeout_ms")),
+        "park_timeout_ms",
+      ),
+      DEFAULT_PARK_TIMEOUT_MS,
+      { min: 5_000, max: 3_600_000 },
     ),
   };
 }
@@ -280,6 +294,28 @@ function scalarToNumber(value: string | number | boolean | TomlTable | undefined
   if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   if (typeof value === "string" && /^[1-9]\d*$|^0$/.test(value)) return Number(value);
   return undefined;
+}
+
+function readGitCommit(cwd: string): string | undefined {
+  try {
+    const gitPath = path.join(cwd, ".git");
+    const stat = fs.statSync(gitPath);
+    let gitRoot = gitPath;
+    if (stat.isFile()) {
+      const pointer = fs.readFileSync(gitPath, "utf8").trim();
+      const matched = /^gitdir:\s*(.+)$/.exec(pointer);
+      if (!matched?.[1]) return undefined;
+      gitRoot = path.resolve(cwd, matched[1]);
+    }
+    const head = fs.readFileSync(path.join(gitRoot, "HEAD"), "utf8").trim();
+    if (/^[0-9a-f]{7,40}$/i.test(head)) return head;
+    const ref = /^ref:\s*(.+)$/.exec(head);
+    if (!ref?.[1]) return undefined;
+    const sha = fs.readFileSync(path.join(gitRoot, ref[1]), "utf8").trim();
+    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function readVersion(cwd: string): string {

@@ -19,6 +19,7 @@ export interface AppConfig {
   logDetailed: boolean;
   logDetailedMaxBytes: number;
   logMaxDetailBytes: number;
+  parkTimeoutMs: number;
 }
 
 export interface LogPolicy {
@@ -149,6 +150,7 @@ export interface ParsedChatMessage {
   content: string;
   tool_call_id?: string;
   tool_calls?: OpenAiToolCall[];
+  images?: ParsedImage[];
 }
 
 export type ParsedImage =
@@ -168,7 +170,8 @@ export interface ParsedChatRequest {
   fast?: string;
   optimize_for?: string;
   tools?: OpenAiToolFunction[];
-  tool_choice?: "auto" | "none";
+  tool_choice?: "auto" | "none" | { name: string };
+  conversation_id?: string;
 }
 
 export interface OpenAiModel {

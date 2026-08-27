@@ -122,6 +122,32 @@ export async function createLocalChatAgent(options: {
   }
 }
 
+export async function resumeLocalChatAgent(options: {
+  agentId: string;
+  apiKey: string;
+  workspaceDir: string;
+  model: ModelSelection;
+  customTools?: Record<string, SDKCustomTool>;
+}): Promise<SDKAgent> {
+  await mkdir(options.workspaceDir, { recursive: true });
+  const hasCustomTools =
+    options.customTools !== undefined && Object.keys(options.customTools).length > 0;
+  try {
+    return await Agent.resume(options.agentId, {
+      apiKey: options.apiKey,
+      model: options.model,
+      tools: localChatAgentTools(hasCustomTools),
+      local: {
+        cwd: options.workspaceDir,
+        settingSources: [],
+        ...(hasCustomTools ? { customTools: options.customTools } : {}),
+      },
+    });
+  } catch (error) {
+    throw mapCursorError(error);
+  }
+}
+
 export async function billedUsageOf(agent: SDKAgent): Promise<AgentUsage | undefined> {
   return readBilledUsage(agent);
 }
