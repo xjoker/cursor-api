@@ -146,7 +146,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` |
 | `GET` | `/v1/models`、`/v1/models/{id}` |
 
-支持流式（`stream: true`）、视觉（`image_url`）、Cursor 参数（`params`、`variant` 等）。不支持工具调用和音频。
+支持流式（`stream: true`）、视觉（`image_url`）、Cursor 参数（`params`、`variant` 等）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。不支持音频。
 
 ```python
 from openai import OpenAI

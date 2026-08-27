@@ -9,6 +9,23 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.1] — 2026-08-27
+
+OpenAI tool calling for local clients such as OpenCode.
+
+### Added
+
+- `POST /v1/chat/completions` accepts `tools` / `tool_choice` and `messages[].role=tool`.
+- Assistant responses may include OpenAI `tool_calls` (`finish_reason: tool_calls`); the next request supplies tool results.
+- Conversation reuse: the same Cursor agent is kept for follow-up user turns and pending tool rounds (in-memory; pending tools expire after 5 minutes).
+- Request body limit raised to 4MiB so OpenCode system + tool schemas fit.
+
+### Changed
+
+- Cursor built-in shell/file tools stay disabled (`tools: []`). Client tools run on the client, not in the gateway workspace.
+
+---
+
 ## [20260820.4] — 2026-08-20
 
 Admin bilingual UI, per-key token/cache stats, and English-only docs hygiene.
@@ -129,9 +146,10 @@ Initial public MVP.
 ### Known limitations (MVP)
 
 - Single upstream Cursor account only.
-- No tool / function calling, audio, Claude `/v1/messages`, or Gemini APIs.
+- No audio, Claude `/v1/messages`, or Gemini APIs.
 - No Cursor account balance endpoint (Enterprise Admin APIs not integrated).
 - Common OpenAI sampling fields accepted but not forwarded upstream.
+- Tool calling is OpenAI-protocol only (client executes). Pending tool rounds live in memory and do not survive gateway restart.
 
 ---
 

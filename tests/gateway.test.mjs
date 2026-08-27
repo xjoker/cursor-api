@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { cancelledError } from "../dist/errors.js";
-import { encodeNonStreamCompletion, parseChatCompletionsRequest } from "../dist/openai.js";
+import { encodeNonStreamCompletion, encodeStreamChunk, parseChatCompletionsRequest } from "../dist/openai.js";
 
 test("TOML trailing comments and hashes inside strings are valid", () => {
   const root = mkdtempSync(join(tmpdir(), "cursor-api-toml-"));
@@ -288,4 +288,120 @@ test("cancelledError maps to HTTP 499", () => {
   assert.equal(error.httpStatus, 499);
   assert.equal(error.code, "cancelled");
   assert.equal(error.openaiType, "cancelled");
+});
+
+test("chat completions accepts OpenAI tools and tool role", () => {
+  const parsed = parseChatCompletionsRequest({
+    model: "composer-2.5",
+    messages: [
+      { role: "user", content: "list files" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "bash", arguments: "{\"command\":\"ls\"}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "README.md" },
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "bash",
+          description: "Run a shell command",
+          parameters: { type: "object", properties: { command: { type: "string" } } },
+        },
+      },
+    ],
+  });
+  assert.equal(parsed.tools?.[0]?.name, "bash");
+  assert.equal(parsed.messages[1]?.tool_calls?.[0]?.id, "call_1");
+  assert.equal(parsed.messages[2]?.role, "tool");
+  assert.equal(parsed.messages[2]?.tool_call_id, "call_1");
+});
+
+test("legacy functions field is still rejected", () => {
+  assert.throws(
+    () =>
+      parseChatCompletionsRequest({
+        model: "composer-2.5",
+        messages: [{ role: "user", content: "hi" }],
+        functions: [{ name: "x" }],
+      }),
+    (error) => error instanceof Error && error.message.includes("functions"),
+  );
+});
+
+test("non-stream completion encodes tool_calls", () => {
+  const body = encodeNonStreamCompletion({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "composer-2.5",
+    content: "",
+    usage: null,
+    tool_calls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
+    finish_reason: "tool_calls",
+  });
+  assert.equal(body.choices[0].finish_reason, "tool_calls");
+  assert.equal(body.choices[0].message.content, null);
+  assert.deepEqual(body.choices[0].message.tool_calls, [
+    {
+      id: "call_1",
+      type: "function",
+      function: { name: "bash", arguments: "{\"command\":\"ls\"}" },
+    },
+  ]);
+});
+
+test("stream chunk encodes tool_calls deltas", () => {
+  const chunk = encodeStreamChunk({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "composer-2.5",
+    tool_calls: [{ index: 0, id: "call_1", name: "bash", arguments: "" }],
+  });
+  assert.deepEqual(chunk.choices[0].delta.tool_calls, [
+    {
+      index: 0,
+      id: "call_1",
+      type: "function",
+      function: { name: "bash", arguments: "" },
+    },
+  ]);
+  const done = encodeStreamChunk({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "composer-2.5",
+    finish_reason: "tool_calls",
+  });
+  assert.equal(done.choices[0].finish_reason, "tool_calls");
+});
+
+test("classifyChatTurn splits user vs tool result rounds", async () => {
+  const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
+  const userTurn = classifyChatTurn([
+    { role: "system", content: "sys" },
+    { role: "user", content: "list files" },
+  ]);
+  assert.equal(userTurn.kind, "user");
+  assert.equal(userTurn.user.content, "list files");
+
+  const toolTurn = classifyChatTurn([
+    { role: "system", content: "sys" },
+    { role: "user", content: "list files" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call_1", name: "bash", arguments: "{}" }],
+    },
+    { role: "tool", tool_call_id: "call_1", content: "ok" },
+  ]);
+  assert.equal(toolTurn.kind, "tool_results");
+  assert.equal(toolTurn.results[0]?.toolCallId, "call_1");
+  assert.equal(hashMessages(toolTurn.stem), hashMessages(userTurn.stem.concat([userTurn.user])));
 });

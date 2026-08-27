@@ -13,10 +13,10 @@ import {
   encodeNonStreamCompletion,
   encodeStreamChunk,
   parseChatCompletionsRequest,
-  renderTranscript,
 } from "./openai.js";
-import { getCursorModel, listCursorModels, runCursorText, validateChatRequestModel, warmCursorAccount } from "./cursor.js";
-import type { AppConfig, CursorChatResult, ParsedChatRequest, Usage } from "./contracts.js";
+import { getCursorModel, listCursorModels, validateChatRequestModel, warmCursorAccount } from "./cursor.js";
+import { runChatTurn } from "./session.js";
+import type { AppConfig, CursorChatResult, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
 
 let config: AppConfig;
 try {
@@ -202,14 +202,61 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     const headers = corsHeaders(req);
 
     const abort = new AbortController();
+    let holdForTools = false;
     const onClose = (): void => {
+      if (holdForTools) return;
       if (!res.writableEnded) abort.abort();
     };
     req.on("close", onClose);
     res.on("close", onClose);
 
     try {
-      const prompt = renderTranscript(parsed.messages);
+      const collectedTools: OpenAiToolCall[] = [];
+      const sink = parsed.stream
+        ? {
+            onText: async (text: string): Promise<void> => {
+              if (text === "") return;
+              await writeSse(
+                res,
+                encodeStreamChunk({
+                  id: requestId,
+                  created,
+                  model: parsed.model,
+                  content: text,
+                }),
+              );
+            },
+            onToolCalls: async (calls: OpenAiToolCall[]): Promise<void> => {
+              collectedTools.push(...calls);
+              for (const [index, call] of calls.entries()) {
+                await writeSse(
+                  res,
+                  encodeStreamChunk({
+                    id: requestId,
+                    created,
+                    model: parsed.model,
+                    tool_calls: [{ index, id: call.id, name: call.name, arguments: "" }],
+                  }),
+                );
+                await writeSse(
+                  res,
+                  encodeStreamChunk({
+                    id: requestId,
+                    created,
+                    model: parsed.model,
+                    tool_calls: [{ index, arguments: call.arguments }],
+                  }),
+                );
+              }
+            },
+          }
+        : {
+            onText: async (): Promise<void> => undefined,
+            onToolCalls: async (calls: OpenAiToolCall[]): Promise<void> => {
+              collectedTools.push(...calls);
+            },
+          };
+
       if (parsed.stream) {
         beginSse(res, requestId, headers);
         await writeSse(
@@ -221,32 +268,29 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             role: "assistant",
           }),
         );
-        const upstreamStarted = Date.now();
-        const result = await runCursorText({
-          apiKey: config.cursorApiKey,
-          workspaceDir: config.cursorWorkspace,
-          request: parsed,
-          prompt,
-          abortSignal: abort.signal,
-          onTextDelta: async (text) => {
-            if (text === "") return;
-            await writeSse(
-              res,
-              encodeStreamChunk({
-                id: requestId,
-                created,
-                model: parsed.model,
-                content: text,
-              }),
-            );
-          },
-        });
-        upstreamMs = Date.now() - upstreamStarted;
-        chatResult = result;
-        if (result.usageKnown) usage = result.usage;
-        if (result.status === "cancelled") {
-          httpStatus = 499;
-          errorCode = "cancelled";
+      }
+
+      const upstreamStarted = Date.now();
+      const result = await runChatTurn({
+        apiKey: config.cursorApiKey,
+        apiKeyId: key.id,
+        workspaceDir: config.cursorWorkspace,
+        request: parsed,
+        abortSignal: abort.signal,
+        sink,
+      });
+      upstreamMs = Date.now() - upstreamStarted;
+      chatResult = result;
+      if (result.usageKnown) usage = result.usage;
+
+      if (result.finish_reason === "tool_calls") {
+        holdForTools = true;
+      }
+
+      if (result.status === "cancelled" || result.finish_reason === "cancelled") {
+        httpStatus = 499;
+        errorCode = "cancelled";
+        if (parsed.stream) {
           await writeSse(res, {
             error: {
               message: "Request cancelled",
@@ -258,18 +302,25 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
           res.end();
           return;
         }
-        if (result.status === "error") {
-          httpStatus = 502;
-          errorCode = "upstream_error";
-          throw new GatewayError(502, "upstream_error", "Cursor request failed", "upstream_error");
-        }
+        throw cancelledError();
+      }
+      if (result.status === "error" || result.finish_reason === "error") {
+        httpStatus = 502;
+        errorCode = "upstream_error";
+        throw new GatewayError(502, "upstream_error", "Cursor request failed", "upstream_error");
+      }
+
+      const toolCalls = result.tool_calls ?? collectedTools;
+      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+
+      if (parsed.stream) {
         await writeSse(
           res,
           encodeStreamChunk({
             id: requestId,
             created,
             model: parsed.model,
-            finish_reason: "stop",
+            finish_reason: finishReason,
           }),
         );
         if (parsed.includeUsage && result.usageKnown) {
@@ -288,23 +339,6 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         await writeSse(res, "[DONE]");
         res.end();
       } else {
-        const upstreamStarted = Date.now();
-        const result = await runCursorText({
-          apiKey: config.cursorApiKey,
-          workspaceDir: config.cursorWorkspace,
-          request: parsed,
-          prompt,
-          abortSignal: abort.signal,
-        });
-        upstreamMs = Date.now() - upstreamStarted;
-        chatResult = result;
-        if (result.usageKnown) usage = result.usage;
-        if (result.status === "cancelled") {
-          throw cancelledError();
-        }
-        if (result.status === "error") {
-          throw new GatewayError(502, "upstream_error", "Cursor request failed", "upstream_error");
-        }
         sendJson(
           res,
           200,
@@ -316,6 +350,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             usage: result.usageKnown ? result.usage : null,
             cost: result.cost,
             params: result.params,
+            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+            finish_reason: finishReason,
           }),
           { "x-request-id": requestId, ...headers },
         );
@@ -400,6 +436,7 @@ function buildRequestDetail(parsed: ParsedChatRequest): string {
     ...(parsed.reasoning_effort ? { reasoning_effort: parsed.reasoning_effort } : {}),
     ...(parsed.verbosity ? { verbosity: parsed.verbosity } : {}),
     ...(parsed.images?.length ? { images: `${parsed.images.length} attached` } : {}),
+    ...(parsed.tools?.length ? { tools: parsed.tools.map((tool) => tool.name) } : {}),
   });
 }
 
@@ -409,7 +446,8 @@ function buildResponseDetail(result: CursorChatResult | null, errorCode: string 
     text: result?.text ?? "",
     usage: result?.usageKnown ? result.usage : null,
     cost: result?.cost ?? null,
-    params: result?.params ?? null,
+    finish_reason: result?.finish_reason ?? null,
+    tool_calls: result?.tool_calls?.map((call) => call.name) ?? null,
     error_code: errorCode,
   });
 }

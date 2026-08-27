@@ -11,12 +11,11 @@ import {
   type ModelParameterDefinition,
   type ModelParameterValue,
   type ModelSelection,
-  type Run,
   type SDKAgent,
-  type SDKMessage,
+  type SDKCustomTool,
   type TokenUsage,
 } from "@cursor/sdk";
-import type { CursorChatResult, CursorCost, ModelParam, OpenAiModel, ParsedChatRequest, Usage } from "./contracts.js";
+import type { ModelParam, OpenAiModel, ParsedChatRequest, Usage } from "./contracts.js";
 import { GatewayError, invalidRequest, rateLimitError, upstreamAuthError, upstreamError } from "./errors.js";
 import { logError } from "./log.js";
 
@@ -81,88 +80,42 @@ export async function getCursorAccount(apiKey: string): Promise<{
 }
 
 export async function validateChatRequestModel(apiKey: string, request: ParsedChatRequest): Promise<void> {
-  await resolveModelSelection(apiKey, request);
+  await resolveChatModel(apiKey, request);
 }
 
-export async function runCursorText(options: {
+export async function resolveChatModel(apiKey: string, request: ParsedChatRequest): Promise<ModelSelection> {
+  return resolveModelSelection(apiKey, request);
+}
+
+export async function createLocalChatAgent(options: {
   apiKey: string;
   workspaceDir: string;
-  request: ParsedChatRequest;
-  prompt: string;
-  abortSignal: AbortSignal;
-  onTextDelta?: (text: string) => void | Promise<void>;
-}): Promise<CursorChatResult> {
+  model: ModelSelection;
+  customTools?: Record<string, SDKCustomTool>;
+}): Promise<SDKAgent> {
   await mkdir(options.workspaceDir, { recursive: true });
-  const model = await resolveModelSelection(options.apiKey, options.request);
-
-  let agent: SDKAgent | undefined;
-  let run: Run | undefined;
-  const abortHandler = (): void => {
-    if (run?.supports("cancel")) {
-      void run.cancel();
-    }
-  };
-
   try {
-    agent = await Agent.create({
+    return await Agent.create({
       apiKey: options.apiKey,
-      model,
+      model: options.model,
       tools: [],
-      local: { cwd: options.workspaceDir, settingSources: [] },
+      local: {
+        cwd: options.workspaceDir,
+        settingSources: [],
+        ...(options.customTools ? { customTools: options.customTools } : {}),
+      },
     });
-
-    run = await agent.send(
-      options.request.images && options.request.images.length > 0
-        ? { text: options.prompt, images: options.request.images }
-        : options.prompt,
-    );
-    options.abortSignal.addEventListener("abort", abortHandler, { once: true });
-
-    if (options.abortSignal.aborted && run.supports("cancel")) {
-      await run.cancel();
-    }
-
-    let streamUsage: TokenUsage | undefined;
-    if (options.onTextDelta) {
-      try {
-        for await (const event of run.stream()) {
-          if (event.type === "usage") {
-            streamUsage = event.usage;
-            continue;
-          }
-          await emitAssistantDeltas(event, options.onTextDelta);
-        }
-      } catch (error) {
-        if (!options.abortSignal.aborted) {
-          throw error;
-        }
-      }
-    }
-
-    if (options.abortSignal.aborted && run.supports("cancel")) {
-      await run.cancel();
-    }
-
-    const result = await run.wait();
-    const billed = await readBilledUsage(agent);
-    const rawUsage = result.usage ?? billed?.usage ?? streamUsage;
-    return {
-      text: result.result ?? "",
-      usage: toUsage(rawUsage),
-      usageKnown: rawUsage !== undefined,
-      cost: toCost(billed),
-      params: model.params,
-      status: result.status,
-    };
   } catch (error) {
-    if (options.abortSignal.aborted) {
-      return { text: "", usage: toUsage(undefined), usageKnown: false, status: "cancelled" };
-    }
     throw mapCursorError(error);
-  } finally {
-    options.abortSignal.removeEventListener("abort", abortHandler);
-    await disposeAgent(agent);
   }
+}
+
+export async function billedUsageOf(agent: SDKAgent): Promise<AgentUsage | undefined> {
+  return readBilledUsage(agent);
+}
+
+export function toChatUsage(usage: TokenUsage | undefined): Usage {
+  return toUsage(usage);
 }
 
 async function loadCatalog(apiKey: string): Promise<ModelListItem[]> {
@@ -366,28 +319,6 @@ async function readBilledUsage(agent: SDKAgent): Promise<AgentUsage | undefined>
   }
 }
 
-function toCost(billed: AgentUsage | undefined): CursorCost | null {
-  if (!billed?.cost) return null;
-  return {
-    raw_cost_cents: billed.cost.rawCostCents,
-    charged_cents: billed.cost.chargedCents,
-  };
-}
-
-async function emitAssistantDeltas(
-  event: SDKMessage,
-  onTextDelta: (text: string) => void | Promise<void>,
-): Promise<void> {
-  if (event.type !== "assistant") {
-    return;
-  }
-  for (const block of event.message.content) {
-    if (block.type === "text") {
-      await onTextDelta(block.text);
-    }
-  }
-}
-
 function toUsage(usage: TokenUsage | undefined): Usage {
   if (!usage) {
     return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -402,7 +333,7 @@ function toUsage(usage: TokenUsage | undefined): Usage {
   };
 }
 
-async function disposeAgent(agent: SDKAgent | undefined): Promise<void> {
+export async function disposeAgent(agent: SDKAgent | undefined): Promise<void> {
   if (!agent) {
     return;
   }
@@ -413,7 +344,7 @@ async function disposeAgent(agent: SDKAgent | undefined): Promise<void> {
   agent.close();
 }
 
-function mapCursorError(error: unknown): GatewayError {
+export function mapCursorError(error: unknown): GatewayError {
   if (error instanceof GatewayError) {
     return error;
   }

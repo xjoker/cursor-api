@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig } from "./contracts.js";
 
-const MAX_BODY_BYTES = 1_048_576;
+const MAX_BODY_BYTES = 4_194_304;
 const DEFAULT_PORT = 8787;
 const DEFAULT_DATA_DIR = "data";
 const DEFAULT_LOG_RETENTION_DAYS = 7;

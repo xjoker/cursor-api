@@ -146,7 +146,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` |
 | `GET` | `/v1/models`, `/v1/models/{id}` |
 
-Streaming (`stream: true`), vision (`image_url`), and Cursor knobs (`params`, `variant`, `reasoning_effort`, …) are supported. Tool calling and audio are not.
+Streaming (`stream: true`), vision (`image_url`), and Cursor knobs (`params`, `variant`, `reasoning_effort`, …) are supported. OpenAI tool calling (`tools` / `tool_calls` / `role: tool`) is supported so clients like OpenCode can run tools locally. Audio is not.
 
 ```python
 from openai import OpenAI

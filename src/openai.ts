@@ -1,4 +1,13 @@
-import type { CursorCost, ModelParam, ParsedChatMessage, ParsedChatRequest, ParsedImage, Usage } from "./contracts.js";
+import type {
+  CursorCost,
+  ModelParam,
+  OpenAiToolCall,
+  OpenAiToolFunction,
+  ParsedChatMessage,
+  ParsedChatRequest,
+  ParsedImage,
+  Usage,
+} from "./contracts.js";
 import { invalidRequest } from "./errors.js";
 
 const ACCEPTED_FIELDS = new Set([
@@ -31,12 +40,12 @@ const ACCEPTED_FIELDS = new Set([
   "variant",
   "fast",
   "optimize_for",
-]);
-
-const REJECTED_FIELDS = [
   "tools",
   "tool_choice",
   "parallel_tool_calls",
+]);
+
+const REJECTED_FIELDS = [
   "functions",
   "function_call",
   "modalities",
@@ -45,8 +54,8 @@ const REJECTED_FIELDS = [
   "web_search_options",
 ] as const;
 
-const ALLOWED_ROLES = new Set(["system", "developer", "user", "assistant"]);
-const REJECTED_ROLES = new Set(["tool", "function"]);
+const ALLOWED_ROLES = new Set(["system", "developer", "user", "assistant", "tool"]);
+const REJECTED_ROLES = new Set(["function"]);
 const REJECTED_MEDIA_TYPES = new Set(["image", "audio", "input_audio", "file"]);
 
 export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
@@ -96,7 +105,11 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
   const parsedMessages = body.messages.map((item, index) => parseMessage(item, index));
   const includeUsage = parseStreamOptions(body.stream_options);
   const images = parsedMessages.flatMap((message) => message.images);
-  const messages = parsedMessages.map(({ role, content }) => ({ role, content }));
+  const messages: ParsedChatMessage[] = parsedMessages.map(
+    ({ images: _images, ...message }) => message,
+  );
+  const tools = parseTools(body.tools);
+  const toolChoice = parseToolChoice(body.tool_choice);
 
   return {
     model: body.model,
@@ -110,11 +123,27 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
     verbosity: optionalNonEmptyString(body.verbosity, "verbosity"),
     fast: parseFast(body.fast),
     optimize_for: optionalNonEmptyString(body.optimize_for, "optimize_for"),
+    ...(tools !== undefined ? { tools } : {}),
+    ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
   };
 }
 
 export function renderTranscript(messages: ParsedChatMessage[]): string {
-  return messages.map((message) => `[${message.role}]\n${message.content}`).join("\n\n");
+  return messages
+    .map((message) => {
+      if (message.role === "tool") {
+        return `[tool ${message.tool_call_id ?? ""}]\n${message.content}`;
+      }
+      if (message.tool_calls && message.tool_calls.length > 0) {
+        const calls = message.tool_calls
+          .map((call) => `${call.name}(${call.arguments})`)
+          .join("\n");
+        const text = message.content === "" ? calls : `${message.content}\n${calls}`;
+        return `[assistant]\n${text}`;
+      }
+      return `[${message.role}]\n${message.content}`;
+    })
+    .join("\n\n");
 }
 
 export function encodeNonStreamCompletion(input: {
@@ -125,7 +154,19 @@ export function encodeNonStreamCompletion(input: {
   usage: Usage | null;
   cost?: CursorCost | null;
   params?: ModelParam[];
+  tool_calls?: OpenAiToolCall[];
+  finish_reason?: "stop" | "tool_calls";
 }): Record<string, unknown> {
+  const toolCalls = input.tool_calls;
+  const finishReason =
+    input.finish_reason ?? (toolCalls && toolCalls.length > 0 ? "tool_calls" : "stop");
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    content: finishReason === "tool_calls" && input.content === "" ? null : input.content,
+  };
+  if (toolCalls && toolCalls.length > 0) {
+    message.tool_calls = toolCalls.map(encodeToolCall);
+  }
   const body: Record<string, unknown> = {
     id: input.id,
     object: "chat.completion",
@@ -134,8 +175,8 @@ export function encodeNonStreamCompletion(input: {
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: input.content },
-        finish_reason: "stop",
+        message,
+        finish_reason: finishReason,
       },
     ],
     cursor: encodeCursorExtra(input.cost, input.params),
@@ -152,14 +193,21 @@ export function encodeStreamChunk(input: {
   model: string;
   content?: string | null;
   role?: "assistant";
-  finish_reason?: "stop" | null;
+  finish_reason?: "stop" | "tool_calls" | null;
   usage?: Usage | null;
   cost?: CursorCost | null;
   params?: ModelParam[];
+  tool_calls?: Array<{
+    index: number;
+    id?: string;
+    name?: string;
+    arguments?: string;
+  }>;
 }): Record<string, unknown> {
   const hasRole = input.role !== undefined;
   const hasContent = input.content !== undefined && input.content !== null;
   const hasFinish = input.finish_reason !== undefined && input.finish_reason !== null;
+  const hasTools = input.tool_calls !== undefined && input.tool_calls.length > 0;
   const usage = input.usage ?? null;
 
   const payload: Record<string, unknown> = {
@@ -169,7 +217,7 @@ export function encodeStreamChunk(input: {
     model: input.model,
   };
 
-  if (usage !== null && !hasRole && !hasContent && !hasFinish) {
+  if (usage !== null && !hasRole && !hasContent && !hasFinish && !hasTools) {
     payload.choices = [];
     payload.usage = encodeUsage(usage);
     payload.cursor = encodeCursorExtra(input.cost, input.params);
@@ -179,6 +227,20 @@ export function encodeStreamChunk(input: {
   const delta: Record<string, unknown> = {};
   if (hasRole) delta.role = input.role;
   if (hasContent) delta.content = input.content;
+  if (hasTools) {
+    delta.tool_calls = input.tool_calls?.map((call) => {
+      const encoded: Record<string, unknown> = { index: call.index };
+      if (call.id !== undefined) {
+        encoded.id = call.id;
+        encoded.type = "function";
+      }
+      const fn: Record<string, unknown> = {};
+      if (call.name !== undefined) fn.name = call.name;
+      if (call.arguments !== undefined) fn.arguments = call.arguments;
+      if (Object.keys(fn).length > 0) encoded.function = fn;
+      return encoded;
+    });
+  }
 
   payload.choices = [
     {
@@ -206,15 +268,38 @@ function parseMessage(item: unknown, index: number): ParsedChatMessage & { image
     throw invalidRequest(`messages[${String(index)}].role '${role}' is not supported`);
   }
 
-  const parsed = parseContent(item.content, index);
-  return {
+  const toolCalls = role === "assistant" ? parseAssistantToolCalls(item.tool_calls, index) : undefined;
+  const parsed = parseContent(item.content, index, {
+    allowEmpty: role === "assistant" && toolCalls !== undefined,
+    allowNull: role === "assistant" && toolCalls !== undefined,
+  });
+  const message: ParsedChatMessage & { images: ParsedImage[] } = {
     role: role as ParsedChatMessage["role"],
     content: parsed.text,
     images: parsed.images,
   };
+  if (role === "tool") {
+    const toolCallId = item.tool_call_id;
+    if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+      throw invalidRequest(`messages[${String(index)}].tool_call_id must be a non-empty string`);
+    }
+    message.tool_call_id = toolCallId;
+  }
+  if (toolCalls) {
+    message.tool_calls = toolCalls;
+  }
+  return message;
 }
 
-function parseContent(content: unknown, index: number): { text: string; images: ParsedImage[] } {
+function parseContent(
+  content: unknown,
+  index: number,
+  options: { allowEmpty?: boolean; allowNull?: boolean } = {},
+): { text: string; images: ParsedImage[] } {
+  if (content === undefined || content === null) {
+    if (options.allowNull) return { text: "", images: [] };
+    throw invalidRequest(`messages[${String(index)}].content must be a string or text parts`);
+  }
   if (typeof content === "string") {
     return { text: content, images: [] };
   }
@@ -246,7 +331,7 @@ function parseContent(content: unknown, index: number): { text: string; images: 
     }
     parts.push(part.text);
   }
-  if (parts.length === 0 && images.length === 0) {
+  if (parts.length === 0 && images.length === 0 && !options.allowEmpty) {
     throw invalidRequest(`messages[${String(index)}].content must include text or image_url`);
   }
   return { text: parts.join(""), images };
@@ -344,6 +429,89 @@ function parseFast(value: unknown): string | undefined {
   if (value === true || value === "true") return "true";
   if (value === false || value === "false") return "false";
   throw invalidRequest("Field 'fast' must be a boolean or 'true'/'false'");
+}
+
+function parseTools(value: unknown): OpenAiToolFunction[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw invalidRequest("Field 'tools' must be an array");
+  }
+  return value.map((item, index) => {
+    if (!isPlainObject(item)) {
+      throw invalidRequest(`tools[${String(index)}] must be an object`);
+    }
+    if (item.type !== undefined && item.type !== "function") {
+      throw invalidRequest(`tools[${String(index)}].type must be 'function'`);
+    }
+    const spec = isPlainObject(item.function) ? item.function : item;
+    if (typeof spec.name !== "string" || spec.name.length === 0) {
+      throw invalidRequest(`tools[${String(index)}].function.name must be a non-empty string`);
+    }
+    const parameters =
+      spec.parameters === undefined
+        ? { type: "object", properties: {} }
+        : spec.parameters;
+    if (!isPlainObject(parameters)) {
+      throw invalidRequest(`tools[${String(index)}].function.parameters must be an object`);
+    }
+    const tool: OpenAiToolFunction = { name: spec.name, parameters };
+    if (typeof spec.description === "string" && spec.description.length > 0) {
+      tool.description = spec.description;
+    }
+    return tool;
+  });
+}
+
+function parseToolChoice(value: unknown): "auto" | "none" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "auto" || value === "none") return value;
+  if (value === "required") return "auto";
+  if (isPlainObject(value) && value.type === "function") return "auto";
+  throw invalidRequest("Field 'tool_choice' must be 'auto', 'none', 'required', or {type:'function'}");
+}
+
+function parseAssistantToolCalls(value: unknown, index: number): OpenAiToolCall[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw invalidRequest(`messages[${String(index)}].tool_calls must be a non-empty array`);
+  }
+  return value.map((item, callIndex) => {
+    if (!isPlainObject(item)) {
+      throw invalidRequest(`messages[${String(index)}].tool_calls[${String(callIndex)}] is invalid`);
+    }
+    const fn = isPlainObject(item.function) ? item.function : undefined;
+    const name =
+      fn && typeof fn.name === "string"
+        ? fn.name
+        : typeof item.name === "string"
+          ? item.name
+          : "";
+    const args =
+      fn && typeof fn.arguments === "string"
+        ? fn.arguments
+        : typeof item.arguments === "string"
+          ? item.arguments
+          : "";
+    if (typeof item.id !== "string" || item.id.length === 0) {
+      throw invalidRequest(
+        `messages[${String(index)}].tool_calls[${String(callIndex)}].id must be a non-empty string`,
+      );
+    }
+    if (name.length === 0) {
+      throw invalidRequest(
+        `messages[${String(index)}].tool_calls[${String(callIndex)}].function.name is required`,
+      );
+    }
+    return { id: item.id, name, arguments: args };
+  });
+}
+
+function encodeToolCall(call: OpenAiToolCall): Record<string, unknown> {
+  return {
+    id: call.id,
+    type: "function",
+    function: { name: call.name, arguments: call.arguments },
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

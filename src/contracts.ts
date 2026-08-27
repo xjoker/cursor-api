@@ -1,6 +1,6 @@
 /**
- * Shared contracts for the MVP gateway.
- * Implementations live in the owner files listed below. Do not add new files.
+ * Shared contracts for the gateway.
+ * Chat completions + OpenAI tool calling live in openai.ts / session.ts / cursor.ts.
  */
 
 export interface AppConfig {
@@ -118,9 +118,23 @@ export interface ModelParam {
   value: string;
 }
 
+export interface OpenAiToolFunction {
+  name: string;
+  description?: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface OpenAiToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
 export interface ParsedChatMessage {
-  role: "system" | "developer" | "user" | "assistant";
+  role: "system" | "developer" | "user" | "assistant" | "tool";
   content: string;
+  tool_call_id?: string;
+  tool_calls?: OpenAiToolCall[];
 }
 
 export type ParsedImage =
@@ -139,6 +153,8 @@ export interface ParsedChatRequest {
   verbosity?: string;
   fast?: string;
   optimize_for?: string;
+  tools?: OpenAiToolFunction[];
+  tool_choice?: "auto" | "none";
 }
 
 export interface OpenAiModel {
@@ -169,4 +185,6 @@ export interface CursorChatResult {
   cost?: CursorCost | null;
   params?: ModelParam[];
   status: "finished" | "error" | "cancelled";
+  finish_reason: "stop" | "tool_calls" | "cancelled" | "error";
+  tool_calls?: OpenAiToolCall[];
 }
