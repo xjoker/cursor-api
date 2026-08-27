@@ -382,6 +382,18 @@ test("stream chunk encodes tool_calls deltas", () => {
   assert.equal(done.choices[0].finish_reason, "tool_calls");
 });
 
+test("identical conversation prefixes hash to the same stem", async () => {
+  const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
+  const sys = { role: "system", content: "sys" };
+  const ok = { role: "assistant", content: "OK" };
+  const prefix = [sys, { role: "user", content: "Reply with only OK." }, ok];
+  const nextC = classifyChatTurn([...prefix, { role: "user", content: "secret C" }]);
+  const nextD = classifyChatTurn([...prefix, { role: "user", content: "secret D" }]);
+  assert.equal(nextC.kind, "user");
+  assert.equal(nextD.kind, "user");
+  assert.equal(hashMessages(nextC.stem), hashMessages(nextD.stem));
+});
+
 test("missingFlushedToolResults only requires IDs already sent to the client", async () => {
   const { missingFlushedToolResults } = await import("../dist/session.js");
   assert.deepEqual(missingFlushedToolResults(["call_a"], ["call_a"]), []);

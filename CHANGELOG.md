@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.4] — 2026-08-27
+
+### Fixed
+
+- Follow-up user turns no longer reuse an idle Cursor agent keyed only by shared message prefix. Two OpenCode sessions that both start with the same “Reply OK” (or any identical stem) were attaching the next user line to the other session’s agent, so secrets leaked across conversations. Each user turn now builds a new agent from the HTTP `messages` transcript. Pending tool rounds still keep the same in-memory agent.
+
 ## [20260827.3] — 2026-08-27
 
 ### Fixed

@@ -27,7 +27,6 @@ import { logInfo } from "./log.js";
 import { renderTranscript } from "./openai.js";
 
 const PARK_TIMEOUT_MS = 5 * 60 * 1000;
-const IDLE_TTL_MS = 30 * 60 * 1000;
 
 export type ChatTurnKind =
   | {
@@ -63,7 +62,6 @@ interface LiveSession {
   awaitingClient: boolean;
   flushTimer: ReturnType<typeof setTimeout> | undefined;
   parkTimer: ReturnType<typeof setTimeout> | undefined;
-  idleTimer: ReturnType<typeof setTimeout> | undefined;
   indexKeys: string[];
   modelParams: CursorChatResult["params"];
   text: string;
@@ -172,14 +170,9 @@ export async function runChatTurn(options: {
     return await continueRun(session, options.abortSignal);
   }
 
-  const existing = sessions.get(lookupKey);
-  if (existing && existing.parks.size === 0) {
-    clearIdle(existing);
-    existing.sink = options.sink;
-    existing.lastRequestMessages = options.request.messages;
-    return await sendOnSession(existing, turn.user.content, options);
-  }
-
+  // User turns always start a fresh Cursor agent from the HTTP transcript.
+  // Reusing an idle agent by stem hash mixes OpenCode sessions that share a
+  // prefix: lookup ignores the new user line, and agent.send only gets that line.
   return await startNewSession(turn, options);
 }
 
@@ -207,7 +200,6 @@ async function startNewSession(
     awaitingClient: false,
     flushTimer: undefined,
     parkTimer: undefined,
-    idleTimer: undefined,
     indexKeys: [],
     modelParams: model.params,
     text: "",
@@ -292,6 +284,18 @@ async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
   ]);
   if (outcome.kind === "tools") {
     armParkTimeout(session);
+    indexSession(
+      session,
+      session.apiKeyId,
+      hashMessages([
+        ...session.lastRequestMessages,
+        {
+          role: "assistant",
+          content: session.text,
+          tool_calls: outcome.calls,
+        },
+      ]),
+    );
     if (session.sink) await session.sink.onToolCalls(outcome.calls);
     return {
       text: session.text,
@@ -303,15 +307,8 @@ async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
       tool_calls: outcome.calls,
     };
   }
-  indexAfterStop(session, outcome.result.text);
-  scheduleIdle(session);
+  await dropSession(session);
   return outcome.result;
-}
-
-function indexAfterStop(session: LiveSession, text: string): void {
-  const nextStem = [...session.lastRequestMessages, { role: "assistant" as const, content: text }];
-  indexSession(session, session.apiKeyId, hashMessages(nextStem));
-  session.text = text;
 }
 
 function applyToolResults(
@@ -491,20 +488,6 @@ function armParkTimeout(session: LiveSession): void {
   }, PARK_TIMEOUT_MS);
 }
 
-function scheduleIdle(session: LiveSession): void {
-  clearIdle(session);
-  session.idleTimer = setTimeout(() => {
-    void dropSession(session);
-  }, IDLE_TTL_MS);
-}
-
-function clearIdle(session: LiveSession): void {
-  if (session.idleTimer) {
-    clearTimeout(session.idleTimer);
-    session.idleTimer = undefined;
-  }
-}
-
 function clearParkTimer(session: LiveSession): void {
   if (session.parkTimer) {
     clearTimeout(session.parkTimer);
@@ -518,12 +501,18 @@ function sessionKey(apiKeyId: string, hash: string): string {
 
 function indexSession(session: LiveSession, apiKeyId: string, hash: string): void {
   const key = sessionKey(apiKeyId, hash);
+  const prev = sessions.get(key);
+  if (prev && prev !== session && prev.parks.size > 0) {
+    return;
+  }
+  if (prev && prev !== session) {
+    prev.indexKeys = prev.indexKeys.filter((item) => item !== key);
+  }
   sessions.set(key, session);
   if (!session.indexKeys.includes(key)) session.indexKeys.push(key);
 }
 
 async function dropSession(session: LiveSession): Promise<void> {
-  clearIdle(session);
   clearParkTimer(session);
   if (session.flushTimer) clearTimeout(session.flushTimer);
   for (const key of session.indexKeys) {
