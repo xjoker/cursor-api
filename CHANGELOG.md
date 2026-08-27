@@ -14,6 +14,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 ### Fixed
 
 - OpenAI `tools` now reach the model: Cursor `customTools` are an MCP family, so the local agent allows only `mcp` when client tools are present. `tools: []` had disabled MCP and the model never emitted `tool_calls`. Shell/read/edit stay off.
+- `tool_call_id` is sanitized to OpenAI-safe `[A-Za-z0-9_-]` (Cursor MCP ids can contain newlines).
 
 ## [20260827.1] — 2026-08-27
 

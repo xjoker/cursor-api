@@ -382,6 +382,14 @@ test("stream chunk encodes tool_calls deltas", () => {
   assert.equal(done.choices[0].finish_reason, "tool_calls");
 });
 
+test("toOpenAiToolCallId strips newlines and unsafe characters", async () => {
+  const { toOpenAiToolCallId } = await import("../dist/session.js");
+  const cleaned = toOpenAiToolCallId("call-abc-1\nfc_def_0");
+  assert.equal(cleaned.includes("\n"), false);
+  assert.match(cleaned, /^[A-Za-z0-9_-]+$/);
+  assert.equal(toOpenAiToolCallId("call_ok"), "call_ok");
+});
+
 test("localChatAgentTools enables mcp only when client tools exist", async () => {
   const { localChatAgentTools } = await import("../dist/cursor.js");
   assert.deepEqual(localChatAgentTools(false), []);

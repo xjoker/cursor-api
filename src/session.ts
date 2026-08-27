@@ -116,6 +116,15 @@ export function classifyChatTurn(messages: ParsedChatMessage[]): ChatTurnKind {
   return { kind: "user", stem: messages.slice(0, end), user: last };
 }
 
+export function toOpenAiToolCallId(raw: string | undefined): string {
+  const fallback = `call_${randomUUID().replaceAll("-", "")}`;
+  if (!raw) return fallback;
+  const cleaned = raw.replace(/[^A-Za-z0-9_-]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+  if (cleaned.length === 0) return fallback;
+  const sliced = cleaned.slice(0, 64);
+  return sliced.startsWith("call") ? sliced : `call_${sliced}`;
+}
+
 export function hashMessages(messages: ParsedChatMessage[]): string {
   const payload = messages.map((message) => {
     const row: Record<string, unknown> = { role: message.role, content: message.content };
@@ -331,8 +340,7 @@ function parkTool(
   args: Record<string, SDKJsonValue>,
   toolCallId: string | undefined,
 ): Promise<string> {
-  const id =
-    toolCallId && toolCallId.length > 0 ? toolCallId : `call_${randomUUID().replaceAll("-", "")}`;
+  const id = toOpenAiToolCallId(toolCallId);
   logInfo("parked client tool call", { name: tool.name, api_key_id: session.apiKeyId });
   session.batch.push({
     id,
