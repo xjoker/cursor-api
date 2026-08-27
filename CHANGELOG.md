@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260827.2] — 2026-08-27
+
+### Fixed
+
+- OpenAI `tools` now reach the model: Cursor `customTools` are an MCP family, so the local agent allows only `mcp` when client tools are present. `tools: []` had disabled MCP and the model never emitted `tool_calls`. Shell/read/edit stay off.
+
 ## [20260827.1] — 2026-08-27
 
 OpenAI tool calling for local clients such as OpenCode.
@@ -22,7 +28,7 @@ OpenAI tool calling for local clients such as OpenCode.
 
 ### Changed
 
-- Cursor built-in shell/file tools stay disabled (`tools: []`). Client tools run on the client, not in the gateway workspace.
+- Cursor built-in shell/file tools stay disabled. When the client sends OpenAI `tools`, only MCP (`custom-user-tools`) is allowed so those callbacks can park; otherwise the toolset is empty. Client tools run on the client, not in the gateway workspace.
 
 ---
 

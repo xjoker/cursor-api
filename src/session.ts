@@ -333,6 +333,7 @@ function parkTool(
 ): Promise<string> {
   const id =
     toolCallId && toolCallId.length > 0 ? toolCallId : `call_${randomUUID().replaceAll("-", "")}`;
+  logInfo("parked client tool call", { name: tool.name, api_key_id: session.apiKeyId });
   session.batch.push({
     id,
     name: tool.name,

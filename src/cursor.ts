@@ -87,6 +87,16 @@ export async function resolveChatModel(apiKey: string, request: ParsedChatReques
   return resolveModelSelection(apiKey, request);
 }
 
+/**
+ * OpenAI `tools` map to SDK `customTools`, which Cursor only exposes through
+ * the MCP family (`custom-user-tools`). `tools: []` disables MCP, so the model
+ * never sees those callbacks. When client tools are present, allow only `mcp`
+ * — shell/read/edit stay off.
+ */
+export function localChatAgentTools(hasCustomTools: boolean): Array<"mcp"> | [] {
+  return hasCustomTools ? ["mcp"] : [];
+}
+
 export async function createLocalChatAgent(options: {
   apiKey: string;
   workspaceDir: string;
@@ -94,15 +104,17 @@ export async function createLocalChatAgent(options: {
   customTools?: Record<string, SDKCustomTool>;
 }): Promise<SDKAgent> {
   await mkdir(options.workspaceDir, { recursive: true });
+  const hasCustomTools =
+    options.customTools !== undefined && Object.keys(options.customTools).length > 0;
   try {
     return await Agent.create({
       apiKey: options.apiKey,
       model: options.model,
-      tools: [],
+      tools: localChatAgentTools(hasCustomTools),
       local: {
         cwd: options.workspaceDir,
         settingSources: [],
-        ...(options.customTools ? { customTools: options.customTools } : {}),
+        ...(hasCustomTools ? { customTools: options.customTools } : {}),
       },
     });
   } catch (error) {

@@ -382,6 +382,12 @@ test("stream chunk encodes tool_calls deltas", () => {
   assert.equal(done.choices[0].finish_reason, "tool_calls");
 });
 
+test("localChatAgentTools enables mcp only when client tools exist", async () => {
+  const { localChatAgentTools } = await import("../dist/cursor.js");
+  assert.deepEqual(localChatAgentTools(false), []);
+  assert.deepEqual(localChatAgentTools(true), ["mcp"]);
+});
+
 test("classifyChatTurn splits user vs tool result rounds", async () => {
   const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
   const userTurn = classifyChatTurn([
