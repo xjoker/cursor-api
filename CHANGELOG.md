@@ -9,6 +9,15 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.1] — 2026-08-28
+
+### Fixed
+
+- Failed Cursor runs now release their live session instead of leaving `conversation_id` pinned to a dead agent.
+- Tool-result batches are validated before any parked call resumes, so duplicate or unknown IDs cannot partially consume a round.
+- Stream requests validate tool choice before opening SSE; non-stream multi-tool rounds no longer repeat prior text.
+- Unsupported `tool_choice: "required"` and `parallel_tool_calls: false` return 400 instead of being silently misrepresented.
+
 ## [20260827.8] — 2026-08-27
 
 ### Added
