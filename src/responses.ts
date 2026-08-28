@@ -10,7 +10,6 @@ import { invalidRequest } from "./errors.js";
 import { parseChatCompletionsRequest } from "./openai.js";
 
 const SKIPPED_ITEM_TYPES = new Set(["reasoning", "item_reference", "compaction"]);
-const HOSTED_TOOL_HINT = "only type 'function' tools are supported";
 
 export function parseResponsesRequest(body: unknown): ParsedChatRequest {
   if (!isPlainObject(body)) {
@@ -18,17 +17,6 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
   }
 
   // Codex / OpenAI SDK 会带 client_metadata 等未知顶层字段；忽略，不 400。
-  if (Array.isArray(body.tools)) {
-    for (const [index, tool] of body.tools.entries()) {
-      if (!isPlainObject(tool)) {
-        throw invalidRequest(`tools[${String(index)}] must be an object`);
-      }
-      if (tool.type !== undefined && tool.type !== "function") {
-        throw invalidRequest(`Tool type '${String(tool.type)}' is not supported; ${HOSTED_TOOL_HINT}`);
-      }
-    }
-  }
-
   if ("text" in body && body.text !== undefined) {
     if (!isPlainObject(body.text)) {
       throw invalidRequest("Field 'text' must be an object");
@@ -48,7 +36,7 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
     messages,
     stream: body.stream,
     stream_options: body.stream_options,
-    tools: body.tools,
+    tools: normalizeResponsesTools(body.tools),
     tool_choice: body.tool_choice,
     parallel_tool_calls: body.parallel_tool_calls,
     user: body.user,
@@ -456,12 +444,12 @@ function convertInputToMessages(input: unknown, instructions: unknown): unknown[
       throw invalidRequest(`input[${String(index)}] must be an object`);
     }
     const type = itemType(raw, index);
-    if (type === "function_call") {
+    if (type === "function_call" || type === "custom_tool_call") {
       pendingCalls.push(parseFunctionCallItem(raw, index));
       continue;
     }
     flushCalls();
-    if (type === "function_call_output") {
+    if (type === "function_call_output" || type === "custom_tool_call_output") {
       messages.push({
         role: "tool",
         tool_call_id: requiredString(raw.call_id, `input[${String(index)}].call_id`),
@@ -568,11 +556,51 @@ function imageUrlOf(part: Record<string, unknown>): string {
 }
 
 function parseFunctionCallItem(item: Record<string, unknown>, index: number): OpenAiToolCall {
+  const argumentsText =
+    typeof item.arguments === "string"
+      ? item.arguments
+      : typeof item.input === "string"
+        ? item.input
+        : "";
   return {
-    id: requiredString(item.call_id, `input[${String(index)}].call_id`),
+    id: requiredString(item.call_id ?? item.id, `input[${String(index)}].call_id`),
     name: requiredString(item.name, `input[${String(index)}].name`),
-    arguments: typeof item.arguments === "string" ? item.arguments : "",
+    arguments: argumentsText,
   };
+}
+
+/** Codex 会发 function / custom / namespace / web_search。有 name 的收成 function；namespace 摊平；无名 hosted 丢掉。 */
+function normalizeResponsesTools(tools: unknown): unknown[] | undefined {
+  if (tools === undefined) return undefined;
+  if (!Array.isArray(tools)) {
+    throw invalidRequest("Field 'tools' must be an array");
+  }
+  const out: Record<string, unknown>[] = [];
+  collectResponsesTools(tools, out);
+  return out.length > 0 ? out : undefined;
+}
+
+function collectResponsesTools(tools: unknown[], out: Record<string, unknown>[]): void {
+  for (const tool of tools) {
+    if (!isPlainObject(tool)) {
+      throw invalidRequest("Field 'tools' entries must be objects");
+    }
+    const type = typeof tool.type === "string" ? tool.type : "function";
+    if (type === "namespace") {
+      if (Array.isArray(tool.tools)) collectResponsesTools(tool.tools, out);
+      continue;
+    }
+    const spec = isPlainObject(tool.function) ? tool.function : tool;
+    const name = optionalNonEmpty(spec.name) ?? optionalNonEmpty(tool.name);
+    if (!name) continue;
+    const parameters = isPlainObject(spec.parameters)
+      ? spec.parameters
+      : { type: "object", properties: {} };
+    const mapped: Record<string, unknown> = { type: "function", name, parameters };
+    const description = optionalNonEmpty(spec.description);
+    if (description) mapped.description = description;
+    out.push(mapped);
+  }
 }
 
 function stringifyToolOutput(output: unknown, index: number): string {

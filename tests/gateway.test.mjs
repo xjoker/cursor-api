@@ -1272,24 +1272,59 @@ test("responses parse maps function_call items and synthesizes assistant for out
   assert.equal(outputsOnly.messages[1]?.content, "ok");
 });
 
-test("responses reject hosted tools and ignore unknown fields", () => {
-  assert.throws(
-    () =>
-      parseResponsesRequest({
-        model: "composer-2.5",
-        input: "hi",
-        tools: [{ type: "web_search" }],
-      }),
-    (error) => error instanceof Error && error.message.includes("web_search"),
-  );
+test("responses map Codex custom/namespace tools and skip unnamed hosted tools", () => {
   const parsed = parseResponsesRequest({
     model: "composer-2.5",
     input: "hi",
-    client_metadata: { id: "codex", session: "s1" },
-    foo: 1,
+    client_metadata: { id: "codex" },
+    extra_sdk_field: true,
+    tools: [
+      {
+        type: "function",
+        name: "exec_command",
+        description: "Run a command",
+        parameters: { type: "object", properties: { cmd: { type: "string" } } },
+      },
+      {
+        type: "custom",
+        name: "apply_patch",
+        description: "Edit files with a patch",
+        format: { type: "grammar", syntax: "lark", definition: "start: patch" },
+      },
+      {
+        type: "namespace",
+        name: "multi_agent_v1",
+        tools: [
+          {
+            type: "function",
+            name: "spawn_agent",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      },
+      { type: "web_search", external_web_access: false },
+    ],
   });
-  assert.equal(parsed.model, "composer-2.5");
-  assert.equal(parsed.messages[0]?.content, "hi");
+  assert.deepEqual(
+    parsed.tools?.map((tool) => tool.name),
+    ["exec_command", "apply_patch", "spawn_agent"],
+  );
+  assert.equal(parsed.tools?.[1]?.parameters?.type, "object");
+});
+
+test("responses parse custom_tool_call items", () => {
+  const parsed = parseResponsesRequest({
+    model: "composer-2.5",
+    input: [
+      { type: "custom_tool_call", call_id: "call_p", name: "apply_patch", input: "*** Begin Patch\n" },
+      { type: "custom_tool_call_output", call_id: "call_p", output: "ok" },
+    ],
+  });
+  assert.equal(parsed.messages[0]?.role, "assistant");
+  assert.equal(parsed.messages[0]?.tool_calls?.[0]?.name, "apply_patch");
+  assert.equal(parsed.messages[0]?.tool_calls?.[0]?.arguments, "*** Begin Patch\n");
+  assert.equal(parsed.messages[1]?.role, "tool");
+  assert.equal(parsed.messages[1]?.content, "ok");
 });
 
 test("non-stream responses encode message and function_call output items", () => {

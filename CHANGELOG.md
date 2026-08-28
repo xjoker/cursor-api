@@ -9,6 +9,18 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.6] — 2026-08-28
+
+### Fixed
+
+- Responses maps Codex `custom` tools (`apply_patch`) and nested `namespace` tools to client functions, and drops unnamed hosted tools (`web_search`, …) instead of 400. Chat Completions still requires `type: "function"`.
+
+### Changed
+
+- Admin request-detail and system-log modals have copy buttons for request id, JSON bodies, and syslog fields.
+
+---
+
 ## [20260828.5] — 2026-08-28
 
 ### Fixed
