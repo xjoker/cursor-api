@@ -516,12 +516,14 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
 
     try {
       const collectedTools: OpenAiToolCall[] = [];
+      const customToolNames = new Set(parsed.customToolNames ?? []);
       if (parsed.stream) {
         writer = new ResponsesStreamWriter(
           async (event, data) => {
             await writeSseEvent(res, event, data);
           },
           { id: requestId, created, model: parsed.model },
+          customToolNames,
         );
       }
       const sink = parsed.stream
@@ -622,6 +624,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
             params: result.params,
             tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
             finish_reason: finishReason,
+            customToolNames,
             ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
           }),
           { "x-request-id": requestId, ...headers },

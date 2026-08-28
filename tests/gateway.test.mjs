@@ -1309,7 +1309,10 @@ test("responses map Codex custom/namespace tools and skip unnamed hosted tools",
     parsed.tools?.map((tool) => tool.name),
     ["exec_command", "apply_patch", "spawn_agent"],
   );
-  assert.equal(parsed.tools?.[1]?.parameters?.type, "object");
+  assert.deepEqual(parsed.customToolNames, ["apply_patch"]);
+  assert.deepEqual(parsed.tools?.[1]?.parameters?.required, ["content"]);
+  assert.equal(parsed.tools?.[1]?.parameters?.properties?.content?.type, "string");
+  assert.match(parsed.tools?.[1]?.description ?? "", /start: patch/);
 });
 
 test("responses parse custom_tool_call items", () => {
@@ -1322,7 +1325,10 @@ test("responses parse custom_tool_call items", () => {
   });
   assert.equal(parsed.messages[0]?.role, "assistant");
   assert.equal(parsed.messages[0]?.tool_calls?.[0]?.name, "apply_patch");
-  assert.equal(parsed.messages[0]?.tool_calls?.[0]?.arguments, "*** Begin Patch\n");
+  assert.equal(
+    parsed.messages[0]?.tool_calls?.[0]?.arguments,
+    JSON.stringify({ content: "*** Begin Patch\n" }),
+  );
   assert.equal(parsed.messages[1]?.role, "tool");
   assert.equal(parsed.messages[1]?.content, "ok");
 });
@@ -1356,6 +1362,28 @@ test("non-stream responses encode message and function_call output items", () =>
   assert.equal(tools.output[0].call_id, "call_1");
   assert.equal(tools.output[0].name, "bash");
   assert.equal(tools.usage.input_tokens, 0);
+
+  const custom = encodeNonStreamResponse({
+    id: "resp_custom",
+    created: 1,
+    model: "composer-2.5",
+    content: "",
+    usage: null,
+    tool_calls: [
+      {
+        id: "call_p",
+        name: "apply_patch",
+        arguments: JSON.stringify({ content: "*** Begin Patch\n" }),
+      },
+    ],
+    finish_reason: "tool_calls",
+    customToolNames: ["apply_patch"],
+  });
+  assert.equal(custom.output[0].type, "custom_tool_call");
+  assert.equal(custom.output[0].call_id, "call_p");
+  assert.equal(custom.output[0].name, "apply_patch");
+  assert.equal(custom.output[0].input, "*** Begin Patch\n");
+  assert.equal(custom.output[0].arguments, undefined);
 });
 
 test("responses stream emits output_text and function_call events for OpenCode", async () => {
@@ -1391,6 +1419,50 @@ test("responses stream emits output_text and function_call events for OpenCode",
   assert.equal(completed.output[1].id, textDelta?.data.item_id);
   assert.equal(completed.output[2].type, "function_call");
   assert.equal(completed.output[2].call_id, "call_1");
+});
+
+test("responses stream emits custom_tool_call_input events for Codex apply_patch", async () => {
+  const events = [];
+  const writer = new ResponsesStreamWriter(
+    async (event, data) => {
+      events.push({ event, data });
+    },
+    { id: "resp_custom_stream", created: 1, model: "composer-2.5" },
+    new Set(["apply_patch"]),
+  );
+  await writer.start();
+  await writer.onToolCalls([
+    {
+      id: "call_p",
+      name: "apply_patch",
+      arguments: JSON.stringify({ content: "*** Begin Patch\n" }),
+    },
+  ]);
+  await writer.complete({
+    content: "",
+    usage: null,
+    tool_calls: [
+      {
+        id: "call_p",
+        name: "apply_patch",
+        arguments: JSON.stringify({ content: "*** Begin Patch\n" }),
+      },
+    ],
+    finish_reason: "tool_calls",
+  });
+  const types = events.map((row) => row.event);
+  assert.ok(types.includes("response.custom_tool_call_input.delta"));
+  assert.ok(types.includes("response.custom_tool_call_input.done"));
+  assert.ok(!types.includes("response.function_call_arguments.delta"));
+  const added = events.find((row) => row.event === "response.output_item.added");
+  assert.equal(added?.data.item.type, "custom_tool_call");
+  assert.equal(added?.data.item.input, "");
+  const delta = events.find((row) => row.event === "response.custom_tool_call_input.delta");
+  assert.equal(delta?.data.delta, "*** Begin Patch\n");
+  assert.equal(delta?.data.call_id, "call_p");
+  const done = events.find((row) => row.event === "response.output_item.done");
+  assert.equal(done?.data.item.type, "custom_tool_call");
+  assert.equal(done?.data.item.input, "*** Begin Patch\n");
 });
 
 test("writeSseEvent writes event and data lines", async () => {

@@ -170,6 +170,8 @@ export interface ParsedChatRequest {
   fast?: string;
   optimize_for?: string;
   tools?: OpenAiToolFunction[];
+  /** Responses `type: "custom"` names; output 发 `custom_tool_call` 而不是 `function_call`。 */
+  customToolNames?: string[];
   tool_choice?: "auto" | "none" | { name: string };
   conversation_id?: string;
 }

@@ -31,12 +31,13 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
 
   const messages = convertInputToMessages(body.input, body.instructions);
   const conversationId = conversationIdOf(body);
+  const { tools, customToolNames } = normalizeResponsesTools(body.tools);
   const chatBody: Record<string, unknown> = {
     model: body.model,
     messages,
     stream: body.stream,
     stream_options: body.stream_options,
-    tools: normalizeResponsesTools(body.tools),
+    tools,
     tool_choice: body.tool_choice,
     parallel_tool_calls: body.parallel_tool_calls,
     user: body.user,
@@ -59,6 +60,7 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
   dropUndefined(chatBody);
   const parsed = parseChatCompletionsRequest(chatBody);
   parsed.includeUsage = true;
+  if (customToolNames.length > 0) parsed.customToolNames = customToolNames;
   return parsed;
 }
 
@@ -73,6 +75,7 @@ export function encodeNonStreamResponse(input: {
   tool_calls?: OpenAiToolCall[];
   finish_reason?: "stop" | "tool_calls" | "cancelled" | "error";
   reasoning_content?: string;
+  customToolNames?: Iterable<string>;
 }): Record<string, unknown> {
   const output = encodeOutputItems(input);
   const status =
@@ -113,7 +116,9 @@ export function encodeOutputItems(input: {
   content: string;
   tool_calls?: OpenAiToolCall[];
   reasoning_content?: string;
+  customToolNames?: Iterable<string>;
 }): Record<string, unknown>[] {
+  const customNames = new Set(input.customToolNames ?? []);
   const output: Record<string, unknown>[] = [];
   if (input.reasoning_content) {
     output.push(encodeReasoningItem(newItemId("rs"), input.reasoning_content));
@@ -123,7 +128,7 @@ export function encodeOutputItems(input: {
     output.push(encodeMessageItem(newItemId("msg"), input.content));
   }
   for (const call of toolCalls) {
-    output.push(encodeFunctionCallItem(newItemId("fc"), call));
+    output.push(encodeToolCallItem(newItemIdForCall(call, customNames), call, customNames));
   }
   return output;
 }
@@ -144,6 +149,7 @@ export class ResponsesStreamWriter {
   constructor(
     private readonly emit: (event: string, data: Record<string, unknown>) => Promise<void>,
     private readonly meta: { id: string; created: number; model: string },
+    private readonly customToolNames: ReadonlySet<string> = new Set(),
   ) {}
 
   async start(): Promise<void> {
@@ -211,31 +217,51 @@ export class ResponsesStreamWriter {
   async onToolCalls(calls: OpenAiToolCall[]): Promise<void> {
     await this.closeMessage();
     for (const call of calls) {
-      const itemId = newItemId("fc");
+      const custom = this.customToolNames.has(call.name);
+      const itemId = newItemIdForCall(call, this.customToolNames);
       const outputIndex = this.outputIndex;
       this.outputIndex += 1;
       this.functionCalls.push({ itemId, outputIndex, call });
       await this.event("response.output_item.added", {
         output_index: outputIndex,
         item: {
-          ...encodeFunctionCallItem(itemId, { ...call, arguments: "" }),
+          ...encodeToolCallItem(itemId, { ...call, arguments: "" }, this.customToolNames),
           status: "in_progress",
         },
       });
-      if (call.arguments !== "") {
-        await this.event("response.function_call_arguments.delta", {
+      if (custom) {
+        const input = unwrapCustomToolArguments(call.arguments);
+        if (input !== "") {
+          await this.event("response.custom_tool_call_input.delta", {
+            item_id: itemId,
+            output_index: outputIndex,
+            call_id: call.id,
+            delta: input,
+          });
+        }
+        await this.event("response.custom_tool_call_input.done", {
           item_id: itemId,
           output_index: outputIndex,
-          delta: call.arguments,
+          call_id: call.id,
+          name: call.name,
+          input,
+        });
+      } else {
+        if (call.arguments !== "") {
+          await this.event("response.function_call_arguments.delta", {
+            item_id: itemId,
+            output_index: outputIndex,
+            delta: call.arguments,
+          });
+        }
+        await this.event("response.function_call_arguments.done", {
+          item_id: itemId,
+          output_index: outputIndex,
+          name: call.name,
+          arguments: call.arguments,
         });
       }
-      await this.event("response.function_call_arguments.done", {
-        item_id: itemId,
-        output_index: outputIndex,
-        name: call.name,
-        arguments: call.arguments,
-      });
-      const doneItem = encodeFunctionCallItem(itemId, call);
+      const doneItem = encodeToolCallItem(itemId, call, this.customToolNames);
       this.closedItems.push(doneItem);
       await this.event("response.output_item.done", {
         output_index: outputIndex,
@@ -395,7 +421,7 @@ export class ResponsesStreamWriter {
     reasoning_content?: string;
   }): Record<string, unknown>[] {
     if (this.closedItems.length > 0) return this.closedItems;
-    return encodeOutputItems(result);
+    return encodeOutputItems({ ...result, customToolNames: this.customToolNames });
   }
 
   private async event(type: string, extra: Record<string, unknown>): Promise<void> {
@@ -556,12 +582,14 @@ function imageUrlOf(part: Record<string, unknown>): string {
 }
 
 function parseFunctionCallItem(item: Record<string, unknown>, index: number): OpenAiToolCall {
+  const rawArgs = typeof item.arguments === "string" ? item.arguments : "";
+  const rawInput = typeof item.input === "string" ? item.input : "";
   const argumentsText =
-    typeof item.arguments === "string"
-      ? item.arguments
-      : typeof item.input === "string"
-        ? item.input
-        : "";
+    rawArgs !== ""
+      ? rawArgs
+      : item.type === "custom_tool_call"
+        ? wrapCustomToolInput(rawInput)
+        : rawInput;
   return {
     id: requiredString(item.call_id ?? item.id, `input[${String(index)}].call_id`),
     name: requiredString(item.name, `input[${String(index)}].name`),
@@ -569,25 +597,40 @@ function parseFunctionCallItem(item: Record<string, unknown>, index: number): Op
   };
 }
 
-/** Codex 会发 function / custom / namespace / web_search。有 name 的收成 function；namespace 摊平；无名 hosted 丢掉。 */
-function normalizeResponsesTools(tools: unknown): unknown[] | undefined {
-  if (tools === undefined) return undefined;
+/** Codex 会发 function / custom / namespace / web_search。custom 收成带 content 的 function；namespace 摊平；无名 hosted 丢掉。 */
+function normalizeResponsesTools(tools: unknown): {
+  tools: unknown[] | undefined;
+  customToolNames: string[];
+} {
+  if (tools === undefined) return { tools: undefined, customToolNames: [] };
   if (!Array.isArray(tools)) {
     throw invalidRequest("Field 'tools' must be an array");
   }
   const out: Record<string, unknown>[] = [];
-  collectResponsesTools(tools, out);
-  return out.length > 0 ? out : undefined;
+  const customToolNames: string[] = [];
+  collectResponsesTools(tools, out, customToolNames);
+  return { tools: out.length > 0 ? out : undefined, customToolNames };
 }
 
-function collectResponsesTools(tools: unknown[], out: Record<string, unknown>[]): void {
+function collectResponsesTools(
+  tools: unknown[],
+  out: Record<string, unknown>[],
+  customToolNames: string[],
+): void {
   for (const tool of tools) {
     if (!isPlainObject(tool)) {
       throw invalidRequest("Field 'tools' entries must be objects");
     }
     const type = typeof tool.type === "string" ? tool.type : "function";
     if (type === "namespace") {
-      if (Array.isArray(tool.tools)) collectResponsesTools(tool.tools, out);
+      if (Array.isArray(tool.tools)) collectResponsesTools(tool.tools, out, customToolNames);
+      continue;
+    }
+    if (type === "custom") {
+      const mapped = mapCustomTool(tool);
+      if (!mapped) continue;
+      customToolNames.push(mapped.name);
+      out.push(mapped.tool);
       continue;
     }
     const spec = isPlainObject(tool.function) ? tool.function : tool;
@@ -601,6 +644,38 @@ function collectResponsesTools(tools: unknown[], out: Record<string, unknown>[])
     if (description) mapped.description = description;
     out.push(mapped);
   }
+}
+
+function mapCustomTool(tool: Record<string, unknown>): { name: string; tool: Record<string, unknown> } | undefined {
+  const spec = isPlainObject(tool.custom) ? tool.custom : tool;
+  const name = optionalNonEmpty(spec.name) ?? optionalNonEmpty(tool.name);
+  if (!name) return undefined;
+  const description = `${optionalNonEmpty(spec.description) ?? optionalNonEmpty(tool.description) ?? ""}${grammarSuffix(spec.format ?? tool.format)}`;
+  const mapped: Record<string, unknown> = {
+    type: "function",
+    name,
+    parameters: {
+      type: "object",
+      properties: {
+        content: {
+          type: "string",
+          description: `The ${name} content following the specified format`,
+        },
+      },
+      required: ["content"],
+    },
+  };
+  if (description) mapped.description = description;
+  return { name, tool: mapped };
+}
+
+function grammarSuffix(format: unknown): string {
+  if (!isPlainObject(format)) return "";
+  const grammar = isPlainObject(format.grammar) ? format.grammar : format;
+  const definition = optionalNonEmpty(grammar.definition);
+  if (!definition) return "";
+  const syntax = optionalNonEmpty(grammar.syntax) ?? "";
+  return `\n\nFormat:\n\`\`\`${syntax}\n${definition}\n\`\`\``;
 }
 
 function stringifyToolOutput(output: unknown, index: number): string {
@@ -658,6 +733,15 @@ function encodeMessageItem(id: string, text: string): Record<string, unknown> {
   };
 }
 
+function encodeToolCallItem(
+  id: string,
+  call: OpenAiToolCall,
+  customNames: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (customNames.has(call.name)) return encodeCustomToolCallItem(id, call);
+  return encodeFunctionCallItem(id, call);
+}
+
 function encodeFunctionCallItem(id: string, call: OpenAiToolCall): Record<string, unknown> {
   return {
     id,
@@ -667,6 +751,40 @@ function encodeFunctionCallItem(id: string, call: OpenAiToolCall): Record<string
     name: call.name,
     arguments: call.arguments,
   };
+}
+
+function encodeCustomToolCallItem(id: string, call: OpenAiToolCall): Record<string, unknown> {
+  return {
+    id,
+    type: "custom_tool_call",
+    status: "completed",
+    call_id: call.id,
+    name: call.name,
+    input: unwrapCustomToolArguments(call.arguments),
+  };
+}
+
+const MAX_CUSTOM_TOOL_ARGUMENTS = 1_000_000;
+
+function unwrapCustomToolArguments(argumentsText: string): string {
+  if (argumentsText === "") return "";
+  if (argumentsText.length > MAX_CUSTOM_TOOL_ARGUMENTS) return argumentsText;
+  try {
+    const parsed: unknown = JSON.parse(argumentsText);
+    if (isPlainObject(parsed) && "content" in parsed) return String(parsed.content);
+  } catch {
+    // 模型可能直接吐出自由格式文本，原样回给 Codex。
+  }
+  return argumentsText;
+}
+
+function wrapCustomToolInput(input: string): string {
+  if (input === "") return "";
+  return JSON.stringify({ content: input });
+}
+
+function newItemIdForCall(call: OpenAiToolCall, customNames: ReadonlySet<string>): string {
+  return newItemId(customNames.has(call.name) ? "ctc" : "fc");
 }
 
 function encodeReasoningItem(id: string, text: string): Record<string, unknown> {

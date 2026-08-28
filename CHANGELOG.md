@@ -13,7 +13,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ### Fixed
 
-- Responses maps Codex `custom` tools (`apply_patch`) and nested `namespace` tools to client functions, and drops unnamed hosted tools (`web_search`, …) instead of 400. Chat Completions still requires `type: "function"`.
+- Responses maps Codex `custom` tools (`apply_patch`) to Chat Completions functions with a `content` string schema (grammar copied into the description), then emits `custom_tool_call` / `input` and SSE `response.custom_tool_call_input.*` on the way back. Nested `namespace` tools flatten; unnamed hosted tools (`web_search`, …) are dropped. Chat Completions still requires `type: "function"`.
 
 ---
 
