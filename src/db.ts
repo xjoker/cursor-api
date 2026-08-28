@@ -21,6 +21,9 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
   maxDetailBytes: 268_435_456,
 };
 
+/** Per-row cap for the client-controlled `model` column (UTF-8 bytes). */
+export const MAX_LOG_MODEL_BYTES = 256;
+
 export const SCHEMA_VERSION = 6;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
@@ -94,6 +97,17 @@ export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY):
   chmodOwnerOnly(`${dbPath}-wal`);
   chmodOwnerOnly(`${dbPath}-shm`);
   return db;
+}
+
+function limitUtf8(text: string, maxBytes: number): string {
+  if (maxBytes < 1) return "";
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= maxBytes) return text;
+  let cut = maxBytes;
+  while (cut > 0 && (buf[cut] & 0xc0) === 0x80) {
+    cut -= 1;
+  }
+  return buf.subarray(0, cut).toString("utf8");
 }
 
 function chmodOwnerOnly(filePath: string): void {
@@ -183,7 +197,7 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.id,
     row.api_key_id,
     row.path,
-    row.model,
+    limitUtf8(row.model, MAX_LOG_MODEL_BYTES),
     row.stream,
     row.http_status,
     row.duration_ms,
@@ -313,12 +327,14 @@ export function pruneRequestLogs(db: DatabaseSync): number {
         .run(excess).changes,
     );
   }
-  // Drop oldest rows until total detail payload fits under maxDetailBytes.
+  // Drop oldest rows until model + detail payload fits under maxDetailBytes.
   for (;;) {
     const sizeRow = db
       .prepare(
         `SELECT COALESCE(SUM(
-           COALESCE(LENGTH(request_detail), 0) + COALESCE(LENGTH(response_detail), 0)
+           COALESCE(length(cast(model AS BLOB)), 0)
+           + COALESCE(length(cast(request_detail AS BLOB)), 0)
+           + COALESCE(length(cast(response_detail AS BLOB)), 0)
          ), 0) AS bytes FROM request_logs`,
       )
       .get();

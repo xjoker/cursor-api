@@ -18,7 +18,7 @@ max_rows = 100000
 # Record request/response JSON in SQLite (default off). Stores prompts in plaintext — keep data/ private.
 detailed = false
 # detailed_max_bytes = 65536
-# Cap total size of all detail columns (bytes). Oldest rows dropped first.
+# Cap total UTF-8 bytes of model + detail columns. Oldest rows dropped first.
 # max_detail_bytes = 268435456
 
 # Docker (NODE_ENV=production): missing gateway.toml is auto-created empty on first start.

@@ -201,6 +201,131 @@ test("request logs are pruned by max_detail_bytes", async () => {
   assert.equal(logs[0]?.id, "req-3");
 });
 
+test("request logs are pruned when model bytes exceed max_detail_bytes", async () => {
+  const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-model-cap-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 80 });
+  const now = new Date().toISOString();
+  insertApiKey(db, {
+    id: "key-1",
+    name: "test",
+    key_prefix: "cgk_test",
+    key_digest: "digest",
+    created_at: now,
+    updated_at: now,
+  });
+  for (let i = 0; i < 4; i += 1) {
+    insertRequestLog(db, {
+      id: `req-${i}`,
+      api_key_id: "key-1",
+      path: "/v1/chat/completions",
+      model: "m".repeat(50),
+      stream: 0,
+      http_status: 200,
+      duration_ms: 1,
+      input_tokens: null,
+      output_tokens: null,
+      total_tokens: null,
+      error_code: null,
+      created_at: new Date(Date.now() - (4 - i) * 60_000).toISOString(),
+      upstream_ms: 1,
+      gateway_ms: 0,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+      reasoning_tokens: null,
+      request_detail: null,
+      response_detail: null,
+    });
+  }
+  const { total, logs } = listRequestLogs(db, { limit: 10, offset: 0 });
+  assert.ok(total <= 1);
+  assert.equal(logs[0]?.id, "req-3");
+});
+
+test("request log byte cap uses UTF-8 bytes not character length", async () => {
+  const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-utf8-cap-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 200 });
+  const now = new Date().toISOString();
+  insertApiKey(db, {
+    id: "key-1",
+    name: "test",
+    key_prefix: "cgk_test",
+    key_digest: "digest",
+    created_at: now,
+    updated_at: now,
+  });
+  const payload = "你".repeat(40);
+  assert.equal(payload.length, 40);
+  assert.equal(Buffer.byteLength(payload, "utf8"), 120);
+  for (let i = 0; i < 2; i += 1) {
+    insertRequestLog(db, {
+      id: `req-${i}`,
+      api_key_id: "key-1",
+      path: "/v1/chat/completions",
+      model: "composer-2.5",
+      stream: 0,
+      http_status: 200,
+      duration_ms: 1,
+      input_tokens: null,
+      output_tokens: null,
+      total_tokens: null,
+      error_code: null,
+      created_at: new Date(Date.now() - (2 - i) * 60_000).toISOString(),
+      upstream_ms: 1,
+      gateway_ms: 0,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+      reasoning_tokens: null,
+      request_detail: payload,
+      response_detail: null,
+    });
+  }
+  const { total, logs } = listRequestLogs(db, { limit: 10, offset: 0 });
+  assert.equal(total, 1);
+  assert.equal(logs[0]?.id, "req-1");
+});
+
+test("insertRequestLog truncates oversized model before persist", async () => {
+  const { openDb, insertApiKey, insertRequestLog, listRequestLogs, MAX_LOG_MODEL_BYTES } =
+    await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-model-trunc-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 268_435_456 });
+  const now = new Date().toISOString();
+  insertApiKey(db, {
+    id: "key-1",
+    name: "test",
+    key_prefix: "cgk_test",
+    key_digest: "digest",
+    created_at: now,
+    updated_at: now,
+  });
+  insertRequestLog(db, {
+    id: "req-huge-model",
+    api_key_id: "key-1",
+    path: "/v1/chat/completions",
+    model: "m".repeat(10_000),
+    stream: 0,
+    http_status: 200,
+    duration_ms: 1,
+    input_tokens: null,
+    output_tokens: null,
+    total_tokens: null,
+    error_code: null,
+    created_at: now,
+    upstream_ms: 1,
+    gateway_ms: 0,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    reasoning_tokens: null,
+    request_detail: null,
+    response_detail: null,
+  });
+  const { logs } = listRequestLogs(db, { limit: 10, offset: 0 });
+  assert.ok(Buffer.byteLength(logs[0]?.model ?? "", "utf8") <= MAX_LOG_MODEL_BYTES);
+  assert.notEqual(logs[0]?.model?.length, 10_000);
+});
+
 test("sqlite database file is owner-readable only when chmod works", async () => {
   const { openDb } = await import("../dist/db.js");
   const root = mkdtempSync(join(tmpdir(), "cursor-api-chmod-"));

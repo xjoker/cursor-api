@@ -96,7 +96,7 @@ detailed = false
 | `[logs].max_rows` | Cap SQLite request log rows; oldest deleted first (1k–10M) |
 | `[logs].detailed` | Store request/response JSON for admin modal (default **false**). Stores prompts in **plaintext** under `./data` — keep the volume private |
 | `[logs].detailed_max_bytes` | Per-field cap for request/response JSON (4KiB–1MiB, default 64KiB) |
-| `[logs].max_detail_bytes` | Cap total bytes of all detail columns (default 256MiB); oldest rows dropped first |
+| `[logs].max_detail_bytes` | Cap total UTF-8 bytes of `model` + detail columns (default 256MiB); oldest rows dropped first |
 
 ```bash
 chmod 600 data/config/gateway.toml

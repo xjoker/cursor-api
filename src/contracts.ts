@@ -25,7 +25,7 @@ export interface AppConfig {
 export interface LogPolicy {
   retentionDays: number;
   maxRows: number;
-  /** Cap total UTF-8 bytes of request_detail + response_detail across all rows. */
+  /** Cap total UTF-8 bytes of model + request_detail + response_detail across all rows. */
   maxDetailBytes: number;
 }
 

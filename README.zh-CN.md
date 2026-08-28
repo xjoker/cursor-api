@@ -96,7 +96,7 @@ detailed = false
 | `[logs].max_rows` | SQLite 请求日志行数上限（1k–10M），先删最旧 |
 | `[logs].detailed` | 记录请求/响应 JSON，管理台点击日志可查看（默认 **false**）。正文以**明文**存在 `./data`，请保护数据目录 |
 | `[logs].detailed_max_bytes` | 单条请求/响应 JSON 上限（4KiB–1MiB，默认 64KiB） |
-| `[logs].max_detail_bytes` | 全部详细正文合计字节上限（默认 256MiB），超限先删最旧行 |
+| `[logs].max_detail_bytes` | `model` + 详细正文合计 UTF-8 字节上限（默认 256MiB），超限先删最旧行 |
 
 ```bash
 chmod 600 data/config/gateway.toml
