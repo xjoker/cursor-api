@@ -1,6 +1,6 @@
 {
   "name": "cursor-api",
-  "version": "20260828.2",
+  "version": "20260828.3",
   "description": "Minimal OpenAI Chat Completions gateway over the official Cursor SDK.",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,7 @@
     "test": "npm run build && node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.28"
+    "@cursor/sdk": "1.0.30"
   },
   "devDependencies": {
     "@types/node": "22.18.12",

@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.3] — 2026-08-28
+
+### Changed
+
+- `@cursor/sdk` 1.0.28 → 1.0.30. No gateway API changes: `customTools` / `tools: ["mcp"]` / `getUsage()` still typecheck, and Chat Completions tools have no `outputSchema` field to forward.
+
 ## [20260828.2] — 2026-08-28
 
 ### Fixed
