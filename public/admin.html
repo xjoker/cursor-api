@@ -1295,7 +1295,9 @@
       "modal.req": "请求",
       "modal.res": "响应",
       "modal.noReq": "未记录请求正文。在 <code>gateway.toml</code> 设置 <code>[logs] detailed = true</code> 并重启后生效。",
+      "modal.noReqOn": "本条没有存下请求正文。详细日志只记录之后的请求，已经写入的空记录无法补写。请再发一次请求后打开那条日志。",
       "modal.noRes": "未记录响应正文。开启详细日志后可查看助手输出与用量。",
+      "modal.noResOn": "本条没有存下响应正文。详细日志只记录之后的请求。",
       "tok.model": "模型",
       "tok.req": "请求",
       "tok.in": "输入 Token",
@@ -1462,7 +1464,9 @@
       "modal.req": "Request",
       "modal.res": "Response",
       "modal.noReq": "Request body not recorded. Set <code>[logs] detailed = true</code> in <code>gateway.toml</code> and restart.",
+      "modal.noReqOn": "No request body was stored for this row. Detailed logging records new requests only; this empty row cannot be backfilled. Send another request and open that log.",
       "modal.noRes": "Response body not recorded. Enable detailed logs to see assistant output and usage.",
+      "modal.noResOn": "No response body was stored for this row. Detailed logging records new requests only.",
       "tok.model": "Model",
       "tok.req": "Requests",
       "tok.in": "Input tokens",
@@ -2286,10 +2290,10 @@
       ).join("")}</div>`;
       const requestBlock = row.request_detail
         ? `<div class="detail-block"><h4>${t("modal.req")}</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.request_detail))}</pre></div>`
-        : `<div class="detail-empty">${t("modal.noReq")}</div>`;
+        : `<div class="detail-empty">${t(logDetailedEnabled ? "modal.noReqOn" : "modal.noReq")}</div>`;
       const responseBlock = row.response_detail
         ? `<div class="detail-block"><h4>${t("modal.res")}</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.response_detail))}</pre></div>`
-        : `<div class="detail-empty">${t("modal.noRes")}</div>`;
+        : `<div class="detail-empty">${t(logDetailedEnabled ? "modal.noResOn" : "modal.noRes")}</div>`;
       return metaHtml + requestBlock + responseBlock;
     }
 
