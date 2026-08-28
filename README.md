@@ -2,8 +2,6 @@
 
 **OpenAI-compatible gateway for Cursor models.** Point any OpenAI client at `/v1`; manage client keys and logs in a built-in admin UI.
 
-![Built-in admin: overview, client keys, request logs, and OpenAI base URL for clients](./docs/images/admin-overview.png)
-
 **Chinese:** [`README.zh-CN.md`](./README.zh-CN.md) · **Changelog:** [`CHANGELOG.md`](./CHANGELOG.md)
 
 **You need:** [Docker Compose](https://docs.docker.com/compose/) and a [Cursor User API Key](https://cursor.com/settings).
@@ -118,7 +116,7 @@ You should see `"status":"ok"`. After pulling a new image, compare `version` and
 ```bash
 docker compose pull && docker compose up -d
 curl -s http://127.0.0.1:8787/health
-# {"status":"ok","version":"20260828.9","git_commit":"<sha>","schema_version":6}
+# {"status":"ok","version":"20260828.10","git_commit":"<sha>","schema_version":6}
 ```
 
 ---

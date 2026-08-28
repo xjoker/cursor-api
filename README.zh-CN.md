@@ -2,8 +2,6 @@
 
 **把 Cursor 模型暴露成 OpenAI 兼容接口。** 任意 OpenAI 客户端指向 `/v1`；在管理台签发客户端 Key、查看请求日志。
 
-![内置管理台：总览、客户端 Key、请求日志与 OpenAI 接入地址](./docs/images/admin-overview.png)
-
 **English:** [`README.md`](./README.md) · **变更记录：** [`CHANGELOG.md`](./CHANGELOG.md)
 
 **你需要：** [Docker Compose](https://docs.docker.com/compose/) 和 [Cursor User API Key](https://cursor.com/settings)。
@@ -118,7 +116,7 @@ curl -s http://127.0.0.1:8787/health
 ```bash
 docker compose pull && docker compose up -d
 curl -s http://127.0.0.1:8787/health
-# {"status":"ok","version":"20260828.9","git_commit":"<sha>","schema_version":6}
+# {"status":"ok","version":"20260828.10","git_commit":"<sha>","schema_version":6}
 ```
 
 ---

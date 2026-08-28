@@ -9,6 +9,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.10] — 2026-08-28
+
+### Documentation
+
+- Removed the outdated admin overview screenshot (`docs/images/admin-overview.png`, UI from `20260820.4`).
+
+---
+
 ## [20260828.9] — 2026-08-28
 
 ### Documentation
