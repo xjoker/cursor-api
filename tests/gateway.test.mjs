@@ -1272,7 +1272,7 @@ test("responses parse maps function_call items and synthesizes assistant for out
   assert.equal(outputsOnly.messages[1]?.content, "ok");
 });
 
-test("responses reject hosted tools and unknown fields", () => {
+test("responses reject hosted tools and ignore unknown fields", () => {
   assert.throws(
     () =>
       parseResponsesRequest({
@@ -1282,10 +1282,14 @@ test("responses reject hosted tools and unknown fields", () => {
       }),
     (error) => error instanceof Error && error.message.includes("web_search"),
   );
-  assert.throws(
-    () => parseResponsesRequest({ model: "composer-2.5", input: "hi", foo: 1 }),
-    (error) => error instanceof Error && error.message.includes("Unknown field"),
-  );
+  const parsed = parseResponsesRequest({
+    model: "composer-2.5",
+    input: "hi",
+    client_metadata: { id: "codex", session: "s1" },
+    foo: 1,
+  });
+  assert.equal(parsed.model, "composer-2.5");
+  assert.equal(parsed.messages[0]?.content, "hi");
 });
 
 test("non-stream responses encode message and function_call output items", () => {

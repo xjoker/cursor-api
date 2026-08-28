@@ -9,56 +9,6 @@ import type {
 import { invalidRequest } from "./errors.js";
 import { parseChatCompletionsRequest } from "./openai.js";
 
-const ACCEPTED_FIELDS = new Set([
-  "model",
-  "input",
-  "instructions",
-  "tools",
-  "tool_choice",
-  "stream",
-  "stream_options",
-  "store",
-  "metadata",
-  "user",
-  "n",
-  "service_tier",
-  "prompt_cache_key",
-  "prompt_cache_options",
-  "prompt_cache_retention",
-  "safety_identifier",
-  "max_output_tokens",
-  "max_tokens",
-  "max_completion_tokens",
-  "max_tool_calls",
-  "parallel_tool_calls",
-  "previous_response_id",
-  "conversation",
-  "conversation_id",
-  "include",
-  "truncation",
-  "reasoning",
-  "text",
-  "temperature",
-  "top_p",
-  "top_k",
-  "presence_penalty",
-  "frequency_penalty",
-  "seed",
-  "stop",
-  "logit_bias",
-  "logprobs",
-  "top_logprobs",
-  "params",
-  "variant",
-  "fast",
-  "optimize_for",
-  "reasoning_effort",
-  "verbosity",
-  "response_format",
-  "background",
-  "context_management",
-]);
-
 const SKIPPED_ITEM_TYPES = new Set(["reasoning", "item_reference", "compaction"]);
 const HOSTED_TOOL_HINT = "only type 'function' tools are supported";
 
@@ -67,12 +17,7 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
     throw invalidRequest("Request body must be a JSON object");
   }
 
-  for (const key of Object.keys(body)) {
-    if (!ACCEPTED_FIELDS.has(key)) {
-      throw invalidRequest(`Unknown field '${key}'`);
-    }
-  }
-
+  // Codex / OpenAI SDK 会带 client_metadata 等未知顶层字段；忽略，不 400。
   if (Array.isArray(body.tools)) {
     for (const [index, tool] of body.tools.entries()) {
       if (!isPlainObject(tool)) {

@@ -9,6 +9,16 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.5] — 2026-08-28
+
+### Fixed
+
+- Responses no longer 400s unknown top-level fields (`client_metadata` from Codex, and similar SDK extras). Hosted tools (`web_search`, …) still 400. Chat Completions stays strict.
+- Parse/validation failures now keep the incoming JSON in request logs when `[logs] detailed = true`, and always store `error_message` on 400/5xx so the admin request-detail view is not empty.
+- System log Fields column wraps and pretty-prints JSON; click a row to open the full payload.
+
+---
+
 ## [20260828.4] — 2026-08-28
 
 ### Added

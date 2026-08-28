@@ -212,6 +212,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let stream = 0;
   let httpStatus = 200;
   let errorCode: string | null = null;
+  let errorMessage: string | null = null;
   let usage: Usage | null = null;
   let upstreamMs: number | null = null;
   let requestDetail: string | null = null;
@@ -221,6 +222,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
+    requestDetail = snapshotIncomingBody(body);
     const parsed = parseChatCompletionsRequest(body);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
@@ -409,6 +411,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req));
     } else {
@@ -426,12 +429,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   } finally {
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
-    if (config.logDetailed) {
-      responseDetail = truncateUtf8(
-        buildResponseDetail(chatResult, errorCode),
-        config.logDetailedMaxBytes,
-      );
-    }
+    responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
     insertRequestLog(db, {
       id: requestId,
       api_key_id: key.id,
@@ -468,6 +466,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
       error_code: errorCode,
+      ...(errorMessage ? { error_message: errorMessage } : {}),
     });
   }
 }
@@ -482,6 +481,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   let stream = 0;
   let httpStatus = 200;
   let errorCode: string | null = null;
+  let errorMessage: string | null = null;
   let usage: Usage | null = null;
   let upstreamMs: number | null = null;
   let requestDetail: string | null = null;
@@ -492,6 +492,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
+    requestDetail = snapshotIncomingBody(body);
     const parsed = parseResponsesRequest(body);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
@@ -633,6 +634,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req));
     } else {
@@ -647,12 +649,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   } finally {
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
-    if (config.logDetailed) {
-      responseDetail = truncateUtf8(
-        buildResponseDetail(chatResult, errorCode),
-        config.logDetailedMaxBytes,
-      );
-    }
+    responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
     insertRequestLog(db, {
       id: requestId,
       api_key_id: key.id,
@@ -689,6 +686,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
       error_code: errorCode,
+      ...(errorMessage ? { error_message: errorMessage } : {}),
     });
   }
 }
@@ -714,7 +712,35 @@ function buildRequestDetail(parsed: ParsedChatRequest): string {
   });
 }
 
-function buildResponseDetail(result: CursorChatResult | null, errorCode: string | null): string {
+function snapshotIncomingBody(body: unknown): string | null {
+  if (!config.logDetailed) return null;
+  return truncateUtf8(JSON.stringify(body), config.logDetailedMaxBytes);
+}
+
+function snapshotResponseDetail(
+  result: CursorChatResult | null,
+  errorCode: string | null,
+  errorMessage: string | null,
+): string | null {
+  if (config.logDetailed) {
+    return truncateUtf8(
+      buildResponseDetail(result, errorCode, errorMessage),
+      config.logDetailedMaxBytes,
+    );
+  }
+  if (!errorCode) return null;
+  return JSON.stringify({
+    status: "error",
+    error_code: errorCode,
+    ...(errorMessage ? { error_message: errorMessage } : {}),
+  });
+}
+
+function buildResponseDetail(
+  result: CursorChatResult | null,
+  errorCode: string | null,
+  errorMessage: string | null,
+): string {
   return JSON.stringify({
     status: result?.status ?? (errorCode ? "error" : "unknown"),
     text: result?.text ?? "",
@@ -723,6 +749,7 @@ function buildResponseDetail(result: CursorChatResult | null, errorCode: string 
     finish_reason: result?.finish_reason ?? null,
     tool_calls: result?.tool_calls?.map((call) => call.name) ?? null,
     error_code: errorCode,
+    ...(errorMessage ? { error_message: errorMessage } : {}),
   });
 }
 

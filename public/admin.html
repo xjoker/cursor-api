@@ -464,13 +464,18 @@
       font-family: var(--font-mono);
     }
     .syslog-fields {
+      margin: 0;
       color: var(--fg-2);
       font-size: 12px;
-      max-width: 48ch;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      font-family: var(--font-mono);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 12rem;
+      overflow: auto;
+      display: block;
     }
+    .syslog-row { cursor: pointer; }
+    .syslog-row:hover { background: var(--surface-hover); }
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -1224,6 +1229,7 @@
       "syslog.colLevel": "级别",
       "syslog.colMsg": "消息",
       "syslog.colFields": "字段",
+      "syslog.clickDetail": "点击查看完整字段",
       "logs.title": "请求日志",
       "logs.hint": "SQLite 账本，最多留 {days} 天。{detail} 时间按浏览器本机时区和 12/24 小时制显示。",
       "logs.detailOn": "已开启详细进出日志。",
@@ -1390,6 +1396,7 @@
       "syslog.colLevel": "Level",
       "syslog.colMsg": "Message",
       "syslog.colFields": "Fields",
+      "syslog.clickDetail": "Click for full fields",
       "logs.title": "Request logs",
       "logs.hint": "SQLite ledger, kept up to {days} days. {detail} Times use your browser timezone and 12/24h clock.",
       "logs.detailOn": "Detailed request/response logging is on.",
@@ -2266,7 +2273,7 @@
         [t("modal.up"), row.upstream_ms == null ? "—" : `${fmtNum(row.upstream_ms)} ms`],
         [t("modal.gw"), row.gateway_ms == null ? "—" : `${fmtNum(row.gateway_ms)} ms`],
         ["Key", String(row.key_prefix ?? row.key_name ?? row.api_key_id ?? "")],
-        [t("modal.err"), row.error_code ? String(row.error_code) : "—"],
+        [t("modal.err"), detailErrorText(row)],
         [t("modal.in"), row.input_tokens == null ? "—" : fmtNum(row.input_tokens)],
         [t("modal.out"), row.output_tokens == null ? "—" : fmtNum(row.output_tokens)],
         [t("modal.total"), row.total_tokens == null ? "—" : fmtNum(row.total_tokens)],
@@ -2293,6 +2300,45 @@
       } catch {
         return raw;
       }
+    }
+
+    function detailErrorText(row) {
+      if (!row.error_code) return "—";
+      const extra = parseDetailField(row.response_detail, "error_message");
+      return extra ? `${String(row.error_code)}: ${extra}` : String(row.error_code);
+    }
+
+    function parseDetailField(raw, key) {
+      if (typeof raw !== "string" || raw === "") return "";
+      try {
+        const obj = JSON.parse(raw);
+        return typeof obj?.[key] === "string" ? obj[key] : "";
+      } catch {
+        return "";
+      }
+    }
+
+    function formatSyslogFields(raw) {
+      if (raw == null || raw === "") return "";
+      try {
+        const obj = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return JSON.stringify(obj, null, 2);
+      } catch {
+        return typeof raw === "string" ? raw : String(raw);
+      }
+    }
+
+    function showSyslogDetail(row) {
+      logModalReturnFocus = document.activeElement;
+      const msg = String(row.message ?? "");
+      $("log-modal-title").textContent = `${formatTime(row.created_at)} · ${msg}`;
+      const fieldsText = formatSyslogFields(row.fields);
+      $("log-modal-body").innerHTML = fieldsText
+        ? `<pre class="detail-pre">${escapeHtml(fieldsText)}</pre>`
+        : `<div class="detail-empty">${t("syslog.empty")}</div>`;
+      $("log-modal").classList.remove("hidden");
+      $("app")?.setAttribute("inert", "");
+      $("log-modal-close").focus();
     }
 
     function closeLogModal() {
@@ -2376,22 +2422,31 @@
           <th>${t("syslog.colMsg")}</th>
           <th>${t("syslog.colFields")}</th>
         </tr></thead>
-        <tbody>${rows.map((row) => {
+        <tbody>${rows.map((row, index) => {
           const levelName = String(row.level ?? "");
           const pill = levelName === "error" ? "bad" : "ok";
-          let fieldsText = "";
-          if (row.fields) {
-            try { fieldsText = typeof row.fields === "string" ? row.fields : JSON.stringify(row.fields); }
-            catch { fieldsText = String(row.fields); }
-          }
-          return `<tr>
+          const fieldsText = formatSyslogFields(row.fields);
+          return `<tr class="syslog-row" data-syslog-index="${index}" tabindex="0" title="${escapeHtml(t("syslog.clickDetail"))}">
             <td class="muted nowrap">${escapeHtml(formatTime(row.created_at))}</td>
             <td><span class="pill ${pill}">${escapeHtml(levelName)}</span></td>
             <td>${escapeHtml(String(row.message ?? ""))}</td>
-            <td><span class="syslog-fields" title="${escapeHtml(fieldsText)}">${escapeHtml(fieldsText)}</span></td>
+            <td><pre class="syslog-fields">${escapeHtml(fieldsText)}</pre></td>
           </tr>`;
         }).join("")}</tbody>
       </table></div>`;
+      $("syslog-view").querySelectorAll("tr.syslog-row").forEach((tr) => {
+        const open = () => {
+          const idx = Number(tr.getAttribute("data-syslog-index"));
+          const row = rows[idx];
+          if (row) showSyslogDetail(row);
+        };
+        tr.addEventListener("click", open);
+        tr.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          open();
+        });
+      });
       const pages = Math.max(1, Math.ceil(syslogTotal / limit) || 1);
       const pager = $("syslog-pager");
       pager.classList.toggle("hidden", syslogTotal === 0 && syslogPage === 1);
