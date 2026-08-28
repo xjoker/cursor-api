@@ -6,6 +6,11 @@ import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { cancelledError } from "../dist/errors.js";
 import { encodeNonStreamCompletion, encodeStreamChunk, parseChatCompletionsRequest } from "../dist/openai.js";
+import {
+  encodeNonStreamResponse,
+  parseResponsesRequest,
+  ResponsesStreamWriter,
+} from "../dist/responses.js";
 
 test("TOML trailing comments and hashes inside strings are valid", () => {
   const root = mkdtempSync(join(tmpdir(), "cursor-api-toml-"));
@@ -1189,4 +1194,189 @@ test("system logs persist from logInfo and list with level filter", async () => 
   } finally {
     setSystemLogWriter(undefined);
   }
+});
+
+test("responses parse maps string input, instructions, and previous_response_id", () => {
+  const parsed = parseResponsesRequest({
+    model: "composer-2.5",
+    instructions: "be brief",
+    input: "Reply PONG",
+    previous_response_id: "resp_abc",
+    temperature: 0.2,
+    reasoning: { effort: "high" },
+    text: { verbosity: "low" },
+  });
+  assert.equal(parsed.model, "composer-2.5");
+  assert.equal(parsed.conversation_id, "resp_abc");
+  assert.equal(parsed.reasoning_effort, "high");
+  assert.equal(parsed.verbosity, "low");
+  assert.equal(parsed.messages[0]?.role, "system");
+  assert.equal(parsed.messages[0]?.content, "be brief");
+  assert.equal(parsed.messages[1]?.role, "user");
+  assert.equal(parsed.messages[1]?.content, "Reply PONG");
+  assert.equal(parsed.includeUsage, true);
+});
+
+test("responses parse maps input_text / input_image and Responses tools", () => {
+  const parsed = parseResponsesRequest({
+    model: "grok-4.5",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "color?" },
+          { type: "input_image", image_url: "https://example.test/red.png" },
+        ],
+      },
+    ],
+    tools: [
+      {
+        type: "function",
+        name: "bash",
+        description: "Run a shell command",
+        parameters: { type: "object", properties: { command: { type: "string" } } },
+        strict: false,
+      },
+    ],
+    tool_choice: { type: "function", name: "bash" },
+  });
+  assert.equal(parsed.messages[0]?.content, "color?");
+  assert.deepEqual(parsed.images, [{ url: "https://example.test/red.png" }]);
+  assert.equal(parsed.tools?.[0]?.name, "bash");
+  assert.deepEqual(parsed.tool_choice, { name: "bash" });
+});
+
+test("responses parse maps function_call items and synthesizes assistant for output-only rounds", () => {
+  const withHistory = parseResponsesRequest({
+    model: "composer-2.5",
+    input: [
+      { role: "user", content: "list files" },
+      { type: "function_call", call_id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" },
+      { type: "function_call_output", call_id: "call_1", output: "README.md" },
+    ],
+  });
+  assert.equal(withHistory.messages[1]?.role, "assistant");
+  assert.equal(withHistory.messages[1]?.tool_calls?.[0]?.id, "call_1");
+  assert.equal(withHistory.messages[2]?.role, "tool");
+  assert.equal(withHistory.messages[2]?.tool_call_id, "call_1");
+
+  const outputsOnly = parseResponsesRequest({
+    model: "composer-2.5",
+    previous_response_id: "resp_prev",
+    input: [{ type: "function_call_output", call_id: "call_1", output: [{ type: "input_text", text: "ok" }] }],
+  });
+  assert.equal(outputsOnly.conversation_id, "resp_prev");
+  assert.equal(outputsOnly.messages[0]?.role, "assistant");
+  assert.equal(outputsOnly.messages[1]?.role, "tool");
+  assert.equal(outputsOnly.messages[1]?.content, "ok");
+});
+
+test("responses reject hosted tools and unknown fields", () => {
+  assert.throws(
+    () =>
+      parseResponsesRequest({
+        model: "composer-2.5",
+        input: "hi",
+        tools: [{ type: "web_search" }],
+      }),
+    (error) => error instanceof Error && error.message.includes("web_search"),
+  );
+  assert.throws(
+    () => parseResponsesRequest({ model: "composer-2.5", input: "hi", foo: 1 }),
+    (error) => error instanceof Error && error.message.includes("Unknown field"),
+  );
+});
+
+test("non-stream responses encode message and function_call output items", () => {
+  const text = encodeNonStreamResponse({
+    id: "resp_test",
+    created: 1,
+    model: "composer-2.5",
+    content: "PONG",
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  });
+  assert.equal(text.object, "response");
+  assert.equal(text.status, "completed");
+  assert.equal(text.output[0].type, "message");
+  assert.equal(text.output[0].content[0].type, "output_text");
+  assert.equal(text.output[0].content[0].text, "PONG");
+  assert.deepEqual(text.usage.input_tokens, 1);
+
+  const tools = encodeNonStreamResponse({
+    id: "resp_tools",
+    created: 1,
+    model: "composer-2.5",
+    content: "",
+    usage: null,
+    tool_calls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
+    finish_reason: "tool_calls",
+  });
+  assert.equal(tools.status, "completed");
+  assert.equal(tools.output[0].type, "function_call");
+  assert.equal(tools.output[0].call_id, "call_1");
+  assert.equal(tools.output[0].name, "bash");
+  assert.equal(tools.usage.input_tokens, 0);
+});
+
+test("responses stream emits output_text and function_call events for OpenCode", async () => {
+  const events = [];
+  const writer = new ResponsesStreamWriter(
+    async (event, data) => {
+      events.push({ event, data });
+    },
+    { id: "resp_stream", created: 1, model: "composer-2.5" },
+  );
+  await writer.start();
+  await writer.onThinking("plan");
+  await writer.onText("PONG");
+  await writer.onToolCalls([{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }]);
+  await writer.complete({
+    content: "PONG",
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    tool_calls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
+    reasoning_content: "plan",
+    finish_reason: "tool_calls",
+  });
+  const types = events.map((row) => row.event);
+  assert.equal(types[0], "response.created");
+  assert.ok(types.includes("response.reasoning_summary_text.delta"));
+  assert.ok(types.includes("response.output_text.delta"));
+  assert.ok(types.includes("response.function_call_arguments.delta"));
+  assert.equal(types.at(-1), "response.completed");
+  const textDelta = events.find((row) => row.event === "response.output_text.delta");
+  assert.equal(textDelta?.data.delta, "PONG");
+  const completed = events.at(-1)?.data.response;
+  assert.equal(completed.output[0].type, "reasoning");
+  assert.equal(completed.output[1].type, "message");
+  assert.equal(completed.output[1].id, textDelta?.data.item_id);
+  assert.equal(completed.output[2].type, "function_call");
+  assert.equal(completed.output[2].call_id, "call_1");
+});
+
+test("writeSseEvent writes event and data lines", async () => {
+  const { writeSseEvent } = await import("../dist/http.js");
+  const chunks = [];
+  const res = {
+    destroyed: false,
+    writableEnded: false,
+    closed: false,
+    write(chunk) {
+      chunks.push(chunk);
+      return true;
+    },
+    once() {
+      return this;
+    },
+    off() {
+      return this;
+    },
+  };
+  await writeSseEvent(res, "response.created", { type: "response.created" });
+  assert.equal(chunks[0], 'event: response.created\ndata: {"type":"response.created"}\n\n');
+});
+
+test("aliasLiveConversation is a no-op for the same id", async () => {
+  const { aliasLiveConversation } = await import("../dist/session.js");
+  assert.equal(aliasLiveConversation("key-1", "resp_1", "resp_1"), false);
 });

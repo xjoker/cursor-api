@@ -88,9 +88,22 @@ export function beginSse(
 }
 
 export async function writeSse(res: ServerResponse, data: unknown): Promise<void> {
-  if (sseResponseClosed(res)) return;
   const payload = typeof data === "string" ? data : JSON.stringify(data);
-  const ok = res.write(`data: ${payload}\n\n`);
+  await writeSseRaw(res, `data: ${payload}\n\n`);
+}
+
+export async function writeSseEvent(
+  res: ServerResponse,
+  event: string,
+  data: unknown,
+): Promise<void> {
+  const payload = typeof data === "string" ? data : JSON.stringify(data);
+  await writeSseRaw(res, `event: ${event}\ndata: ${payload}\n\n`);
+}
+
+async function writeSseRaw(res: ServerResponse, frame: string): Promise<void> {
+  if (sseResponseClosed(res)) return;
+  const ok = res.write(frame);
   if (ok || sseResponseClosed(res)) return;
   await new Promise<void>((resolve) => {
     const done = (): void => {

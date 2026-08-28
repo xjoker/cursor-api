@@ -9,6 +9,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.4] — 2026-08-28
+
+### Added
+
+- `POST /v1/responses` for OpenAI Responses API clients (Codex, OpenCode with `@ai-sdk/openai`). Maps `input` / `instructions` / `function_call` items onto the existing Chat Completions turn, and streams typed SSE events (`response.output_text.delta`, `response.function_call_arguments.delta`, `response.completed`). `previous_response_id` resumes the same Cursor agent. Hosted tools (`web_search`, …) 400; sampling knobs are accepted and ignored.
+
+---
+
 ## [20260828.3] — 2026-08-28
 
 ### Changed
@@ -199,6 +207,7 @@ Initial public MVP.
 
 - OpenAI-compatible HTTP gateway on top of `@cursor/sdk`:
   - `POST /v1/chat/completions` (streaming and non-streaming)
+  - `POST /v1/responses` (OpenAI Responses API; streaming and non-streaming)
   - `GET /v1/models`, `GET /v1/models/{id}`
   - CORS `OPTIONS` on `/v1/*`
 - Client API keys (`cgk_…`) with HMAC-SHA256 digests and enable/disable.

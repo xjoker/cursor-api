@@ -197,6 +197,19 @@ export function conversationKey(apiKeyId: string, conversationId: string): strin
   return `${apiKeyId}:conv:${conversationId}`;
 }
 
+/** 把进行中的会话挂到新的 response id 上，供 previous_response_id 续场。 */
+export function aliasLiveConversation(
+  apiKeyId: string,
+  fromConversationId: string,
+  toConversationId: string,
+): boolean {
+  if (fromConversationId === toConversationId) return false;
+  const session = sessions.get(conversationKey(apiKeyId, fromConversationId));
+  if (!session) return false;
+  indexSession(session, apiKeyId, `conv:${toConversationId}`);
+  return true;
+}
+
 export async function runChatTurn(options: {
   apiKey: string;
   apiKeyId: string;
