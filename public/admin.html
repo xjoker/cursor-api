@@ -869,7 +869,8 @@
       padding: 16px 18px;
       border-bottom: 1px solid var(--border-soft);
     }
-    .modal-head h3 { margin: 0; font-size: 16px; }
+    .modal-head h3 { margin: 0; font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+    .modal-head-actions { display: flex; gap: 8px; flex-shrink: 0; }
     .modal-body {
       padding: 16px 18px 18px;
       overflow: auto;
@@ -890,6 +891,20 @@
     }
     .modal-meta .k { font-size: 11px; color: var(--meta); text-transform: uppercase; letter-spacing: 0.04em; }
     .modal-meta .v { margin-top: 4px; font-size: 13px; color: var(--fg-2); word-break: break-word; }
+    .detail-block-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 8px;
+    }
+    .detail-block-head h4 {
+      margin: 0;
+      font-size: 12px;
+      color: var(--meta);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
     .detail-block h4 {
       margin: 0 0 8px;
       font-size: 12px;
@@ -1146,7 +1161,10 @@
     <div class="modal-card">
       <div class="modal-head">
         <h3 id="log-modal-title" data-i18n="modal.title">Request detail</h3>
-        <button id="log-modal-close" class="btn btn-secondary btn-small" type="button" data-i18n="common.close">Close</button>
+        <div class="modal-head-actions">
+          <button id="log-modal-copy" class="btn btn-secondary btn-small hidden" type="button" data-i18n="common.copy">Copy</button>
+          <button id="log-modal-close" class="btn btn-secondary btn-small" type="button" data-i18n="common.close">Close</button>
+        </div>
       </div>
       <div id="log-modal-body" class="modal-body"></div>
     </div>
@@ -1294,6 +1312,7 @@
       "modal.reason": "推理 Token",
       "modal.req": "请求",
       "modal.res": "响应",
+      "modal.copyId": "复制 ID",
       "modal.noReq": "未记录请求正文。在 <code>gateway.toml</code> 设置 <code>[logs] detailed = true</code> 并重启后生效。",
       "modal.noReqOn": "本条没有存下请求正文。详细日志只记录之后的请求，已经写入的空记录无法补写。请再发一次请求后打开那条日志。",
       "modal.noRes": "未记录响应正文。开启详细日志后可查看助手输出与用量。",
@@ -1463,6 +1482,7 @@
       "modal.reason": "Reasoning tokens",
       "modal.req": "Request",
       "modal.res": "Response",
+      "modal.copyId": "Copy ID",
       "modal.noReq": "Request body not recorded. Set <code>[logs] detailed = true</code> in <code>gateway.toml</code> and restart.",
       "modal.noReqOn": "No request body was stored for this row. Detailed logging records new requests only; this empty row cannot be backfilled. Send another request and open that log.",
       "modal.noRes": "Response body not recorded. Enable detailed logs to see assistant output and usage.",
@@ -1629,6 +1649,18 @@
     $("copy-base").addEventListener("click", () => copyText(openaiBase(), $("copy-base")));
     $("copy-snippet").addEventListener("click", () => copyText($("openai-snippet").textContent, $("copy-snippet")));
     $("log-modal-close").addEventListener("click", closeLogModal);
+    $("log-modal-copy").addEventListener("click", () => copyText($("log-modal-copy").dataset.copyText, $("log-modal-copy")));
+    $("log-modal-body").addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-copy-block]");
+      if (!btn || !$("log-modal-body").contains(btn)) return;
+      const plain = btn.getAttribute("data-copy-text");
+      if (plain != null) {
+        void copyText(plain, btn);
+        return;
+      }
+      const pre = btn.closest(".detail-block")?.querySelector(".detail-pre");
+      void copyText(pre?.textContent ?? "", btn);
+    });
     $("log-modal").addEventListener("click", (event) => {
       if (event.target === $("log-modal")) closeLogModal();
     });
@@ -2263,6 +2295,7 @@
       logModalReturnFocus = document.activeElement;
       $("log-modal-title").textContent = t("modal.titleId", { id });
       $("log-modal-body").innerHTML = renderLogDetail(data);
+      setModalCopy(t("modal.copyId"), String(data.id ?? id));
       $("log-modal").classList.remove("hidden");
       $("app")?.setAttribute("inert", "");
       $("log-modal-close").focus();
@@ -2289,12 +2322,22 @@
         `<div class="meta-item"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div></div>`,
       ).join("")}</div>`;
       const requestBlock = row.request_detail
-        ? `<div class="detail-block"><h4>${t("modal.req")}</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.request_detail))}</pre></div>`
+        ? copyableDetailBlock(t("modal.req"), formatDetailJson(row.request_detail))
         : `<div class="detail-empty">${t(logDetailedEnabled ? "modal.noReqOn" : "modal.noReq")}</div>`;
       const responseBlock = row.response_detail
-        ? `<div class="detail-block"><h4>${t("modal.res")}</h4><pre class="detail-pre">${escapeHtml(formatDetailJson(row.response_detail))}</pre></div>`
+        ? copyableDetailBlock(t("modal.res"), formatDetailJson(row.response_detail))
         : `<div class="detail-empty">${t(logDetailedEnabled ? "modal.noResOn" : "modal.noRes")}</div>`;
       return metaHtml + requestBlock + responseBlock;
+    }
+
+    function copyableDetailBlock(title, text) {
+      return `<div class="detail-block">
+        <div class="detail-block-head">
+          <h4>${escapeHtml(title)}</h4>
+          <button class="btn btn-secondary btn-small" type="button" data-copy-block>${t("common.copy")}</button>
+        </div>
+        <pre class="detail-pre">${escapeHtml(text)}</pre>
+      </div>`;
     }
 
     function formatDetailJson(raw) {
@@ -2338,16 +2381,26 @@
       $("log-modal-title").textContent = `${formatTime(row.created_at)} · ${msg}`;
       const fieldsText = formatSyslogFields(row.fields);
       $("log-modal-body").innerHTML = fieldsText
-        ? `<pre class="detail-pre">${escapeHtml(fieldsText)}</pre>`
+        ? copyableDetailBlock(t("syslog.colFields"), fieldsText)
         : `<div class="detail-empty">${t("syslog.empty")}</div>`;
+      setModalCopy(t("common.copy"), fieldsText);
       $("log-modal").classList.remove("hidden");
       $("app")?.setAttribute("inert", "");
       $("log-modal-close").focus();
     }
 
+    function setModalCopy(label, text) {
+      const btn = $("log-modal-copy");
+      const value = String(text ?? "");
+      btn.textContent = label;
+      btn.dataset.copyText = value;
+      btn.classList.toggle("hidden", value === "");
+    }
+
     function closeLogModal() {
       $("log-modal").classList.add("hidden");
       $("log-modal-body").innerHTML = "";
+      setModalCopy(t("common.copy"), "");
       $("app")?.removeAttribute("inert");
       if (logModalReturnFocus && typeof logModalReturnFocus.focus === "function") {
         logModalReturnFocus.focus();
