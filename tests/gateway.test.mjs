@@ -1315,6 +1315,46 @@ test("responses map Codex custom/namespace tools and skip unnamed hosted tools",
   assert.match(parsed.tools?.[1]?.description ?? "", /start: patch/);
 });
 
+test("responses merge Codex assistant text with function_call before tool outputs", async () => {
+  const { validateChatTurnRequest } = await import("../dist/session.js");
+  const parsed = parseResponsesRequest({
+    model: "composer-2.5",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "check tools" }] },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "looking up tools" }],
+      },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "exec_command",
+        arguments: "{\"cmd\":\"pwd\"}",
+      },
+      { type: "function_call", call_id: "call_2", name: "get_goal", arguments: "{}" },
+      { type: "reasoning", summary: [{ type: "summary_text", text: "plan" }] },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "looking up tools" }],
+      },
+      { type: "function_call_output", call_id: "call_1", output: "ok" },
+      { type: "function_call_output", call_id: "call_2", output: "{}" },
+    ],
+  });
+  assert.equal(parsed.messages.at(-3)?.role, "assistant");
+  assert.equal(parsed.messages.at(-3)?.content, "looking up tools");
+  assert.deepEqual(
+    parsed.messages.at(-3)?.tool_calls?.map((call) => call.name),
+    ["exec_command", "get_goal"],
+  );
+  assert.equal(parsed.messages.at(-2)?.role, "tool");
+  assert.equal(parsed.messages.at(-1)?.role, "tool");
+  const turn = validateChatTurnRequest(parsed);
+  assert.equal(turn.kind, "tool_results");
+});
+
 test("responses parse custom_tool_call items", () => {
   const parsed = parseResponsesRequest({
     model: "composer-2.5",

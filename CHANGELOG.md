@@ -9,6 +9,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.7] — 2026-08-28
+
+### Fixed
+
+- Responses tool-result rounds no longer 400 when Codex replays assistant text, `function_call` items, skipped `reasoning`, and `function_call_output` in that order. Those items collapse into one Chat Completions assistant message with `tool_calls`, then the tool results.
+
+---
+
 ## [20260828.6] — 2026-08-28
 
 ### Fixed

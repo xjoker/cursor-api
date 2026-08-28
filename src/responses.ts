@@ -450,19 +450,27 @@ function convertInputToMessages(input: unknown, instructions: unknown): unknown[
     throw invalidRequest("Field 'input' must be a string or an array");
   }
 
+  // Codex 会把上一轮的 assistant 正文、function_call、reasoning、再一份正文、function_call_output
+  // 交错回放。Chat Completions 要求 tool 紧跟带 tool_calls 的同一条 assistant。
   let pendingCalls: OpenAiToolCall[] = [];
-  const flushCalls = (): void => {
-    if (pendingCalls.length === 0) return;
-    messages.push({
-      role: "assistant",
-      content: null,
-      tool_calls: pendingCalls.map((call) => ({
+  let pendingAssistant: Record<string, unknown> | undefined;
+
+  const flushPendingAssistant = (): void => {
+    if (pendingCalls.length === 0 && pendingAssistant === undefined) return;
+    const message: Record<string, unknown> = pendingAssistant
+      ? { ...pendingAssistant }
+      : { role: "assistant", content: null };
+    if (pendingCalls.length > 0) {
+      message.tool_calls = pendingCalls.map((call) => ({
         id: call.id,
         type: "function",
         function: { name: call.name, arguments: call.arguments },
-      })),
-    });
+      }));
+      if (message.content === undefined || message.content === "") message.content = null;
+    }
+    messages.push(message);
     pendingCalls = [];
+    pendingAssistant = undefined;
   };
 
   for (const [index, raw] of input.entries()) {
@@ -470,12 +478,13 @@ function convertInputToMessages(input: unknown, instructions: unknown): unknown[
       throw invalidRequest(`input[${String(index)}] must be an object`);
     }
     const type = itemType(raw, index);
+    if (SKIPPED_ITEM_TYPES.has(type)) continue;
     if (type === "function_call" || type === "custom_tool_call") {
       pendingCalls.push(parseFunctionCallItem(raw, index));
       continue;
     }
-    flushCalls();
     if (type === "function_call_output" || type === "custom_tool_call_output") {
+      flushPendingAssistant();
       messages.push({
         role: "tool",
         tool_call_id: requiredString(raw.call_id, `input[${String(index)}].call_id`),
@@ -483,15 +492,62 @@ function convertInputToMessages(input: unknown, instructions: unknown): unknown[
       });
       continue;
     }
-    if (SKIPPED_ITEM_TYPES.has(type)) continue;
     if (type === "message") {
+      const role = requiredString(raw.role, `input[${String(index)}].role`);
+      if (role === "assistant") {
+        bufferAssistantMessage(raw, index, (next) => {
+          pendingAssistant = mergeAssistantBuffer(pendingAssistant, next);
+        });
+        continue;
+      }
+      flushPendingAssistant();
       messages.push(convertMessageItem(raw, index));
       continue;
     }
     throw invalidRequest(`input[${String(index)}].type '${type}' is not supported`);
   }
-  flushCalls();
+  flushPendingAssistant();
   return synthesizeAssistantForToolOnly(messages);
+}
+
+function bufferAssistantMessage(
+  item: Record<string, unknown>,
+  index: number,
+  setPending: (message: Record<string, unknown>) => void,
+): void {
+  const converted = convertMessageItem(item, index);
+  const text = contentTextOf(converted.content);
+  converted.content = text === "" ? null : text;
+  setPending(converted);
+}
+
+function mergeAssistantBuffer(
+  pending: Record<string, unknown> | undefined,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!pending) return incoming;
+  const left = contentTextOf(pending.content);
+  const right = contentTextOf(incoming.content);
+  const content = left === "" ? right : right === "" || right === left ? left : `${left}\n${right}`;
+  const merged: Record<string, unknown> = {
+    ...pending,
+    content: content === "" ? null : content,
+  };
+  const leftCalls = Array.isArray(pending.tool_calls) ? pending.tool_calls : [];
+  const rightCalls = Array.isArray(incoming.tool_calls) ? incoming.tool_calls : [];
+  if (leftCalls.length + rightCalls.length > 0) {
+    merged.tool_calls = [...leftCalls, ...rightCalls];
+  }
+  return merged;
+}
+
+function contentTextOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (content === undefined || content === null) return "";
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (isPlainObject(part) && typeof part.text === "string" ? part.text : ""))
+    .join("");
 }
 
 function synthesizeAssistantForToolOnly(messages: unknown[]): unknown[] {
