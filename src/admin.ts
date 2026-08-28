@@ -14,6 +14,7 @@ import {
   listRequestLogFilters,
   listRequestLogs,
   listSystemLogs,
+  OVERVIEW_CALL_CHART_DAYS,
   requestCallsByDay,
   requestStats,
   SCHEMA_VERSION,
@@ -78,7 +79,7 @@ async function dispatch(
       request_count: stats.tokens.totals.request_count,
       tokens: stats.tokens,
       stats,
-      calls_by_day: requestCallsByDay(ctx.db, 7),
+      calls_by_day: requestCallsByDay(ctx.db, OVERVIEW_CALL_CHART_DAYS),
       logs: {
         retention_days: ctx.config.logRetentionDays,
         max_rows: ctx.config.logMaxRows,

@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.4] — 2026-08-28
+
+### Changed
+
+- Admin overview call chart is 14 UTC days (`calls_by_day` on `GET /admin/api/overview`). Days outside `[logs].retention_days` still plot as 0.
+
 ## [20260828.3] — 2026-08-28
 
 ### Changed

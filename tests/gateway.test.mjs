@@ -1143,8 +1143,9 @@ test("deleteApiKey removes the key and keeps request logs", async () => {
   assert.equal(logs[0]?.key_name, null);
 });
 
-test("requestCallsByDay fills seven UTC days including zeros", async () => {
-  const { openDb, insertApiKey, insertRequestLog, requestCallsByDay } = await import("../dist/db.js");
+test("requestCallsByDay fills fourteen UTC days including zeros", async () => {
+  const { openDb, insertApiKey, insertRequestLog, OVERVIEW_CALL_CHART_DAYS, requestCallsByDay } =
+    await import("../dist/db.js");
   const root = mkdtempSync(join(tmpdir(), "cursor-api-calls-day-"));
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
   insertApiKey(db, seedKey("key-1"));
@@ -1156,13 +1157,19 @@ test("requestCallsByDay fills seven UTC days including zeros", async () => {
   insertRequestLog(db, seedLog({ id: "req-today", created_at: `${utcDay(0)}T12:00:00.000Z` }));
   insertRequestLog(db, seedLog({ id: "req-today-2", created_at: `${utcDay(0)}T18:00:00.000Z` }));
   insertRequestLog(db, seedLog({ id: "req-3d", created_at: `${utcDay(3)}T08:00:00.000Z` }));
-  const series = requestCallsByDay(db, 7);
-  assert.equal(series.length, 7);
-  assert.equal(series[0]?.day, utcDay(6));
-  assert.equal(series[6]?.day, utcDay(0));
-  assert.equal(series[6]?.count, 2);
+  insertRequestLog(db, seedLog({ id: "req-13d", created_at: `${utcDay(13)}T08:00:00.000Z` }));
+  assert.equal(OVERVIEW_CALL_CHART_DAYS, 14);
+  const series = requestCallsByDay(db);
+  assert.equal(series.length, 14);
+  assert.equal(series[0]?.day, utcDay(13));
+  assert.equal(series[13]?.day, utcDay(0));
+  assert.equal(series[13]?.count, 2);
+  assert.equal(series[0]?.count, 1);
   assert.equal(series.find((row) => row.day === utcDay(3))?.count, 1);
   assert.equal(series.find((row) => row.day === utcDay(1))?.count, 0);
+  const week = requestCallsByDay(db, 7);
+  assert.equal(week.length, 7);
+  assert.equal(week[0]?.day, utcDay(6));
 });
 
 test("system logs persist from logInfo and list with level filter", async () => {

@@ -445,7 +445,12 @@ export function requestStats(db: DatabaseSync): {
   };
 }
 
-export function requestCallsByDay(db: DatabaseSync, days = 7): Array<{ day: string; count: number }> {
+export const OVERVIEW_CALL_CHART_DAYS = 14;
+
+export function requestCallsByDay(
+  db: DatabaseSync,
+  days = OVERVIEW_CALL_CHART_DAYS,
+): Array<{ day: string; count: number }> {
   const span = Math.max(1, Math.min(Math.trunc(days), 366));
   const now = new Date();
   const endUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());

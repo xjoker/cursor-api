@@ -175,7 +175,7 @@ print(client.chat.completions.create(
 
 ## Admin UI
 
-Browser console at `/admin/`: overview (including a 7-day call chart), client keys (create / disable / enable / delete), request logs, and system logs.
+Browser console at `/admin/`: overview (including a 14-day call chart), client keys (create / disable / enable / delete), request logs, and system logs.
 
 Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`). `DELETE /admin/api/keys/{id}` removes a client key and keeps its request logs. `GET /admin/api/system-logs` lists gateway stdout/stderr events stored in SQLite.
 

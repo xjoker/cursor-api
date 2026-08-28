@@ -173,7 +173,7 @@ print(client.chat.completions.create(
 
 ## 管理台
 
-浏览器访问 `/admin/`：总览（含近 7 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除）、请求日志、系统日志。
+浏览器访问 `/admin/`：总览（含近 14 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除）、请求日志、系统日志。
 
 管理 API：`/admin/api/*`，用同一把 `admin_access_key`（`Authorization: Bearer` 或 `X-Management-Key`）。`DELETE /admin/api/keys/{id}` 删除客户端 Key，历史请求日志保留。`GET /admin/api/system-logs` 列出写入 SQLite 的网关 stdout/stderr 事件。
 

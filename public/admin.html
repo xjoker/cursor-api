@@ -455,7 +455,7 @@
     .call-chart .bar:hover { fill: var(--accent-hover); }
     .call-chart .axis {
       fill: var(--muted);
-      font-size: 11px;
+      font-size: 10px;
       font-family: var(--font-mono);
     }
     .call-chart .count {
@@ -974,7 +974,7 @@
         <div id="overview-cards"></div>
         <div class="panel" id="calls-panel">
           <div class="panel-head">
-            <h3 data-i18n="overview.calls">Calls last 7 days</h3>
+            <h3 id="calls-chart-title" data-i18n="overview.calls">Calls last 14 days</h3>
             <span class="hint" data-i18n="overview.callsHint">UTC days</span>
           </div>
           <div id="calls-chart"><span class="loading" data-i18n="common.loading">Loading</span></div>
@@ -1190,9 +1190,9 @@
       "overview.snippetKey": "你的cgk_客户端Key",
       "overview.snippetAuth": "# 认证也可用请求头 X-Api-Key",
       "overview.unknownUsage": "有 {n} 条请求上游没带回用量，合计里没算进去。",
-      "overview.calls": "近 7 天调用",
+      "overview.calls": "近 {days} 天调用",
       "overview.callsHint": "按 UTC 自然日",
-      "overview.callsEmpty": "这 7 天还没有调用。",
+      "overview.callsEmpty": "这 {days} 天还没有调用。",
       "keys.title": "客户端 Key",
       "keys.help": "创建、停用、恢复、删除。完整明文只在创建时显示一次。发给客户端的是 <code>cgk_</code> 这把，不是管理密钥。删除后历史请求日志会保留，Key 显示为已删除。",
       "keys.name": "名称",
@@ -1356,9 +1356,9 @@
       "overview.snippetKey": "your_cgk_client_key",
       "overview.snippetAuth": "# Auth also accepts X-Api-Key header",
       "overview.unknownUsage": "{n} requests had no upstream usage and are excluded from totals.",
-      "overview.calls": "Calls last 7 days",
+      "overview.calls": "Calls last {days} days",
       "overview.callsHint": "UTC calendar days",
-      "overview.callsEmpty": "No calls in these 7 days.",
+      "overview.callsEmpty": "No calls in these {days} days.",
       "keys.title": "Client keys",
       "keys.help": "Create, disable, restore, and delete. Full plaintext is shown once at creation. Clients use the <code>cgk_</code> key, not the admin key. Deleting a key keeps its request logs (shown as deleted).",
       "keys.name": "Name",
@@ -1515,8 +1515,9 @@
       document.querySelectorAll("[data-i18n]").forEach((el) => {
         const key = el.getAttribute("data-i18n");
         if (!key) return;
-        if (el.hasAttribute("data-i18n-html")) el.innerHTML = t(key);
-        else el.textContent = t(key);
+        const vars = key === "overview.calls" || key === "overview.callsEmpty" ? { days: 14 } : undefined;
+        if (el.hasAttribute("data-i18n-html")) el.innerHTML = t(key, vars);
+        else el.textContent = t(key, vars);
       });
       document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
         const key = el.getAttribute("data-i18n-placeholder");
@@ -1758,8 +1759,11 @@
     function renderCallChart(series) {
       const host = $("calls-chart");
       if (!host) return;
+      const days = Array.isArray(series) && series.length > 0 ? series.length : 14;
+      const title = $("calls-chart-title");
+      if (title) title.textContent = t("overview.calls", { days });
       if (!Array.isArray(series) || series.length === 0) {
-        host.innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("overview.callsEmpty") + "</div>";
+        host.innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("overview.callsEmpty", { days }) + "</div>";
         return;
       }
       const max = Math.max(1, ...series.map((row) => Number(row.count) || 0));
@@ -1770,7 +1774,8 @@
       const padT = 22;
       const padB = 28;
       const slot = (w - padL - padR) / series.length;
-      const barW = Math.max(8, slot - 10);
+      const gap = series.length > 10 ? 6 : 10;
+      const barW = Math.max(8, slot - gap);
       const innerH = h - padT - padB;
       const bars = series.map((row, index) => {
         const count = Number(row.count) || 0;
@@ -1785,7 +1790,7 @@
           <text class="count" x="${(x + barW / 2).toFixed(1)}" y="${nY}" text-anchor="middle">${fmtNum(count)}</text>
           <text class="axis" x="${(x + barW / 2).toFixed(1)}" y="${h - 8}" text-anchor="middle">${escapeHtml(label)}</text>`;
       }).join("");
-      host.innerHTML = `<svg class="call-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(t("overview.calls"))}">${bars}</svg>`;
+      host.innerHTML = `<svg class="call-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(t("overview.calls", { days }))}">${bars}</svg>`;
     }
 
     function renderTokenModels(tokens) {
