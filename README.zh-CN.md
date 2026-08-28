@@ -80,6 +80,7 @@ port = 8787
 cursor_api_key = "你的-cursor-user-api-key"
 admin_access_key = "随机长串-管理密钥"
 api_key_pepper = "随机长串-HMAC-盐"
+# park_timeout_ms = 300000
 
 [logs]
 retention_days = 7
@@ -97,6 +98,7 @@ detailed = false
 | `[logs].detailed` | 记录请求/响应 JSON，管理台点击日志可查看（默认 **false**）。正文以**明文**存在 `./data`，请保护数据目录 |
 | `[logs].detailed_max_bytes` | 单条请求/响应 JSON 上限（4KiB–1MiB，默认 64KiB） |
 | `[logs].max_detail_bytes` | `model` + 详细正文合计 UTF-8 字节上限（默认 256MiB），超限先删最旧行 |
+| `park_timeout_ms` | 工具轮次在内存里保留多久（默认 **300000**）。网关重启后，下一次工具结果按 HTTP transcript 续场 |
 
 ```bash
 chmod 600 data/config/gateway.toml
@@ -111,7 +113,13 @@ docker compose restart
 curl -s http://127.0.0.1:8787/health
 ```
 
-应看到 `"status":"ok"`。
+应看到 `"status":"ok"`。拉新镜像后，用 `version` / `git_commit` 和你期望的 tag 对一下——registry push 成功不等于正在跑的容器已更新：
+
+```bash
+docker compose pull && docker compose up -d
+curl -s http://127.0.0.1:8787/health
+# {"status":"ok","version":"20260828.9","git_commit":"<sha>","schema_version":6}
+```
 
 ---
 
@@ -141,17 +149,21 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 
 **认证：** `Authorization: Bearer cgk_...` 或 `X-Api-Key: cgk_...`
 
-| 方法 | 路径 |
-|------|------|
-| `POST` | `/v1/chat/completions` |
-| `POST` | `/v1/responses` |
-| `GET` | `/v1/models`、`/v1/models/{id}` |
+| 方法 | 路径 | 常见客户端 |
+|------|------|------------|
+| `POST` | `/v1/chat/completions` | OpenAI SDK、OpenCode `"npm": "@ai-sdk/openai-compatible"` |
+| `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
+| `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
 
-Codex 以及 OpenCode 配 `"npm": "@ai-sdk/openai"` 时走 `POST /v1/responses`（`input`、`instructions`、`function_call` / `function_call_output`、带 event 类型的 SSE）。`"npm": "@ai-sdk/openai-compatible"` 仍走 Chat Completions。Responses 会收下并忽略采样参数（`temperature`、`top_p` 等）、`parallel_tool_calls: false`（Codex `/compact`）以及未知顶层字段（Codex 的 `client_metadata` 等）；Chat Completions 对这些字段仍 400。Codex 的 `custom` 工具（`apply_patch`）往返发 `custom_tool_call` 和自由格式 `input`；`namespace` 工具摊平成 function；没有 name 的 hosted 工具（`web_search` 等）直接丢掉。上一轮的 assistant 正文和 `function_call` 会并成一条消息，避免工具结果 400。`previous_response_id` 续同一个 Cursor Agent。
+### Codex（`POST /v1/responses`）
 
-支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
+把 Codex 指到本网关的 `/v1`。压缩（`/compact`）可用：Responses 接受 `parallel_tool_calls: false` 和 `tools: []`（该开关会被忽略，Cursor 不区分）。Chat Completions 对 `parallel_tool_calls: false` 仍 400。
 
-OpenCode 要用 `-f` 贴图和 `--thinking` 时，在 `opencode.json` 里给模型打开能力：
+Responses 还会收下并忽略采样参数（`temperature`、`top_p` 等）以及未知顶层字段（`client_metadata`、`include` 等）。Codex 的 `custom` 工具（`apply_patch`）往返发 `custom_tool_call` 和自由格式 `input`。嵌套 `namespace` 工具摊平成 function。没有 name 的 hosted 工具（`web_search` 等）直接丢掉。上一轮的 assistant 正文和 `function_call` 会并成一条消息，避免工具结果 400。`previous_response_id` 续同一个 Cursor Agent。
+
+### OpenCode
+
+`"npm": "@ai-sdk/openai"` 走 Responses。`"npm": "@ai-sdk/openai-compatible"` 走 Chat Completions。要用 `-f` 贴图和 `--thinking` 时，在 `opencode.json` 里给模型打开能力：
 
 ```json
 "grok-4.5": {
@@ -161,6 +173,14 @@ OpenCode 要用 `-f` 贴图和 `--thinking` 时，在 `opencode.json` 里给模�
   "modalities": { "input": ["text", "image"], "output": ["text"] }
 }
 ```
+
+`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值。OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`。
+
+### Chat Completions
+
+支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等），以及 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供本地客户端执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP。
+
+不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
 
 ```python
 from openai import OpenAI
@@ -213,8 +233,10 @@ GIT_COMMIT=$(git rev-parse HEAD) docker compose build
 
 | 端点 | 用途 |
 |------|------|
-| `GET /health` | 版本与存活 |
+| `GET /health` | 存活：`status`、`version`、`git_commit`、`schema_version` |
 | `GET /` | JSON 接口说明（curl）或跳转管理台（浏览器） |
+
+`version` 来自 [`VERSION`](./VERSION)。GHCR 打 tag 之后，先 pull/重启容器，再对 `/health`，不要假设新构建已经在跑。
 
 ---
 

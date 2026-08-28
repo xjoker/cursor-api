@@ -9,6 +9,17 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.9] — 2026-08-28
+
+### Documentation
+
+- Client docs split Codex (`POST /v1/responses`, `/compact`) from OpenCode and Chat Completions.
+- `/health` upgrade check: compare `version` / `git_commit` after pull; a registry push does not update a running container.
+- Document `park_timeout_ms` in README config tables and `gateway.toml.example`.
+- Remove the duplicated OpenCode sentence in `README.md`.
+
+---
+
 ## [20260828.8] — 2026-08-28
 
 ### Fixed

@@ -10,6 +10,7 @@ api_key_pepper = ""
 
 # data_dir = "data"
 # cursor_workspace = "data/workspace"
+# park_timeout_ms = 300000
 
 [logs]
 # Request log retention in SQLite (admin UI). Oldest rows are deleted first.
