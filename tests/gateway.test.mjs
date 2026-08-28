@@ -1315,6 +1315,30 @@ test("responses map Codex custom/namespace tools and skip unnamed hosted tools",
   assert.match(parsed.tools?.[1]?.description ?? "", /start: patch/);
 });
 
+test("responses accept Codex compact with parallel_tool_calls false and empty tools", () => {
+  const parsed = parseResponsesRequest({
+    model: "composer-2.5",
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      { type: "message", role: "assistant", content: "hello" },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "You are performing a CONTEXT CHECKPOINT COMPACTION." }],
+      },
+    ],
+    tools: [],
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    stream: true,
+    store: false,
+    client_metadata: { request_kind: "compaction" },
+  });
+  assert.equal(parsed.model, "composer-2.5");
+  assert.equal(parsed.tools, undefined);
+  assert.equal(parsed.messages.at(-1)?.role, "user");
+});
+
 test("responses merge Codex assistant text with function_call before tool outputs", async () => {
   const { validateChatTurnRequest } = await import("../dist/session.js");
   const parsed = parseResponsesRequest({

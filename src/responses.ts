@@ -39,7 +39,7 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
     stream_options: body.stream_options,
     tools,
     tool_choice: body.tool_choice,
-    parallel_tool_calls: body.parallel_tool_calls,
+    // Codex /compact 会发 parallel_tool_calls: false 且 tools: []；Cursor 不区分，忽略。
     user: body.user,
     n: body.n,
     store: body.store,

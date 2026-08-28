@@ -9,6 +9,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260828.8] — 2026-08-28
+
+### Fixed
+
+- Responses accepts Codex `/compact` requests that send `parallel_tool_calls: false` and `tools: []`. Chat Completions still 400s `parallel_tool_calls: false`.
+
+---
+
 ## [20260828.7] — 2026-08-28
 
 ### Fixed
