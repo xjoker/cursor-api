@@ -19,6 +19,11 @@
   "dependencies": {
     "@cursor/sdk": "1.0.30"
   },
+  "overrides": {
+    "@connectrpc/connect-node": {
+      "undici": "6.28.0"
+    }
+  },
   "devDependencies": {
     "@types/node": "22.18.12",
     "typescript": "5.9.2"

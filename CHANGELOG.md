@@ -26,6 +26,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 ### Security
 
 - Documented that the Cursor SDK accepts one prompt per turn, so serialized OpenAI `system` / `developer` roles are not a hard trust boundary.
+- Overrode ConnectRPC's transitive `undici` dependency to 6.28.0, clearing the known HIGH and MODERATE advisories while retaining its `Headers` API usage.
 
 ### Tests
 
