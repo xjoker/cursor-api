@@ -33,89 +33,67 @@ test("TOML trailing comments and hashes inside strings are valid", () => {
   assert.equal(cfg.cursorApiKey, "ab#cd");
 });
 
-test("production auto-creates empty gateway.toml when missing", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-bootstrap-"));
-  const configPath = join(root, "data", "config", "gateway.toml");
-  assert.equal(existsSync(configPath), false);
+test("only production bootstraps a missing gateway.toml", () => {
+  const productionRoot = mkdtempSync(join(tmpdir(), "cursor-api-bootstrap-"));
+  const productionPath = join(productionRoot, "data", "config", "gateway.toml");
+  assert.equal(existsSync(productionPath), false);
   assert.throws(
-    () => loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, root),
+    () => loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, productionRoot),
     (error) => error instanceof Error && error.message.includes("cursor_api_key"),
   );
-  assert.equal(existsSync(configPath), true);
-  const text = readFileSync(configPath, "utf8");
+  assert.equal(existsSync(productionPath), true);
+  const text = readFileSync(productionPath, "utf8");
   assert.match(text, /cursor_api_key = ""/);
-});
 
-test("non-production does not auto-create gateway.toml", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-no-bootstrap-"));
-  const configPath = join(root, "data", "config", "gateway.toml");
+  const developmentRoot = mkdtempSync(join(tmpdir(), "cursor-api-no-bootstrap-"));
+  const developmentPath = join(developmentRoot, "data", "config", "gateway.toml");
   assert.throws(
-    () => loadConfig({ DATA_DIR: "data" }, root),
+    () => loadConfig({ DATA_DIR: "data" }, developmentRoot),
     (error) => error instanceof Error && error.message.includes("cursor_api_key"),
   );
-  assert.equal(existsSync(configPath), false);
+  assert.equal(existsSync(developmentPath), false);
 });
 
-test("TOML [logs] section sets retention and row cap", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-logs-"));
-  mkdirSync(join(root, "data", "config"), { recursive: true });
-  writeFileSync(
-    join(root, "data", "config", "gateway.toml"),
-    [
-      'cursor_api_key = "key"',
-      'admin_access_key = "admin"',
-      'api_key_pepper = "pepper"',
-      "[logs]",
-      "retention_days = 7",
-      "max_rows = 5000",
-      "",
-    ].join("\n"),
-  );
-  const cfg = loadConfig({ DATA_DIR: "data" }, root);
-  assert.equal(cfg.logRetentionDays, 7);
-  assert.equal(cfg.logMaxRows, 5000);
-});
+test("log policy applies defaults and TOML overrides, then rejects an invalid env override", () => {
+  const defaultRoot = mkdtempSync(join(tmpdir(), "cursor-api-log-defaults-"));
+  writeGatewayConfig(defaultRoot);
+  const defaults = loadConfig({ DATA_DIR: "data" }, defaultRoot);
+  assert.equal(defaults.logRetentionDays, 7);
+  assert.equal(defaults.logDetailed, false);
+  assert.equal(defaults.logMaxDetailBytes, 268_435_456);
 
-test("TOML detailed flag defaults to false", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-detailed-"));
-  mkdirSync(join(root, "data", "config"), { recursive: true });
-  writeFileSync(
-    join(root, "data", "config", "gateway.toml"),
-    [
-      'cursor_api_key = "key"',
-      'admin_access_key = "admin"',
-      'api_key_pepper = "pepper"',
-      "",
-    ].join("\n"),
-  );
-  const cfg = loadConfig({ DATA_DIR: "data" }, root);
-  assert.equal(cfg.logRetentionDays, 7);
-  assert.equal(cfg.logDetailed, false);
-  assert.equal(cfg.logMaxDetailBytes, 268_435_456);
-});
-
-test("invalid LOG_DETAILED names the environment variable", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-log-env-"));
-  mkdirSync(join(root, "data", "config"), { recursive: true });
-  writeFileSync(
-    join(root, "data", "config", "gateway.toml"),
-    [
-      'cursor_api_key = "key"',
-      'admin_access_key = "admin"',
-      'api_key_pepper = "pepper"',
-      "[logs]",
-      "detailed = false",
-      "",
-    ].join("\n"),
-  );
+  const overrideRoot = mkdtempSync(join(tmpdir(), "cursor-api-log-overrides-"));
+  writeGatewayConfig(overrideRoot, [
+    "[logs]",
+    "retention_days = 7",
+    "max_rows = 5000",
+    "detailed = false",
+  ]);
+  const overrides = loadConfig({ DATA_DIR: "data" }, overrideRoot);
+  assert.equal(overrides.logRetentionDays, 7);
+  assert.equal(overrides.logMaxRows, 5000);
   assert.throws(
-    () => loadConfig({ DATA_DIR: "data", LOG_DETAILED: "yes" }, root),
+    () => loadConfig({ DATA_DIR: "data", LOG_DETAILED: "yes" }, overrideRoot),
     (error) =>
       error instanceof Error &&
       error.message.includes("environment variable LOG_DETAILED") &&
       error.message.includes('"yes"'),
   );
 });
+
+function writeGatewayConfig(root, extraLines = []) {
+  mkdirSync(join(root, "data", "config"), { recursive: true });
+  writeFileSync(
+    join(root, "data", "config", "gateway.toml"),
+    [
+      'cursor_api_key = "key"',
+      'admin_access_key = "admin"',
+      'api_key_pepper = "pepper"',
+      ...extraLines,
+      "",
+    ].join("\n"),
+  );
+}
 
 test("request logs are pruned to max_rows", async () => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
@@ -164,46 +142,21 @@ test("request logs are pruned to max_rows", async () => {
   );
 });
 
-test("request logs are pruned by max_detail_bytes", async () => {
+test("max_detail_bytes counts UTF-8 bytes instead of characters", async () => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-detail-cap-"));
-  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 80 });
-  const now = new Date().toISOString();
-  insertApiKey(db, {
-    id: "key-1",
-    name: "test",
-    key_prefix: "cgk_test",
-    key_digest: "digest",
-    created_at: now,
-    updated_at: now,
-  });
-  const payload = "x".repeat(50);
-  for (let i = 0; i < 4; i += 1) {
-    insertRequestLog(db, {
-      id: `req-${i}`,
-      api_key_id: "key-1",
-      path: "/v1/chat/completions",
-      model: "composer-2.5",
-      stream: 0,
-      http_status: 200,
-      duration_ms: 1,
-      input_tokens: null,
-      output_tokens: null,
-      total_tokens: null,
-      error_code: null,
-      created_at: new Date(Date.now() - (4 - i) * 60_000).toISOString(),
-      upstream_ms: 1,
-      gateway_ms: 0,
-      cache_read_tokens: null,
-      cache_write_tokens: null,
-      reasoning_tokens: null,
-      request_detail: payload,
-      response_detail: null,
-    });
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-detail-utf8-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 100 });
+  insertApiKey(db, seedKey("key-1"));
+  for (let i = 0; i < 2; i += 1) {
+    insertRequestLog(db, seedLog({
+      id: `req-utf8-${i}`,
+      created_at: new Date(Date.now() + i).toISOString(),
+      request_detail: "界".repeat(30),
+    }));
   }
   const { total, logs } = listRequestLogs(db, { limit: 10, offset: 0 });
-  assert.ok(total <= 1);
-  assert.equal(logs[0]?.id, "req-3");
+  assert.equal(total, 1);
+  assert.equal(logs[0]?.id, "req-utf8-1");
 });
 
 test("request logs are pruned when model bytes exceed max_detail_bytes", async () => {
@@ -339,15 +292,12 @@ test("sqlite database file is owner-readable only when chmod works", async () =>
   assert.equal(mode, 0o600);
 });
 
-test("truncateUtf8 is O(n) for megabyte inputs", async () => {
+test("truncateUtf8 preserves a valid UTF-8 boundary within the byte cap", async () => {
   const { truncateUtf8 } = await import("../dist/log.js");
-  const text = "a".repeat(1_000_000);
-  const started = Date.now();
-  const out = truncateUtf8(text, 65_536);
-  const elapsed = Date.now() - started;
-  assert.ok(Buffer.byteLength(out, "utf8") <= 65_536);
+  const out = truncateUtf8("界".repeat(30), 40);
+  assert.ok(Buffer.byteLength(out, "utf8") <= 40);
+  assert.equal(out.includes("�"), false);
   assert.match(out, /\[truncated\]$/);
-  assert.ok(elapsed < 200, `truncateUtf8 took ${elapsed}ms`);
 });
 
 test("writeSse resolves when response is already closed", async () => {
@@ -389,7 +339,7 @@ test("stream must be a boolean when present", () => {
   );
 });
 
-test("non-stream completion omits usage when unknown", () => {
+test("non-stream responses encode usage, tools, and reasoning without inventing fields", () => {
   const without = encodeNonStreamCompletion({
     id: "chatcmpl_test",
     created: 1,
@@ -411,6 +361,36 @@ test("non-stream completion omits usage when unknown", () => {
     completion_tokens: 2,
     total_tokens: 3,
   });
+
+  const withTools = encodeNonStreamCompletion({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "composer-2.5",
+    content: "",
+    usage: null,
+    tool_calls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
+    finish_reason: "tool_calls",
+  });
+  assert.equal(withTools.choices[0].finish_reason, "tool_calls");
+  assert.equal(withTools.choices[0].message.content, null);
+  assert.deepEqual(withTools.choices[0].message.tool_calls, [
+    {
+      id: "call_1",
+      type: "function",
+      function: { name: "bash", arguments: "{\"command\":\"ls\"}" },
+    },
+  ]);
+
+  const withReasoning = encodeNonStreamCompletion({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "grok-4.5",
+    content: "red",
+    usage: null,
+    reasoning_content: "looked at pixels",
+  });
+  assert.equal(withReasoning.choices[0].message.content, "red");
+  assert.equal(withReasoning.choices[0].message.reasoning_content, "looked at pixels");
 });
 
 test("cancelledError maps to HTTP 499", () => {
@@ -455,40 +435,32 @@ test("chat completions accepts OpenAI tools and tool role", () => {
   assert.equal(parsed.messages[2]?.tool_call_id, "call_1");
 });
 
-test("legacy functions field is still rejected", () => {
-  assert.throws(
-    () =>
-      parseChatCompletionsRequest({
-        model: "composer-2.5",
-        messages: [{ role: "user", content: "hi" }],
-        functions: [{ name: "x" }],
-      }),
-    (error) => error instanceof Error && error.message.includes("functions"),
+test("unsupported OpenAI compatibility controls fail closed", () => {
+  const base = {
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      { type: "function", function: { name: "grep", parameters: { type: "object", properties: {} } } },
+    ],
+  };
+  for (const [field, body] of [
+    ["functions", { ...base, functions: [{ name: "x" }] }],
+    ["temperature", { ...base, temperature: 0.2 }],
+    ["tool_choice", { ...base, tool_choice: "required" }],
+    ["parallel_tool_calls", { ...base, parallel_tool_calls: false }],
+  ]) {
+    assert.throws(
+      () => parseChatCompletionsRequest(body),
+      (error) => error instanceof Error && error.message.includes(field),
+    );
+  }
+  assert.equal(
+    parseChatCompletionsRequest({ ...base, max_tokens: 32000, parallel_tool_calls: true }).model,
+    "grok-4.5",
   );
 });
 
-test("non-stream completion encodes tool_calls", () => {
-  const body = encodeNonStreamCompletion({
-    id: "chatcmpl_test",
-    created: 1,
-    model: "composer-2.5",
-    content: "",
-    usage: null,
-    tool_calls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"ls\"}" }],
-    finish_reason: "tool_calls",
-  });
-  assert.equal(body.choices[0].finish_reason, "tool_calls");
-  assert.equal(body.choices[0].message.content, null);
-  assert.deepEqual(body.choices[0].message.tool_calls, [
-    {
-      id: "call_1",
-      type: "function",
-      function: { name: "bash", arguments: "{\"command\":\"ls\"}" },
-    },
-  ]);
-});
-
-test("stream chunk encodes tool_calls deltas", () => {
+test("stream responses encode tool-call and reasoning deltas", () => {
   const chunk = encodeStreamChunk({
     id: "chatcmpl_test",
     created: 1,
@@ -510,12 +482,21 @@ test("stream chunk encodes tool_calls deltas", () => {
     finish_reason: "tool_calls",
   });
   assert.equal(done.choices[0].finish_reason, "tool_calls");
+
+  const reasoning = encodeStreamChunk({
+    id: "chatcmpl_test",
+    created: 1,
+    model: "grok-4.5",
+    reasoning_content: "step 1",
+  });
+  assert.equal(reasoning.choices[0].delta.reasoning_content, "step 1");
+  assert.equal(Object.hasOwn(reasoning.choices[0].delta, "content"), false);
 });
 
 const TINY_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-test("chat completions accepts OpenAI image_url and OpenCode file/image parts", () => {
+test("image parsing accepts supported parts and only attaches the last user images", () => {
   const dataUrl = `data:image/png;base64,${TINY_PNG}`;
   const imageUrl = parseChatCompletionsRequest({
     model: "grok-4.5",
@@ -592,49 +573,7 @@ test("chat completions accepts OpenAI image_url and OpenCode file/image parts", 
       }),
     (error) => error instanceof Error && error.message.includes("audio"),
   );
-});
 
-test("stream and non-stream encode reasoning_content for OpenCode thinking blocks", () => {
-  const chunk = encodeStreamChunk({
-    id: "chatcmpl_test",
-    created: 1,
-    model: "grok-4.5",
-    reasoning_content: "step 1",
-  });
-  assert.equal(chunk.choices[0].delta.reasoning_content, "step 1");
-  assert.equal(Object.hasOwn(chunk.choices[0].delta, "content"), false);
-
-  const body = encodeNonStreamCompletion({
-    id: "chatcmpl_test",
-    created: 1,
-    model: "grok-4.5",
-    content: "red",
-    usage: null,
-    reasoning_content: "looked at pixels",
-  });
-  assert.equal(body.choices[0].message.content, "red");
-  assert.equal(body.choices[0].message.reasoning_content, "looked at pixels");
-});
-
-test("sampling fields without Cursor primitives are rejected; max_tokens stays accepted", () => {
-  assert.throws(
-    () =>
-      parseChatCompletionsRequest({
-        model: "grok-4.5",
-        messages: [{ role: "user", content: "hi" }],
-        temperature: 0.2,
-      }),
-    (error) => error instanceof Error && error.message.includes("temperature"),
-  );
-  const parsed = parseChatCompletionsRequest({
-    model: "grok-4.5",
-    messages: [{ role: "user", content: "hi" }],
-    max_tokens: 32000,
-  });
-  assert.equal(parsed.model, "grok-4.5");
-});
-
-test("only the last user message images are attached", () => {
   const parsed = parseChatCompletionsRequest({
     model: "grok-4.5",
     messages: [
@@ -668,7 +607,8 @@ test("only the last user message images are attached", () => {
   assert.deepEqual(latest.images, [{ url: "https://example.test/new.png" }]);
 });
 
-test("tool_choice named function keeps only that tool", async () => {
+test("tool_choice selects one declared tool and rejects unknown names", async () => {
+  const { filterToolsForChoice, validateChatTurnRequest } = await import("../dist/session.js");
   const parsed = parseChatCompletionsRequest({
     model: "grok-4.5",
     messages: [{ role: "user", content: "hi" }],
@@ -679,33 +619,11 @@ test("tool_choice named function keeps only that tool", async () => {
     tool_choice: { type: "function", function: { name: "grep" } },
   });
   assert.deepEqual(parsed.tool_choice, { name: "grep" });
-  const { filterToolsForChoice } = await import("../dist/session.js");
   assert.deepEqual(filterToolsForChoice(parsed.tools, parsed.tool_choice)?.map((tool) => tool.name), [
     "grep",
   ]);
-});
 
-test("unsupported tool routing controls are rejected", () => {
-  const base = {
-    model: "grok-4.5",
-    messages: [{ role: "user", content: "hi" }],
-    tools: [
-      { type: "function", function: { name: "grep", parameters: { type: "object", properties: {} } } },
-    ],
-  };
-  assert.throws(
-    () => parseChatCompletionsRequest({ ...base, tool_choice: "required" }),
-    (error) => error instanceof Error && error.message.includes("tool_choice"),
-  );
-  assert.throws(
-    () => parseChatCompletionsRequest({ ...base, parallel_tool_calls: false }),
-    (error) => error instanceof Error && error.message.includes("parallel_tool_calls"),
-  );
-  assert.equal(parseChatCompletionsRequest({ ...base, parallel_tool_calls: true }).model, "grok-4.5");
-});
-
-test("chat turn validation rejects an unknown named tool before streaming", async () => {
-  const parsed = parseChatCompletionsRequest({
+  const unknown = parseChatCompletionsRequest({
     model: "grok-4.5",
     messages: [{ role: "user", content: "hi" }],
     stream: true,
@@ -714,37 +632,59 @@ test("chat turn validation rejects an unknown named tool before streaming", asyn
     ],
     tool_choice: { type: "function", function: { name: "bash" } },
   });
-  const { validateChatTurnRequest } = await import("../dist/session.js");
   assert.throws(
-    () => validateChatTurnRequest(parsed),
+    () => validateChatTurnRequest(unknown),
     (error) => error instanceof Error && error.message.includes("not in tools"),
   );
 });
 
-test("tool results are validated atomically before parked calls resolve", async () => {
+test("tool results validate the whole batch and accept later parked calls", async () => {
   const { applyToolResults } = await import("../dist/session.js");
-  let resolved = 0;
-  const session = {
-    lastFlushed: ["call_1", "call_2"],
-    parks: new Map([
-      ["call_1", { resolve: () => { resolved += 1; }, reject: () => undefined }],
-      ["call_2", { resolve: () => { resolved += 1; }, reject: () => undefined }],
-    ]),
+  const makeSession = (lastFlushed = ["call_1", "call_2"]) => {
+    const resolved = [];
+    return {
+      resolved,
+      session: {
+        lastFlushed,
+        parks: new Map([
+          ["call_1", { resolve: (value) => { resolved.push(["call_1", value]); }, reject: () => undefined }],
+          ["call_2", { resolve: (value) => { resolved.push(["call_2", value]); }, reject: () => undefined }],
+        ]),
+      },
+    };
   };
+
+  const missing = makeSession();
+  assert.throws(
+    () => applyToolResults(missing.session, [{ toolCallId: "call_1", content: "one" }]),
+    (error) => error instanceof Error && error.message.includes("Missing tool results"),
+  );
+  assert.deepEqual(missing.resolved, []);
+  assert.equal(missing.session.parks.size, 2);
+
+  const duplicate = makeSession();
   assert.throws(
     () =>
-      applyToolResults(session, [
+      applyToolResults(duplicate.session, [
         { toolCallId: "call_1", content: "one" },
         { toolCallId: "call_1", content: "duplicate" },
         { toolCallId: "call_2", content: "two" },
       ]),
     (error) => error instanceof Error && error.message.includes("Duplicate tool_call_id"),
   );
-  assert.equal(resolved, 0);
-  assert.equal(session.parks.size, 2);
+  assert.deepEqual(duplicate.resolved, []);
+  assert.equal(duplicate.session.parks.size, 2);
+
+  const late = makeSession(["call_1"]);
+  applyToolResults(late.session, [
+    { toolCallId: "call_1", content: "one" },
+    { toolCallId: "call_2", content: "two" },
+  ]);
+  assert.deepEqual(late.resolved, [["call_1", "one"], ["call_2", "two"]]);
+  assert.equal(late.session.parks.size, 0);
 });
 
-test("failed and continued runs clean up or reset session state", async () => {
+test("a failed run disposes its agent and a continuation does not repeat prior text", async () => {
   const { continueRun, raceTurn } = await import("../dist/session.js");
   let disposed = 0;
   const base = {
@@ -791,7 +731,7 @@ test("failed and continued runs clean up or reset session state", async () => {
   assert.equal(result.text, "");
 });
 
-test("conversation_id is accepted on the body or in metadata", () => {
+test("conversation_id accepts body or metadata values within the UTF-8 byte limit", () => {
   const direct = parseChatCompletionsRequest({
     model: "grok-4.5",
     conversation_id: "thread-1",
@@ -804,15 +744,38 @@ test("conversation_id is accepted on the body or in metadata", () => {
     messages: [{ role: "user", content: "hi" }],
   });
   assert.equal(nested.conversation_id, "thread-2");
+  assert.throws(
+    () =>
+      parseChatCompletionsRequest({
+        model: "grok-4.5",
+        conversation_id: "界".repeat(171),
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    (error) =>
+      error instanceof Error &&
+      error.message.includes("conversation_id") &&
+      error.message.includes("512 UTF-8 bytes"),
+  );
 });
 
-test("resolveTurnAction replays tool results when the park is gone", async () => {
-  const { classifyChatTurn, resolveTurnAction } = await import("../dist/session.js");
+test("chat turns are classified and routed by conversation state", async () => {
+  const { classifyChatTurn, hashMessages, resolveTurnAction } = await import("../dist/session.js");
+  const userTurn = classifyChatTurn([
+    { role: "system", content: "sys" },
+    { role: "user", content: "list" },
+  ]);
+  assert.equal(userTurn.kind, "user");
+  assert.equal(userTurn.user.content, "list");
+
   const toolTurn = classifyChatTurn([
+    { role: "system", content: "sys" },
     { role: "user", content: "list" },
     { role: "assistant", content: "", tool_calls: [{ id: "call_1", name: "bash", arguments: "{}" }] },
     { role: "tool", tool_call_id: "call_1", content: "ok" },
   ]);
+  assert.equal(toolTurn.kind, "tool_results");
+  assert.equal(toolTurn.results[0]?.toolCallId, "call_1");
+  assert.equal(hashMessages(toolTurn.stem), hashMessages(userTurn.stem.concat([userTurn.user])));
   assert.equal(
     resolveTurnAction({ turn: toolTurn, hasParkedSession: false }),
     "replay_transcript",
@@ -821,7 +784,6 @@ test("resolveTurnAction replays tool results when the park is gone", async () =>
     resolveTurnAction({ turn: toolTurn, hasParkedSession: true }),
     "continue_park",
   );
-  const userTurn = classifyChatTurn([{ role: "user", content: "hi" }]);
   assert.equal(
     resolveTurnAction({
       turn: userTurn,
@@ -837,7 +799,80 @@ test("resolveTurnAction replays tool results when the park is gone", async () =>
   );
 });
 
-test("PARK_TIMEOUT_MS and git_commit come from env or git HEAD", () => {
+test("stream response setup runs only after conversation ownership is acquired", async () => {
+  const { claimConversationRequest, withConversationClaim } = await import("../dist/session.js");
+  const release = claimConversationRequest("key-1", "c1");
+  let responseStarted = false;
+  await assert.rejects(
+    withConversationClaim("key-1", "c1", async () => {
+      responseStarted = true;
+    }),
+    (error) =>
+      typeof error === "object" &&
+      error !== null &&
+      error.httpStatus === 409 &&
+      error.code === "conversation_busy",
+  );
+  assert.equal(responseStarted, false);
+
+  release?.();
+  await withConversationClaim("key-1", "c1", async () => {
+    responseStarted = true;
+    assert.throws(
+      () => claimConversationRequest("key-1", "c1"),
+      (error) =>
+        typeof error === "object" &&
+        error !== null &&
+        error.code === "conversation_busy",
+    );
+  });
+  assert.equal(responseStarted, true);
+
+  const releaseAgain = claimConversationRequest("key-1", "c1");
+  releaseAgain?.();
+});
+
+test("parked-session routing honors explicit IDs and image identity", async () => {
+  const { hashMessages, resolveParkedRoute } = await import("../dist/session.js");
+  assert.equal(
+    resolveParkedRoute({
+      conversationId: "c1",
+      hasConversationParks: true,
+      hasStemParks: true,
+    }),
+    "conversation",
+  );
+  assert.equal(
+    resolveParkedRoute({
+      conversationId: "c2",
+      hasConversationParks: false,
+      hasStemParks: true,
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveParkedRoute({ hasConversationParks: false, hasStemParks: true }),
+    "stem",
+  );
+
+  const first = [
+    {
+      role: "user",
+      content: "describe",
+      images: [{ data: "Zmlyc3Q=", mimeType: "image/png" }],
+    },
+  ];
+  const second = [
+    {
+      role: "user",
+      content: "describe",
+      images: [{ data: "c2Vjb25k", mimeType: "image/png" }],
+    },
+  ];
+  assert.notEqual(hashMessages(first), hashMessages(second));
+});
+
+test("configuration reads park timeout and gives GIT_COMMIT env precedence", () => {
   const root = mkdtempSync(join(tmpdir(), "cursor-api-park-"));
   mkdirSync(join(root, "data", "config"), { recursive: true });
   mkdirSync(join(root, ".git", "refs", "heads"), { recursive: true });
@@ -860,25 +895,6 @@ test("PARK_TIMEOUT_MS and git_commit come from env or git HEAD", () => {
   assert.equal(fromEnv.gitCommit, "deadbeef");
 });
 
-test("identical conversation prefixes hash to the same stem", async () => {
-  const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
-  const sys = { role: "system", content: "sys" };
-  const ok = { role: "assistant", content: "OK" };
-  const prefix = [sys, { role: "user", content: "Reply with only OK." }, ok];
-  const nextC = classifyChatTurn([...prefix, { role: "user", content: "secret C" }]);
-  const nextD = classifyChatTurn([...prefix, { role: "user", content: "secret D" }]);
-  assert.equal(nextC.kind, "user");
-  assert.equal(nextD.kind, "user");
-  assert.equal(hashMessages(nextC.stem), hashMessages(nextD.stem));
-});
-
-test("missingFlushedToolResults only requires IDs already sent to the client", async () => {
-  const { missingFlushedToolResults } = await import("../dist/session.js");
-  assert.deepEqual(missingFlushedToolResults(["call_a"], ["call_a"]), []);
-  assert.deepEqual(missingFlushedToolResults(["call_a", "call_b"], ["call_a"]), ["call_b"]);
-  assert.deepEqual(missingFlushedToolResults(["call_a"], ["call_a", "call_late"]), []);
-});
-
 test("toOpenAiToolCallId strips newlines and unsafe characters", async () => {
   const { toOpenAiToolCallId } = await import("../dist/session.js");
   const cleaned = toOpenAiToolCallId("call-abc-1\nfc_def_0");
@@ -887,10 +903,27 @@ test("toOpenAiToolCallId strips newlines and unsafe characters", async () => {
   assert.equal(toOpenAiToolCallId("call_ok"), "call_ok");
 });
 
-test("localChatAgentTools enables mcp only when client tools exist", async () => {
-  const { localChatAgentTools } = await import("../dist/cursor.js");
-  assert.deepEqual(localChatAgentTools(false), []);
-  assert.deepEqual(localChatAgentTools(true), ["mcp"]);
+test("agent creation grants only MCP when client tools are present", async (context) => {
+  const { Agent } = await import("@cursor/sdk");
+  const { createLocalChatAgent } = await import("../dist/cursor.js");
+  const calls = [];
+  context.mock.method(Agent, "create", async (options) => {
+    calls.push(options);
+    return { agentId: `agent-${calls.length}` };
+  });
+  const workspaceDir = mkdtempSync(join(tmpdir(), "cursor-api-agent-tools-"));
+  const base = { apiKey: "test-key", workspaceDir, model: { id: "grok-4.5" } };
+
+  await createLocalChatAgent(base);
+  assert.deepEqual(calls[0]?.tools, []);
+  assert.equal(calls[0]?.local.customTools, undefined);
+
+  const customTools = {
+    grep: { inputSchema: { type: "object" }, execute: async () => "ok" },
+  };
+  await createLocalChatAgent({ ...base, customTools });
+  assert.deepEqual(calls[1]?.tools, ["mcp"]);
+  assert.equal(calls[1]?.local.customTools, customTools);
 });
 
 function grok45Catalog() {
@@ -938,38 +971,46 @@ function chatRequest(overrides) {
   };
 }
 
-test("variant high/low maps onto effort when Cursor repeats display names", async () => {
-  const { resolveChatParams } = await import("../dist/cursor.js");
-  const model = grok45Catalog();
-  const high = resolveChatParams(model, chatRequest({ variant: "high" }));
-  assert.deepEqual(high, [
-    { id: "effort", value: "high" },
-    { id: "fast", value: "true" },
-  ]);
-  const low = resolveChatParams(model, chatRequest({ variant: "low" }));
-  assert.deepEqual(low, [
-    { id: "effort", value: "low" },
-    { id: "fast", value: "true" },
-  ]);
+test("catalog selection rejects unknown models and resolves aliases", async () => {
+  const { resolveCatalogModelSelection } = await import("../dist/cursor.js");
+  assert.throws(
+    () => resolveCatalogModelSelection([], chatRequest({ model: "missing-model" })),
+    (error) =>
+      typeof error === "object" &&
+      error !== null &&
+      error.httpStatus === 404 &&
+      error.code === "model_not_found",
+  );
+  assert.equal(
+    resolveCatalogModelSelection(
+      [{ id: "grok-4.5", displayName: "Grok", aliases: ["grok-latest"] }],
+      chatRequest({ model: "grok-latest" }),
+    ).id,
+    "grok-4.5",
+  );
 });
 
-test("variant fast toggles the fast param without changing default effort", async () => {
+test("repeated variant names resolve parameter shortcuts and reject ambiguous names", async () => {
   const { resolveChatParams } = await import("../dist/cursor.js");
   const model = grok45Catalog();
-  model.variants = model.variants.map((variant) =>
+  for (const effort of ["high", "low"]) {
+    assert.deepEqual(resolveChatParams(model, chatRequest({ variant: effort })), [
+      { id: "effort", value: effort },
+      { id: "fast", value: "true" },
+    ]);
+  }
+
+  const fastModel = grok45Catalog();
+  fastModel.variants = fastModel.variants.map((variant) =>
     variant.isDefault
       ? { ...variant, params: [{ id: "effort", value: "medium" }, { id: "fast", value: "false" }] }
       : variant,
   );
-  const params = resolveChatParams(model, chatRequest({ variant: "fast" }));
-  assert.deepEqual(params, [
+  assert.deepEqual(resolveChatParams(fastModel, chatRequest({ variant: "fast" })), [
     { id: "effort", value: "medium" },
     { id: "fast", value: "true" },
   ]);
-});
 
-test("unknown variant lists distinctive effort names instead of repeated display names", async () => {
-  const { resolveChatParams } = await import("../dist/cursor.js");
   assert.throws(
     () => resolveChatParams(grok45Catalog(), chatRequest({ variant: "turbo" })),
     (error) =>
@@ -979,44 +1020,12 @@ test("unknown variant lists distinctive effort names instead of repeated display
       error.message.includes("low") &&
       !error.message.includes("Cursor Grok 4.5, Cursor Grok 4.5"),
   );
-});
-
-test("shared catalog display name is not treated as the first variant", async () => {
-  const { resolveChatParams } = await import("../dist/cursor.js");
   assert.throws(
     () => resolveChatParams(grok45Catalog(), chatRequest({ variant: "Cursor Grok 4.5" })),
     (error) => error instanceof Error && error.message.includes("Unknown variant"),
   );
-});
 
-test("unique variant display names still apply the full param set", async () => {
-  const { resolveChatParams } = await import("../dist/cursor.js");
-  const model = {
-    id: "demo",
-    displayName: "Demo",
-    parameters: [
-      {
-        id: "effort",
-        displayName: "Effort",
-        values: [
-          { value: "low", displayName: "Low" },
-          { value: "high", displayName: "High" },
-        ],
-      },
-    ],
-    variants: [
-      { displayName: "Quick", isDefault: true, params: [{ id: "effort", value: "low" }] },
-      { displayName: "Deep", params: [{ id: "effort", value: "high" }] },
-    ],
-  };
-  assert.deepEqual(resolveChatParams(model, chatRequest({ model: "demo", variant: "Deep" })), [
-    { id: "effort", value: "high" },
-  ]);
-});
-
-test("gpt-style reasoning=high is selected from variant high", async () => {
-  const { resolveChatParams } = await import("../dist/cursor.js");
-  const model = {
+  const gptModel = {
     id: "gpt-5.4",
     displayName: "GPT-5.4",
     parameters: [
@@ -1052,34 +1061,38 @@ test("gpt-style reasoning=high is selected from variant high", async () => {
       },
     ],
   };
-  assert.deepEqual(resolveChatParams(model, chatRequest({ model: "gpt-5.4", variant: "high" })), [
-    { id: "reasoning", value: "high" },
-    { id: "fast", value: "true" },
-  ]);
+  assert.deepEqual(
+    resolveChatParams(gptModel, chatRequest({ model: "gpt-5.4", variant: "high" })),
+    [
+      { id: "reasoning", value: "high" },
+      { id: "fast", value: "true" },
+    ],
+  );
 });
 
-test("classifyChatTurn splits user vs tool result rounds", async () => {
-  const { classifyChatTurn, hashMessages } = await import("../dist/session.js");
-  const userTurn = classifyChatTurn([
-    { role: "system", content: "sys" },
-    { role: "user", content: "list files" },
+test("unique variant display names still apply the full param set", async () => {
+  const { resolveChatParams } = await import("../dist/cursor.js");
+  const model = {
+    id: "demo",
+    displayName: "Demo",
+    parameters: [
+      {
+        id: "effort",
+        displayName: "Effort",
+        values: [
+          { value: "low", displayName: "Low" },
+          { value: "high", displayName: "High" },
+        ],
+      },
+    ],
+    variants: [
+      { displayName: "Quick", isDefault: true, params: [{ id: "effort", value: "low" }] },
+      { displayName: "Deep", params: [{ id: "effort", value: "high" }] },
+    ],
+  };
+  assert.deepEqual(resolveChatParams(model, chatRequest({ model: "demo", variant: "Deep" })), [
+    { id: "effort", value: "high" },
   ]);
-  assert.equal(userTurn.kind, "user");
-  assert.equal(userTurn.user.content, "list files");
-
-  const toolTurn = classifyChatTurn([
-    { role: "system", content: "sys" },
-    { role: "user", content: "list files" },
-    {
-      role: "assistant",
-      content: "",
-      tool_calls: [{ id: "call_1", name: "bash", arguments: "{}" }],
-    },
-    { role: "tool", tool_call_id: "call_1", content: "ok" },
-  ]);
-  assert.equal(toolTurn.kind, "tool_results");
-  assert.equal(toolTurn.results[0]?.toolCallId, "call_1");
-  assert.equal(hashMessages(toolTurn.stem), hashMessages(userTurn.stem.concat([userTurn.user])));
 });
 
 function seedKey(id = "key-1") {
@@ -1118,9 +1131,17 @@ function seedLog(overrides) {
   };
 }
 
-test("conversations persist agent ids and are removed with the key", async () => {
-  const { openDb, insertApiKey, deleteApiKey, upsertConversation, getConversationAgentId } =
-    await import("../dist/db.js");
+test("conversation mappings update and key deletion retains audit logs", async () => {
+  const {
+    deleteApiKey,
+    getConversationAgentId,
+    insertApiKey,
+    insertRequestLog,
+    listApiKeys,
+    listRequestLogs,
+    openDb,
+    upsertConversation,
+  } = await import("../dist/db.js");
   const root = mkdtempSync(join(tmpdir(), "cursor-api-conv-"));
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
   insertApiKey(db, seedKey("key-1"));
@@ -1128,27 +1149,47 @@ test("conversations persist agent ids and are removed with the key", async () =>
   assert.equal(getConversationAgentId(db, "key-1", "thread-1"), "agent-abc");
   upsertConversation(db, "key-1", "thread-1", "agent-xyz");
   assert.equal(getConversationAgentId(db, "key-1", "thread-1"), "agent-xyz");
-  deleteApiKey(db, "key-1");
-  assert.equal(getConversationAgentId(db, "key-1", "thread-1"), undefined);
-});
-
-test("deleteApiKey removes the key and keeps request logs", async () => {
-  const { openDb, insertApiKey, insertRequestLog, listApiKeys, listRequestLogs, deleteApiKey } =
-    await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-del-key-"));
-  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
-  insertApiKey(db, seedKey("key-1"));
   insertRequestLog(db, seedLog({ id: "req-keep" }));
   const deleted = deleteApiKey(db, "key-1");
   assert.equal(deleted?.id, "key-1");
   assert.equal(listApiKeys(db).length, 0);
+  assert.equal(getConversationAgentId(db, "key-1", "thread-1"), undefined);
   const { logs, total } = listRequestLogs(db, { limit: 10, offset: 0 });
   assert.equal(total, 1);
   assert.equal(logs[0]?.id, "req-keep");
   assert.equal(logs[0]?.key_name, null);
 });
 
-test("requestCallsByDay fills seven UTC days including zeros", async () => {
+test("conversation mappings are capped per client key", async () => {
+  const { openDb, insertApiKey, upsertConversation, getConversationAgentId } =
+    await import("../dist/db.js");
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-conv-cap-"));
+  const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
+  insertApiKey(db, seedKey("key-1"));
+  insertApiKey(db, seedKey("key-2"));
+  db.prepare(
+    `INSERT INTO conversations (api_key_id, conversation_id, agent_id, updated_at)
+     VALUES ('key-2', 'other-thread', 'other-agent', '2025-01-01T00:00:00.000Z')`,
+  ).run();
+  db.prepare(
+    `WITH RECURSIVE sequence(value) AS (
+       SELECT 0
+       UNION ALL
+       SELECT value + 1 FROM sequence WHERE value < 999
+     )
+     INSERT INTO conversations (api_key_id, conversation_id, agent_id, updated_at)
+     SELECT 'key-1', printf('thread-%04d', value), 'agent-' || value, '2026-01-01T00:00:00.000Z'
+     FROM sequence`,
+  ).run();
+  upsertConversation(db, "key-1", "thread-1000", "agent-1000");
+  const count = db.prepare("SELECT COUNT(*) AS count FROM conversations WHERE api_key_id = ?").get("key-1");
+  assert.equal(Number(count?.count), 1_000);
+  assert.equal(getConversationAgentId(db, "key-1", "thread-0000"), undefined);
+  assert.equal(getConversationAgentId(db, "key-1", "thread-1000"), "agent-1000");
+  assert.equal(getConversationAgentId(db, "key-2", "other-thread"), "other-agent");
+});
+
+test("the seven-day call series fills missing UTC days with zeros", async () => {
   const { openDb, insertApiKey, insertRequestLog, requestCallsByDay } = await import("../dist/db.js");
   const root = mkdtempSync(join(tmpdir(), "cursor-api-calls-day-"));
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });

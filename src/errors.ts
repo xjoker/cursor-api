@@ -25,6 +25,15 @@ export function modelNotFound(id: string): GatewayError {
   );
 }
 
+export function conversationBusyError(): GatewayError {
+  return new GatewayError(
+    409,
+    "conversation_busy",
+    "Conversation already has an active request",
+    "invalid_request_error",
+  );
+}
+
 export function authenticationError(message = "Invalid API key"): GatewayError {
   return new GatewayError(401, "authentication_error", message, "authentication_error");
 }

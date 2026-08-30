@@ -302,19 +302,6 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             },
           };
 
-      if (parsed.stream) {
-        beginSse(res, requestId, headers);
-        await writeSse(
-          res,
-          encodeStreamChunk({
-            id: requestId,
-            created,
-            model: parsed.model,
-            role: "assistant",
-          }),
-        );
-      }
-
       const upstreamStarted = Date.now();
       const result = await runChatTurn({
         apiKey: config.cursorApiKey,
@@ -322,6 +309,20 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         workspaceDir: config.cursorWorkspace,
         request: parsed,
         abortSignal: abort.signal,
+        onClaimed: parsed.stream
+          ? async (): Promise<void> => {
+              beginSse(res, requestId, headers);
+              await writeSse(
+                res,
+                encodeStreamChunk({
+                  id: requestId,
+                  created,
+                  model: parsed.model,
+                  role: "assistant",
+                }),
+              );
+            }
+          : undefined,
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,

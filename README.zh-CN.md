@@ -44,6 +44,7 @@ services:
 ```bash
 mkdir -p cursor-api && cd cursor-api
 # 把上面的 yaml 写入 docker-compose.yml
+mkdir -p data
 docker compose up -d
 ```
 
@@ -153,6 +154,10 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
 
+支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent；ID 最多 512 个 UTF-8 字节，每个客户端 Key 保留最近 1000 条映射。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
+
+Cursor SDK 每轮接收的是单个 prompt，并不原生接收 OpenAI 角色消息。本项目会把 `system` / `developer` / `user` 角色序列化进 transcript 文本；因此应用传入的 `system` 或 `developer` 消息只能作为上下文，不能充当抵御恶意用户内容的硬安全边界。
+
 ### Codex（`POST /v1/responses`）
 
 把 Codex 指到本网关的 `/v1`。压缩（`/compact`）可用：Responses 接受 `parallel_tool_calls: false` 和 `tools: []`（该开关会被忽略，Cursor 不区分）。Chat Completions 对 `parallel_tool_calls: false` 仍 400。
@@ -218,6 +223,8 @@ SQLite 与工作区在 `./data`。请求日志和系统日志按 `[logs]` 在写
 git clone https://github.com/xjoker/cursor-api.git && cd cursor-api
 npm ci && npm run dev
 ```
+
+快速单元测试用 `npm run test:unit`；`npm test` 还会运行回环 HTTP 鉴权冒烟测试。
 
 需 Node **22.13+** 与 `data/config/gateway.toml`。本地编译镜像见 [`docker-compose.yml`](./docker-compose.yml)。构建时传入 git SHA，`/health` 的 `git_commit` 才不是 `unknown`：
 

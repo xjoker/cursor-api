@@ -9,6 +9,31 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- Concurrent requests for one `conversation_id` now return 409 instead of sharing and overwriting a live Cursor run.
+- Parked tool sessions include image identity in their transcript hash, and an explicit `conversation_id` is authoritative during continuation routing.
+- Detailed-log storage limits count UTF-8 bytes rather than Unicode characters.
+- The no-clone Docker setup creates `./data` before the bind mount is started.
+
+### Changed
+
+- Unknown chat model IDs return `model_not_found` before an SSE response begins.
+- `conversation_id` is limited to 512 UTF-8 bytes; each client key retains its newest 1,000 persisted agent mappings.
+
+### Security
+
+- Documented that the Cursor SDK accepts one prompt per turn, so serialized OpenAI `system` / `developer` roles are not a hard trust boundary.
+
+### Tests
+
+- Added loopback HTTP coverage for health, client-key enforcement, disabled keys, and admin authentication.
+- Consolidated overlapping unit tests and replaced a 1,001-write fixture with one boundary write.
+
+---
+
 ## [20260828.10] — 2026-08-28
 
 ### Documentation
@@ -81,7 +106,6 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 ### Fixed
 
 - Request-log disk cap now counts UTF-8 bytes of `model` plus detail columns, and truncates `model` to 256 bytes so a client key cannot grow SQLite past `[logs].max_detail_bytes` (#3).
-
 ## [20260828.1] — 2026-08-28
 
 ### Fixed

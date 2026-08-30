@@ -24,7 +24,8 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
 /** Per-row cap for the client-controlled `model` column (UTF-8 bytes). */
 export const MAX_LOG_MODEL_BYTES = 256;
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
+const MAX_CONVERSATIONS_PER_KEY = 1_000;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
 
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (api_key_id, conversation_id)
 );
+CREATE INDEX IF NOT EXISTS idx_conversations_api_key_updated_at
+  ON conversations(api_key_id, updated_at DESC);
 `;
 
 export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
@@ -546,6 +549,8 @@ function migrateConversations(db: DatabaseSync): void {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (api_key_id, conversation_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_conversations_api_key_updated_at
+      ON conversations(api_key_id, updated_at DESC);
   `);
 }
 
@@ -575,6 +580,16 @@ export function upsertConversation(
        agent_id = excluded.agent_id,
        updated_at = excluded.updated_at`,
   ).run(apiKeyId, conversationId, agentId, new Date().toISOString());
+  db.prepare(
+    `DELETE FROM conversations
+     WHERE rowid IN (
+       SELECT rowid
+       FROM conversations
+       WHERE api_key_id = ?
+       ORDER BY updated_at DESC, rowid DESC
+       LIMIT -1 OFFSET ?
+     )`,
+  ).run(apiKeyId, MAX_CONVERSATIONS_PER_KEY);
 }
 
 export function insertSystemLog(

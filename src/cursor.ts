@@ -16,7 +16,14 @@ import {
   type TokenUsage,
 } from "@cursor/sdk";
 import type { ModelParam, OpenAiModel, ParsedChatRequest, Usage } from "./contracts.js";
-import { GatewayError, invalidRequest, rateLimitError, upstreamAuthError, upstreamError } from "./errors.js";
+import {
+  GatewayError,
+  invalidRequest,
+  modelNotFound,
+  rateLimitError,
+  upstreamAuthError,
+  upstreamError,
+} from "./errors.js";
 import { logError } from "./log.js";
 
 const CATALOG_TTL_MS = 60_000;
@@ -93,7 +100,7 @@ export async function resolveChatModel(apiKey: string, request: ParsedChatReques
  * never sees those callbacks. When client tools are present, allow only `mcp`
  * — shell/read/edit stay off.
  */
-export function localChatAgentTools(hasCustomTools: boolean): Array<"mcp"> | [] {
+function localChatAgentTools(hasCustomTools: boolean): Array<"mcp"> | [] {
   return hasCustomTools ? ["mcp"] : [];
 }
 
@@ -176,9 +183,19 @@ async function loadCatalog(apiKey: string): Promise<ModelListItem[]> {
 
 async function resolveModelSelection(apiKey: string, request: ParsedChatRequest): Promise<ModelSelection> {
   const catalog = await loadCatalog(apiKey);
+  return resolveCatalogModelSelection(catalog, request);
+}
+
+export function resolveCatalogModelSelection(
+  catalog: ModelListItem[],
+  request: ParsedChatRequest,
+): ModelSelection {
   const item = findCatalogModel(catalog, request.model);
+  if (!item) {
+    throw modelNotFound(request.model);
+  }
   return {
-    id: item?.id ?? request.model,
+    id: item.id,
     params: resolveChatParams(item, request),
   };
 }

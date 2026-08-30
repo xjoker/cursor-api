@@ -24,7 +24,7 @@ import {
   toChatUsage,
 } from "./cursor.js";
 import { getConversationAgentId, upsertConversation } from "./db.js";
-import { GatewayError, invalidRequest } from "./errors.js";
+import { conversationBusyError, GatewayError, invalidRequest } from "./errors.js";
 import { logInfo } from "./log.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
 
@@ -76,6 +76,19 @@ interface LiveSession {
 }
 
 const sessions = new Map<string, LiveSession>();
+const activeConversationRequests = new Map<string, symbol>();
+
+interface RunChatTurnOptions {
+  apiKey: string;
+  apiKeyId: string;
+  workspaceDir: string;
+  request: ParsedChatRequest;
+  abortSignal: AbortSignal;
+  onClaimed?: () => Promise<void>;
+  sink?: ChatTurnSink;
+  parkTimeoutMs?: number;
+  db?: DatabaseSync;
+}
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -132,7 +145,7 @@ export function toOpenAiToolCallId(raw: string | undefined): string {
 }
 
 /** IDs we already sent as tool_calls but the client did not return. */
-export function missingFlushedToolResults(flushedIds: string[], receivedIds: string[]): string[] {
+function missingFlushedToolResults(flushedIds: string[], receivedIds: string[]): string[] {
   const got = new Set(receivedIds);
   return flushedIds.filter((id) => !got.has(id));
 }
@@ -140,6 +153,13 @@ export function missingFlushedToolResults(flushedIds: string[], receivedIds: str
 export function hashMessages(messages: ParsedChatMessage[]): string {
   const payload = messages.map((message) => {
     const row: Record<string, unknown> = { role: message.role, content: message.content };
+    if (message.images) {
+      row.images = message.images.map((image) =>
+        "url" in image
+          ? { url: image.url }
+          : { data: image.data, mimeType: image.mimeType },
+      );
+    }
     if (message.tool_call_id) row.tool_call_id = message.tool_call_id;
     if (message.tool_calls) {
       row.tool_calls = message.tool_calls.map((call) => ({
@@ -168,6 +188,17 @@ export function resolveTurnAction(input: {
     return "resume_user";
   }
   return "new_user";
+}
+
+export function resolveParkedRoute(input: {
+  conversationId?: string;
+  hasConversationParks: boolean;
+  hasStemParks: boolean;
+}): "conversation" | "stem" | undefined {
+  if (input.conversationId) {
+    return input.hasConversationParks ? "conversation" : undefined;
+  }
+  return input.hasStemParks ? "stem" : undefined;
 }
 
 export function filterToolsForChoice(
@@ -210,24 +241,60 @@ export function aliasLiveConversation(
   return true;
 }
 
-export async function runChatTurn(options: {
-  apiKey: string;
-  apiKeyId: string;
-  workspaceDir: string;
-  request: ParsedChatRequest;
-  abortSignal: AbortSignal;
-  sink?: ChatTurnSink;
-  parkTimeoutMs?: number;
-  db?: DatabaseSync;
-}): Promise<CursorChatResult> {
+export function claimConversationRequest(
+  apiKeyId: string,
+  conversationId: string | undefined,
+): (() => void) | undefined {
+  if (!conversationId) return undefined;
+  const key = conversationKey(apiKeyId, conversationId);
+  if (activeConversationRequests.has(key)) {
+    throw conversationBusyError();
+  }
+  const claim = Symbol(key);
+  activeConversationRequests.set(key, claim);
+  return () => {
+    if (activeConversationRequests.get(key) === claim) {
+      activeConversationRequests.delete(key);
+    }
+  };
+}
+
+export async function withConversationClaim<T>(
+  apiKeyId: string,
+  conversationId: string | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const releaseConversation = claimConversationRequest(apiKeyId, conversationId);
+  try {
+    return await operation();
+  } finally {
+    releaseConversation?.();
+  }
+}
+
+export async function runChatTurn(options: RunChatTurnOptions): Promise<CursorChatResult> {
   const turn = validateChatTurnRequest(options.request);
+  return withConversationClaim(options.apiKeyId, options.request.conversation_id, async () => {
+    await options.onClaimed?.();
+    return await runClaimedChatTurn(options, turn);
+  });
+}
+
+async function runClaimedChatTurn(
+  options: RunChatTurnOptions,
+  turn: ChatTurnKind,
+): Promise<CursorChatResult> {
   const lookupKey = sessionKey(options.apiKeyId, hashMessages(turn.stem));
   const conversationId = options.request.conversation_id;
   const convKey = conversationId ? conversationKey(options.apiKeyId, conversationId) : undefined;
   const byStem = sessions.get(lookupKey);
   const byConv = convKey ? sessions.get(convKey) : undefined;
-  const parked =
-    byStem && byStem.parks.size > 0 ? byStem : byConv && byConv.parks.size > 0 ? byConv : undefined;
+  const parkedRoute = resolveParkedRoute({
+    conversationId,
+    hasConversationParks: Boolean(byConv && byConv.parks.size > 0),
+    hasStemParks: Boolean(byStem && byStem.parks.size > 0),
+  });
+  const parked = parkedRoute === "conversation" ? byConv : parkedRoute === "stem" ? byStem : undefined;
   const liveConv = byConv;
   if (turn.kind === "user" && liveConv && liveConv.parks.size > 0) {
     throw invalidRequest("Pending tool calls; send tool results before the next user message");
@@ -262,7 +329,7 @@ export async function runChatTurn(options: {
   }
 
   if (action === "resume_user" && turn.kind === "user") {
-    return await resumeUserTurn(turn, options, liveConv, storedAgentId);
+    return await resumeUserTurn(turn, options, storedAgentId);
   }
 
   if (turn.kind !== "user") {
@@ -283,18 +350,8 @@ async function resumeUserTurn(
     parkTimeoutMs?: number;
     db?: DatabaseSync;
   },
-  live: LiveSession | undefined,
   storedAgentId: string | undefined,
 ): Promise<CursorChatResult> {
-  if (live && live.parks.size === 0) {
-    logInfo("resumed live conversation", {
-      api_key_id: options.apiKeyId,
-      conversation_id: options.request.conversation_id ?? null,
-      agent_id: live.agent.agentId,
-    });
-    live.parkTimeoutMs = options.parkTimeoutMs ?? live.parkTimeoutMs;
-    return await sendOnSession(live, turn.user.content, options);
-  }
   if (!storedAgentId) {
     return await startNewSession(turn, options);
   }

@@ -59,6 +59,7 @@ const ALLOWED_ROLES = new Set(["system", "developer", "user", "assistant", "tool
 const REJECTED_ROLES = new Set(["function"]);
 const REJECTED_MEDIA_TYPES = new Set(["audio", "input_audio"]);
 const SKIPPED_CONTENT_TYPES = new Set(["reasoning", "reasoning_content"]);
+const MAX_CONVERSATION_ID_BYTES = 512;
 
 export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
   if (!isPlainObject(body)) {
@@ -114,7 +115,7 @@ export function parseChatCompletionsRequest(body: unknown): ParsedChatRequest {
   const tools = parseTools(body.tools);
   const toolChoice = parseToolChoice(body.tool_choice);
   const conversationId =
-    optionalNonEmptyString(body.conversation_id, "conversation_id") ??
+    parseConversationId(body.conversation_id, "conversation_id") ??
     parseMetadataConversationId(body.metadata);
 
   return {
@@ -151,7 +152,17 @@ function parseMetadataConversationId(metadata: unknown): string | undefined {
     throw invalidRequest("Field 'metadata' must be an object");
   }
   if (!("conversation_id" in metadata)) return undefined;
-  return optionalNonEmptyString(metadata.conversation_id, "metadata.conversation_id");
+  return parseConversationId(metadata.conversation_id, "metadata.conversation_id");
+}
+
+function parseConversationId(value: unknown, field: string): string | undefined {
+  const parsed = optionalNonEmptyString(value, field);
+  if (parsed !== undefined && Buffer.byteLength(parsed, "utf8") > MAX_CONVERSATION_ID_BYTES) {
+    throw invalidRequest(
+      `Field '${field}' must not exceed ${String(MAX_CONVERSATION_ID_BYTES)} UTF-8 bytes`,
+    );
+  }
+  return parsed;
 }
 
 export function renderTranscript(messages: ParsedChatMessage[]): string {
