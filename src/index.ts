@@ -548,11 +548,6 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
             },
           };
 
-      if (parsed.stream) {
-        beginSse(res, requestId, headers);
-        await writer?.start();
-      }
-
       const upstreamStarted = Date.now();
       const result = await runChatTurn({
         apiKey: config.cursorApiKey,
@@ -560,6 +555,12 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         workspaceDir: config.cursorWorkspace,
         request: parsed,
         abortSignal: abort.signal,
+        onClaimed: parsed.stream
+          ? async (): Promise<void> => {
+              beginSse(res, requestId, headers);
+              await writer?.start();
+            }
+          : undefined,
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
