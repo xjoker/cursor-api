@@ -9,7 +9,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
-## [Unreleased]
+## [20260830.1] — 2026-08-30
 
 ### Fixed
 
