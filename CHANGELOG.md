@@ -9,6 +9,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20260903.1] — 2026-09-03
+
+### Fixed
+
+- `npm run dev` compiles with `tsc` then runs `dist/`, so Node16 `.js` import specifiers resolve instead of failing under `--experimental-strip-types`.
+
+---
+
 ## [20260830.1] — 2026-08-30
 
 ### Fixed
