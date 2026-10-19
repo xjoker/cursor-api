@@ -21,7 +21,7 @@
   },
   "overrides": {
     "@connectrpc/connect-node": {
-      "undici": "6.28.0"
+      "undici": "6.28.1"
     }
   },
   "devDependencies": {
