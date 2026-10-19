@@ -73,7 +73,7 @@ docker compose up -d
 Open the file the container created under `./data/config/gateway.toml`.
 
 ```toml
-host = "0.0.0.0"
+# host = "127.0.0.1"  # the Docker image sets GATEWAY_HOST=0.0.0.0, which takes priority
 port = 8787
 
 cursor_api_key = "your-cursor-user-api-key"
@@ -210,6 +210,8 @@ Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bear
 Single file: `data/config/gateway.toml`. Optional overrides: [`.env.example`](./.env.example).
 
 **Priority:** environment variables → `.env` → TOML → defaults.
+
+**Listen address:** the gateway listens on `127.0.0.1` (this machine only) unless `GATEWAY_HOST` or `host` says otherwise. The Docker image sets `GATEWAY_HOST=0.0.0.0` so published ports keep working; inside the container that env var wins over `host` in `gateway.toml`, so change the listen address there with `GATEWAY_HOST` (or keep the restriction on the `ports:` mapping, e.g. `127.0.0.1:8787:8787`). Running outside Docker and need LAN access? Set `host = "0.0.0.0"` or `GATEWAY_HOST=0.0.0.0` — only behind a firewall or reverse proxy.
 
 SQLite and workspace live under `./data`. Request logs and system logs are pruned by `[logs]` limits on each write and at startup. Container stdout is rotated by compose `logging.options` (max ~30 MB).
 

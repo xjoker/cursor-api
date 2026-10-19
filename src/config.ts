@@ -16,7 +16,7 @@ const CONFIG_FILE_NAME = "gateway.toml";
 const EMPTY_CONFIG_TEMPLATE = `# cursor-api configuration (auto-created in container)
 # Fill the three secrets below, then restart the gateway.
 
-host = "0.0.0.0"
+# host = "127.0.0.1"  # the Docker image sets GATEWAY_HOST=0.0.0.0, which takes priority
 port = 8787
 
 cursor_api_key = ""
@@ -54,7 +54,8 @@ export function loadConfig(
     cwd,
     pickString(env.DATA_DIR, tomlString(toml, "data_dir")) ?? dataDirHint,
   );
-  const defaultHost = production ? "0.0.0.0" : "127.0.0.1";
+  // Loopback unless configured; the Docker image sets GATEWAY_HOST=0.0.0.0.
+  const defaultHost = "127.0.0.1";
 
   return {
     cursorApiKey: requireSecret(

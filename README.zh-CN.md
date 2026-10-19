@@ -73,7 +73,7 @@ docker compose up -d
 编辑容器生成的 `./data/config/gateway.toml`。
 
 ```toml
-host = "0.0.0.0"
+# host = "127.0.0.1"  # Docker 镜像设置了 GATEWAY_HOST=0.0.0.0，优先级更高
 port = 8787
 
 cursor_api_key = "你的-cursor-user-api-key"
@@ -210,6 +210,8 @@ print(client.chat.completions.create(
 唯一配置文件：`data/config/gateway.toml`。可选覆盖见 [`.env.example`](./.env.example)。
 
 **优先级：** 环境变量 → `.env` → TOML → 默认值。
+
+**监听地址：** 未设置 `GATEWAY_HOST` 或 `host` 时，网关只监听 `127.0.0.1`（仅本机可访问）。Docker 镜像设置了 `GATEWAY_HOST=0.0.0.0`，映射端口照常可用；容器内该环境变量优先于 `gateway.toml` 里的 `host`，要改容器内监听地址请用 `GATEWAY_HOST`（或继续在 `ports:` 映射上限制，如 `127.0.0.1:8787:8787`）。不用 Docker、又需要局域网访问时，设 `host = "0.0.0.0"` 或 `GATEWAY_HOST=0.0.0.0`，并只在防火墙或反向代理之后这样做。
 
 SQLite 与工作区在 `./data`。请求日志和系统日志按 `[logs]` 在写入时和启动时自动清理。容器 stdout 由 compose 的 `logging.options` 轮转（约 30 MB 上限）。
 

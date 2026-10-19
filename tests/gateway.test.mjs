@@ -54,6 +54,31 @@ test("only production bootstraps a missing gateway.toml", () => {
   assert.equal(existsSync(developmentPath), false);
 });
 
+test("listen host defaults to loopback; GATEWAY_HOST and TOML host override it", () => {
+  const root = mkdtempSync(join(tmpdir(), "cursor-api-host-default-"));
+  writeGatewayConfig(root);
+  assert.equal(loadConfig({ DATA_DIR: "data" }, root).gatewayHost, "127.0.0.1");
+  assert.equal(loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, root).gatewayHost, "127.0.0.1");
+  assert.equal(
+    loadConfig({ NODE_ENV: "production", DATA_DIR: "data", GATEWAY_HOST: "0.0.0.0" }, root).gatewayHost,
+    "0.0.0.0",
+  );
+
+  const tomlRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-toml-"));
+  writeGatewayConfig(tomlRoot, ['host = "0.0.0.0"']);
+  assert.equal(loadConfig({ DATA_DIR: "data" }, tomlRoot).gatewayHost, "0.0.0.0");
+  assert.equal(loadConfig({ DATA_DIR: "data", GATEWAY_HOST: "127.0.0.1" }, tomlRoot).gatewayHost, "127.0.0.1");
+
+  // The auto-created container config must not pin a host; the image provides GATEWAY_HOST.
+  const bootRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-bootstrap-"));
+  assert.throws(() => loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, bootRoot));
+  const template = readFileSync(join(bootRoot, "data", "config", "gateway.toml"), "utf8");
+  assert.doesNotMatch(template, /^host\s*=/m);
+
+  const dockerfile = readFileSync(join(import.meta.dirname, "..", "Dockerfile"), "utf8");
+  assert.match(dockerfile, /^\s*GATEWAY_HOST=0\.0\.0\.0\b/m);
+});
+
 test("log policy applies defaults and TOML overrides, then rejects an invalid env override", () => {
   const defaultRoot = mkdtempSync(join(tmpdir(), "cursor-api-log-defaults-"));
   writeGatewayConfig(defaultRoot);

@@ -10,6 +10,7 @@ FROM node:22-bookworm-slim
 ARG GIT_COMMIT=unknown
 ENV TZ=UTC \
     NODE_ENV=production \
+    GATEWAY_HOST=0.0.0.0 \
     GIT_COMMIT=${GIT_COMMIT}
 WORKDIR /app
 RUN useradd --system --uid 1001 --home-dir /app --shell /usr/sbin/nologin app
