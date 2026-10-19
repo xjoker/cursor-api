@@ -6,7 +6,7 @@
 
 **You need:** [Docker Compose](https://docs.docker.com/compose/) and a [Cursor User API Key](https://cursor.com/settings).
 
-> **⚠️ BREAKING (next release) — running without Docker (PM2 / systemd / `npm start` with `NODE_ENV=production`)?** The gateway now listens on `127.0.0.1` only unless `host` or `GATEWAY_HOST` is set. Read [Upgrading: listen address](#upgrading-listen-address) before you upgrade. Docker / compose users are not affected.
+> **⚠️ BREAKING (next release): the default listen address is now `127.0.0.1`.** Without `host` or `GATEWAY_HOST`, the gateway accepts connections from this machine only. **Affected:** anyone who reaches the gateway from another machine without Docker (PM2 / systemd / `NODE_ENV=production npm start`), and custom container images that do not use this repo's `Dockerfile`. The official image and compose files still listen on `0.0.0.0` inside the container. To listen on all interfaces again, set `host = "0.0.0.0"` or `GATEWAY_HOST=0.0.0.0`. **Risk:** this exposes the gateway, and with it your Cursor account, to every network the host can reach. Only do it behind a firewall or reverse proxy. See [Upgrading: listen address](#upgrading-listen-address).
 
 ## Deploy in 4 steps
 
@@ -230,14 +230,19 @@ SQLite and workspace live under `./data`. Request logs and system logs are prune
 
 **BREAKING — non-Docker deployments now listen on `127.0.0.1` by default.**
 
-- **Affected:** running without Docker under `NODE_ENV=production` (PM2, systemd, …) where `gateway.toml` has no `host` and `GATEWAY_HOST` is not set. Older releases listened on `0.0.0.0` in that case.
+- **What changed:** with no `host` in `gateway.toml` and no `GATEWAY_HOST`, the gateway now listens on `127.0.0.1`. Older releases listened on `0.0.0.0` when `NODE_ENV=production`.
+- **Affected (remote access stops working):**
+  - running without Docker under `NODE_ENV=production` (PM2, systemd, …) and reaching the gateway from other machines, when `gateway.toml` has no `host` and `GATEWAY_HOST` is not set;
+  - custom container images or entrypoints that run `node dist/index.js` without this repo's `Dockerfile` (they do not get `GATEWAY_DEFAULT_HOST=0.0.0.0`), so published ports stop answering.
 - **Symptom:** after upgrading, `curl http://127.0.0.1:8787/health` works on the server, but other machines get *connection refused*.
 - **Check:** `ss -ltnp | grep 8787` — `127.0.0.1:8787` means you are affected.
-- **Restore LAN access** (only behind a firewall or reverse proxy), then restart:
+- **Restore listening on all interfaces**, then restart:
   - `gateway.toml`: add `host = "0.0.0.0"`, or
   - PM2: `env: { GATEWAY_HOST: "0.0.0.0" }` in the ecosystem file, then `pm2 restart <app> --update-env`, or
   - systemd: `Environment=GATEWAY_HOST=0.0.0.0` in the unit (or a drop-in), then `systemctl daemon-reload && systemctl restart <unit>`.
-- **Not affected:** Docker / compose users, and configs that already contain `host = "0.0.0.0"` (including ones auto-created by older releases).
+  - custom image: `ENV GATEWAY_DEFAULT_HOST=0.0.0.0` (keeps `gateway.toml` `host` in charge) or `-e GATEWAY_HOST=0.0.0.0`.
+- **Risk:** `0.0.0.0` exposes the gateway, and with it your Cursor account, to every network the host is on. Put it behind a firewall or reverse proxy, use strong `admin_access_key` and client keys, and keep Docker port mappings on `127.0.0.1:` unless you mean to publish. Docker's `-p` rules bypass ufw.
+- **Not affected:** the official image and the repo's compose files (the container still listens on `0.0.0.0`; the host-side port stays `127.0.0.1:8787`), and configs that already contain `host = "0.0.0.0"` (including ones auto-created by older releases).
 - **Docker note:** the image now sets `GATEWAY_DEFAULT_HOST=0.0.0.0` instead of `GATEWAY_HOST`, so a `host` written in a mounted `gateway.toml` takes effect inside the container.
 
 ---

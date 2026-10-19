@@ -6,7 +6,7 @@
 
 **你需要：** [Docker Compose](https://docs.docker.com/compose/) 和 [Cursor User API Key](https://cursor.com/settings)。
 
-> **⚠️ 破坏性变化（下个版本）——不用 Docker 运行（PM2 / systemd / `NODE_ENV=production` 下 `npm start`）？** 未设置 `host` 或 `GATEWAY_HOST` 时，网关现在只监听 `127.0.0.1`。升级前请先看 [升级说明：监听地址](#升级说明监听地址)。Docker / compose 用户不受影响。
+> **⚠️ 破坏性变化（下个版本）：默认监听地址改为 `127.0.0.1`。** 未设置 `host` 或 `GATEWAY_HOST` 时，网关只接受本机连接。**受影响：** 不用 Docker（PM2 / systemd / `NODE_ENV=production npm start`）又要从其他机器访问的用户，以及不使用本仓库 `Dockerfile` 的自制容器镜像。官方镜像和 compose 文件在容器内仍监听 `0.0.0.0`。要重新监听所有网卡，设置 `host = "0.0.0.0"` 或 `GATEWAY_HOST=0.0.0.0`。**风险：** 这会把网关（以及背后的 Cursor 账号）暴露给主机能连到的所有网络，只应在防火墙或反向代理之后这样做。详见 [升级说明：监听地址](#升级说明监听地址)。
 
 ## 四步部署
 
@@ -230,14 +230,19 @@ SQLite 与工作区在 `./data`。请求日志和系统日志按 `[logs]` 在写
 
 **破坏性变化——非 Docker 部署默认只监听 `127.0.0.1`。**
 
-- **受影响：** 不用 Docker、以 `NODE_ENV=production` 运行（PM2、systemd 等），并且 `gateway.toml` 里没有 `host`、也没有设置 `GATEWAY_HOST` 的部署。旧版本在这种情况下监听 `0.0.0.0`。
+- **变化：** `gateway.toml` 没有 `host`、也没有 `GATEWAY_HOST` 时，网关现在监听 `127.0.0.1`。旧版本在 `NODE_ENV=production` 下监听 `0.0.0.0`。
+- **受影响（远程访问会断）：**
+  - 不用 Docker、以 `NODE_ENV=production` 运行（PM2、systemd 等）并从其他机器访问，且 `gateway.toml` 里没有 `host`、也没有设置 `GATEWAY_HOST` 的部署；
+  - 不用本仓库 `Dockerfile`、自己用镜像或 entrypoint 跑 `node dist/index.js` 的容器（拿不到 `GATEWAY_DEFAULT_HOST=0.0.0.0`），映射端口会不通。
 - **现象：** 升级后在服务器本机 `curl http://127.0.0.1:8787/health` 正常，其他机器连不上（connection refused）。
 - **自查：** `ss -ltnp | grep 8787`，看到 `127.0.0.1:8787` 就说明受影响。
-- **恢复局域网访问**（只在防火墙或反向代理之后这样做），改完重启：
+- **恢复监听所有网卡**，改完重启：
   - `gateway.toml`：加上 `host = "0.0.0.0"`；或者
   - PM2：在 ecosystem 文件里写 `env: { GATEWAY_HOST: "0.0.0.0" }`，然后 `pm2 restart <app> --update-env`；或者
   - systemd：在 unit（或 drop-in）里写 `Environment=GATEWAY_HOST=0.0.0.0`，然后 `systemctl daemon-reload && systemctl restart <unit>`。
-- **不受影响：** Docker / compose 用户；配置里已经有 `host = "0.0.0.0"` 的用户（包括旧版本自动生成的配置）。
+  - 自制镜像：`ENV GATEWAY_DEFAULT_HOST=0.0.0.0`（`gateway.toml` 的 `host` 仍然说了算）或 `-e GATEWAY_HOST=0.0.0.0`。
+- **风险：** `0.0.0.0` 会把网关（以及背后的 Cursor 账号）暴露给主机所在的所有网络。请放在防火墙或反向代理之后，使用强 `admin_access_key` 和客户端 Key；除非确实要对外发布，Docker 端口映射保持 `127.0.0.1:` 前缀。Docker 的 `-p` 规则会绕过 ufw。
+- **不受影响：** 官方镜像和仓库自带的 compose 文件（容器内仍监听 `0.0.0.0`，宿主机一侧端口仍是 `127.0.0.1:8787`）；配置里已经有 `host = "0.0.0.0"` 的用户（包括旧版本自动生成的配置）。
 - **Docker 说明：** 镜像现在设置的是 `GATEWAY_DEFAULT_HOST=0.0.0.0`，不再是 `GATEWAY_HOST`，所以挂载的 `gateway.toml` 里写的 `host` 在容器内会生效。
 
 ---
