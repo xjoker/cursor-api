@@ -1,9 +1,10 @@
 # Copy to gateway.toml, fill values, then: chmod 600 gateway.toml
 # Do not commit gateway.toml with real secrets.
 
-# Listen address. Default 127.0.0.1 (this machine only); use "0.0.0.0" to accept LAN connections.
-# The Docker image sets GATEWAY_HOST=0.0.0.0, which overrides this value inside the container.
-host = "127.0.0.1"
+# Listen address. Priority: GATEWAY_HOST env > this `host` > GATEWAY_DEFAULT_HOST env > 127.0.0.1.
+# Unset: Docker image listens on 0.0.0.0 (it sets GATEWAY_DEFAULT_HOST); without Docker, 127.0.0.1 only.
+# Set "0.0.0.0" for LAN access outside Docker (behind a firewall), or "127.0.0.1" to keep a container local-only.
+# host = "127.0.0.1"
 port = 8787
 
 cursor_api_key = ""
@@ -25,4 +26,4 @@ detailed = false
 # max_detail_bytes = 268435456
 
 # Docker (NODE_ENV=production): missing gateway.toml is auto-created empty on first start.
-# Without host/port, the gateway listens on 127.0.0.1:8787 (Docker image: GATEWAY_HOST=0.0.0.0).
+# Without host/port: 127.0.0.1:8787 (Docker image: 0.0.0.0:8787 via GATEWAY_DEFAULT_HOST).

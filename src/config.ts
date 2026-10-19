@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig } from "./contracts.js";
+import { logWarn } from "./log.js";
 
 const MAX_BODY_BYTES = 4_194_304;
+const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const DEFAULT_DATA_DIR = "data";
 const DEFAULT_LOG_RETENTION_DAYS = 7;
@@ -16,7 +18,7 @@ const CONFIG_FILE_NAME = "gateway.toml";
 const EMPTY_CONFIG_TEMPLATE = `# cursor-api configuration (auto-created in container)
 # Fill the three secrets below, then restart the gateway.
 
-# host = "127.0.0.1"  # the Docker image sets GATEWAY_HOST=0.0.0.0, which takes priority
+# host = "0.0.0.0"  # unset: Docker image default (GATEWAY_DEFAULT_HOST=0.0.0.0), else 127.0.0.1
 port = 8787
 
 cursor_api_key = ""
@@ -37,9 +39,12 @@ interface TomlTable {
   [key: string]: string | number | boolean | TomlTable;
 }
 
+export type ConfigWarning = (message: string, fields: Record<string, unknown>) => void;
+
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
+  warn: ConfigWarning = logWarn,
 ): AppConfig {
   const dataDirHint = optionalTrimmed(env.DATA_DIR) ?? DEFAULT_DATA_DIR;
   const dataRoot = path.resolve(cwd, dataDirHint);
@@ -54,8 +59,6 @@ export function loadConfig(
     cwd,
     pickString(env.DATA_DIR, tomlString(toml, "data_dir")) ?? dataDirHint,
   );
-  // Loopback unless configured; the Docker image sets GATEWAY_HOST=0.0.0.0.
-  const defaultHost = "127.0.0.1";
 
   return {
     cursorApiKey: requireSecret(
@@ -79,7 +82,7 @@ export function loadConfig(
       configFile,
       "api_key_pepper",
     ),
-    gatewayHost: pickString(env.GATEWAY_HOST, tomlString(toml, "host")) ?? defaultHost,
+    gatewayHost: resolveGatewayHost(env, tomlString(toml, "host"), configFile, warn),
     gatewayPort: parsePositiveInt(
       pickConfigured(env, "GATEWAY_PORT", tomlString(toml, "port"), "port"),
       DEFAULT_PORT,
@@ -142,6 +145,32 @@ export function loadConfig(
       { min: 5_000, max: 3_600_000 },
     ),
   };
+}
+
+/**
+ * Listen address, highest priority first:
+ * GATEWAY_HOST env → gateway.toml `host` → GATEWAY_DEFAULT_HOST env (set by the Docker image) → 127.0.0.1.
+ * The image default sits below the TOML so a mounted config's `host` is honoured inside the container.
+ */
+function resolveGatewayHost(
+  env: NodeJS.ProcessEnv,
+  tomlHost: string | undefined,
+  configFile: string,
+  warn: ConfigWarning,
+): string {
+  const fromEnv = optionalTrimmed(env.GATEWAY_HOST);
+  const fromToml = optionalTrimmed(tomlHost);
+  if (fromEnv !== undefined) {
+    if (fromToml !== undefined && fromToml !== fromEnv) {
+      warn("GATEWAY_HOST overrides host in gateway.toml", {
+        env_host: fromEnv,
+        toml_host: fromToml,
+        config_file: configFile,
+      });
+    }
+    return fromEnv;
+  }
+  return fromToml ?? optionalTrimmed(env.GATEWAY_DEFAULT_HOST) ?? DEFAULT_HOST;
 }
 
 function ensureConfigFile(configFile: string, production: boolean): void {

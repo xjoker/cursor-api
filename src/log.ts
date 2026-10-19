@@ -20,6 +20,11 @@ export function logInfo(message: string, fields?: Record<string, unknown>): void
   persist("info", message, fields);
 }
 
+/** Startup warnings (stderr only; emitted before the SQLite system-log writer exists). */
+export function logWarn(message: string, fields?: Record<string, unknown>): void {
+  process.stderr.write(`${format("warn", message, fields)}\n`);
+}
+
 export function logError(message: string, fields?: Record<string, unknown>): void {
   process.stderr.write(`${format("error", message, fields)}\n`);
   persist("error", message, fields);

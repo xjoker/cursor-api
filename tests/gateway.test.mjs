@@ -54,30 +54,92 @@ test("only production bootstraps a missing gateway.toml", () => {
   assert.equal(existsSync(developmentPath), false);
 });
 
-test("listen host defaults to loopback; GATEWAY_HOST and TOML host override it", () => {
+test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 127.0.0.1", () => {
+  const load = (env, root) => {
+    const warnings = [];
+    const cfg = loadConfig({ DATA_DIR: "data", ...env }, root, (message, fields) => warnings.push({ message, fields }));
+    return { host: cfg.gatewayHost, warnings };
+  };
+
+  // No TOML host.
   const root = mkdtempSync(join(tmpdir(), "cursor-api-host-default-"));
   writeGatewayConfig(root);
-  assert.equal(loadConfig({ DATA_DIR: "data" }, root).gatewayHost, "127.0.0.1");
-  assert.equal(loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, root).gatewayHost, "127.0.0.1");
-  assert.equal(
-    loadConfig({ NODE_ENV: "production", DATA_DIR: "data", GATEWAY_HOST: "0.0.0.0" }, root).gatewayHost,
-    "0.0.0.0",
-  );
+  assert.equal(load({}, root).host, "127.0.0.1");
+  assert.equal(load({ NODE_ENV: "production" }, root).host, "127.0.0.1");
+  assert.equal(load({ NODE_ENV: "production", GATEWAY_DEFAULT_HOST: "0.0.0.0" }, root).host, "0.0.0.0");
+  assert.equal(load({ GATEWAY_DEFAULT_HOST: "  " }, root).host, "127.0.0.1");
+  assert.deepEqual(load({ GATEWAY_HOST: "0.0.0.0", GATEWAY_DEFAULT_HOST: "::" }, root), { host: "0.0.0.0", warnings: [] });
 
-  const tomlRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-toml-"));
-  writeGatewayConfig(tomlRoot, ['host = "0.0.0.0"']);
-  assert.equal(loadConfig({ DATA_DIR: "data" }, tomlRoot).gatewayHost, "0.0.0.0");
-  assert.equal(loadConfig({ DATA_DIR: "data", GATEWAY_HOST: "127.0.0.1" }, tomlRoot).gatewayHost, "127.0.0.1");
+  // TOML host beats the container default (GATEWAY_DEFAULT_HOST) in both directions.
+  for (const tomlHost of ["127.0.0.1", "::", "0.0.0.0"]) {
+    const tomlRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-toml-"));
+    writeGatewayConfig(tomlRoot, [`host = "${tomlHost}"`]);
+    assert.deepEqual(
+      load({ NODE_ENV: "production", GATEWAY_DEFAULT_HOST: "0.0.0.0" }, tomlRoot),
+      { host: tomlHost, warnings: [] },
+      `toml host ${tomlHost}`,
+    );
+    assert.equal(load({ GATEWAY_HOST: "   ", GATEWAY_DEFAULT_HOST: "0.0.0.0" }, tomlRoot).host, tomlHost);
+  }
 
-  // The auto-created container config must not pin a host; the image provides GATEWAY_HOST.
+  // Explicit GATEWAY_HOST beats TOML and warns when it changes the configured value.
+  const loopRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-override-"));
+  writeGatewayConfig(loopRoot, ['host = "127.0.0.1"']);
+  const overridden = load({ GATEWAY_HOST: "0.0.0.0", GATEWAY_DEFAULT_HOST: "0.0.0.0" }, loopRoot);
+  assert.equal(overridden.host, "0.0.0.0");
+  assert.equal(overridden.warnings.length, 1);
+  assert.match(overridden.warnings[0].message, /GATEWAY_HOST/);
+  assert.equal(overridden.warnings[0].fields.env_host, "0.0.0.0");
+  assert.equal(overridden.warnings[0].fields.toml_host, "127.0.0.1");
+  assert.deepEqual(load({ GATEWAY_HOST: " 127.0.0.1 " }, loopRoot), { host: "127.0.0.1", warnings: [] });
+
+  // The auto-created config must not pin a host, so the container default applies.
   const bootRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-bootstrap-"));
   assert.throws(() => loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, bootRoot));
   const template = readFileSync(join(bootRoot, "data", "config", "gateway.toml"), "utf8");
-  assert.doesNotMatch(template, /^host\s*=/m);
-
-  const dockerfile = readFileSync(join(import.meta.dirname, "..", "Dockerfile"), "utf8");
-  assert.match(dockerfile, /^\s*GATEWAY_HOST=0\.0\.0\.0\b/m);
+  assert.doesNotMatch(template, /^\s*host\s*=/m);
 });
+
+test("Docker runtime stage sets GATEWAY_DEFAULT_HOST and never GATEWAY_HOST", () => {
+  const dockerfile = readFileSync(join(import.meta.dirname, "..", "Dockerfile"), "utf8");
+  const env = runtimeStageEnv(dockerfile);
+  assert.equal(env.get("GATEWAY_DEFAULT_HOST"), "0.0.0.0");
+  // GATEWAY_HOST in the image would outrank gateway.toml `host` (see README "Listen address").
+  assert.equal(env.has("GATEWAY_HOST"), false);
+});
+
+/** ENV keys of the final build stage: joins `\` continuations, skips comments, handles `k=v`, `k="v"` and legacy `ENV k v`. */
+function runtimeStageEnv(dockerfile) {
+  const instructions = [];
+  let current = "";
+  for (const raw of dockerfile.split(/\r?\n/)) {
+    if (/^\s*#/.test(raw)) continue;
+    if (/\\\s*$/.test(raw)) {
+      current += `${raw.replace(/\\\s*$/, "")} `;
+      continue;
+    }
+    current += raw;
+    if (current.trim() !== "") instructions.push(current.trim());
+    current = "";
+  }
+  let env = new Map();
+  for (const instruction of instructions) {
+    const [keyword, ...rest] = instruction.split(/\s+/);
+    const upper = keyword.toUpperCase();
+    if (upper === "FROM") env = new Map();
+    if (upper !== "ENV") continue;
+    const args = rest.join(" ");
+    if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(args)) {
+      const [key, ...value] = rest;
+      env.set(key, value.join(" "));
+      continue;
+    }
+    for (const match of args.matchAll(/([A-Za-z_][A-Za-z0-9_]*)=("(?:[^"\\]|\\.)*"|\S*)/g)) {
+      env.set(match[1], match[2].replace(/^"(.*)"$/, "$1"));
+    }
+  }
+  return env;
+}
 
 test("log policy applies defaults and TOML overrides, then rejects an invalid env override", () => {
   const defaultRoot = mkdtempSync(join(tmpdir(), "cursor-api-log-defaults-"));
