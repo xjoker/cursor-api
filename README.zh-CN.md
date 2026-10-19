@@ -6,6 +6,8 @@
 
 **你需要：** [Docker Compose](https://docs.docker.com/compose/) 和 [Cursor User API Key](https://cursor.com/settings)。
 
+> **⚠️ 破坏性变化（下个版本）——不用 Docker 运行（PM2 / systemd / `NODE_ENV=production` 下 `npm start`）？** 未设置 `host` 或 `GATEWAY_HOST` 时，网关现在只监听 `127.0.0.1`。升级前请先看 [升级说明：监听地址](#升级说明监听地址)。Docker / compose 用户不受影响。
+
 ## 四步部署
 
 **不用 clone 仓库。** 建个目录，把下面的 `docker-compose.yml` 存进去，拉 `ghcr.io/xjoker/cursor-api:latest` 即可。
@@ -73,7 +75,7 @@ docker compose up -d
 编辑容器生成的 `./data/config/gateway.toml`。
 
 ```toml
-# host = "127.0.0.1"  # Docker 镜像设置了 GATEWAY_HOST=0.0.0.0，优先级更高
+# host = "0.0.0.0"  # 不写 = 镜像默认 0.0.0.0；写了以这里为准（环境变量 GATEWAY_HOST 优先于两者）
 port = 8787
 
 cursor_api_key = "你的-cursor-user-api-key"
@@ -211,9 +213,32 @@ print(client.chat.completions.create(
 
 **优先级：** 环境变量 → `.env` → TOML → 默认值。
 
-**监听地址：** 未设置 `GATEWAY_HOST` 或 `host` 时，网关只监听 `127.0.0.1`（仅本机可访问）。Docker 镜像设置了 `GATEWAY_HOST=0.0.0.0`，映射端口照常可用；容器内该环境变量优先于 `gateway.toml` 里的 `host`，要改容器内监听地址请用 `GATEWAY_HOST`（或继续在 `ports:` 映射上限制，如 `127.0.0.1:8787:8787`）。不用 Docker、又需要局域网访问时，设 `host = "0.0.0.0"` 或 `GATEWAY_HOST=0.0.0.0`，并只在防火墙或反向代理之后这样做。
+**监听地址**（优先级从高到低）：
+
+1. 环境变量 `GATEWAY_HOST`（`docker run -e`、compose `environment:`、PM2 `env`、systemd `Environment=`、`.env`）
+2. `gateway.toml` 里的 `host`
+3. `GATEWAY_DEFAULT_HOST`——Docker 镜像把它设为 `0.0.0.0`，让映射端口开箱可用；不需要手动设置
+4. `127.0.0.1`（仅本机）
+
+也就是说：在 Docker 里，除非 `gateway.toml` 另有设置，容器监听 `0.0.0.0`；不用 Docker 时监听 `127.0.0.1`。如果 `GATEWAY_HOST` 覆盖了 `gateway.toml` 里不同的 `host`，启动时会打一条 `warn` 日志。端口映射的宿主机一侧请保持回环（`127.0.0.1:8787:8787`），除非确实要对外暴露，不要去掉 `127.0.0.1:` 前缀。
 
 SQLite 与工作区在 `./data`。请求日志和系统日志按 `[logs]` 在写入时和启动时自动清理。容器 stdout 由 compose 的 `logging.options` 轮转（约 30 MB 上限）。
+
+---
+
+## 升级说明：监听地址
+
+**破坏性变化——非 Docker 部署默认只监听 `127.0.0.1`。**
+
+- **受影响：** 不用 Docker、以 `NODE_ENV=production` 运行（PM2、systemd 等），并且 `gateway.toml` 里没有 `host`、也没有设置 `GATEWAY_HOST` 的部署。旧版本在这种情况下监听 `0.0.0.0`。
+- **现象：** 升级后在服务器本机 `curl http://127.0.0.1:8787/health` 正常，其他机器连不上（connection refused）。
+- **自查：** `ss -ltnp | grep 8787`，看到 `127.0.0.1:8787` 就说明受影响。
+- **恢复局域网访问**（只在防火墙或反向代理之后这样做），改完重启：
+  - `gateway.toml`：加上 `host = "0.0.0.0"`；或者
+  - PM2：在 ecosystem 文件里写 `env: { GATEWAY_HOST: "0.0.0.0" }`，然后 `pm2 restart <app> --update-env`；或者
+  - systemd：在 unit（或 drop-in）里写 `Environment=GATEWAY_HOST=0.0.0.0`，然后 `systemctl daemon-reload && systemctl restart <unit>`。
+- **不受影响：** Docker / compose 用户；配置里已经有 `host = "0.0.0.0"` 的用户（包括旧版本自动生成的配置）。
+- **Docker 说明：** 镜像现在设置的是 `GATEWAY_DEFAULT_HOST=0.0.0.0`，不再是 `GATEWAY_HOST`，所以挂载的 `gateway.toml` 里写的 `host` 在容器内会生效。
 
 ---
 

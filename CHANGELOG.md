@@ -9,6 +9,16 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [Unreleased]
+
+### Changed (BREAKING)
+
+- **Non-Docker deployments now listen on `127.0.0.1` by default.** Previously `NODE_ENV=production` without a `host` defaulted to `0.0.0.0`. Affected: running without Docker under `NODE_ENV=production` (PM2, systemd, …) with no `host` in `gateway.toml` and no `GATEWAY_HOST`. Symptom after upgrade: `curl http://127.0.0.1:8787/health` works locally, other machines get *connection refused*. Check with `ss -ltnp | grep 8787` (`127.0.0.1:8787` means affected). To restore LAN access, add `host = "0.0.0.0"` to `gateway.toml` or set `GATEWAY_HOST=0.0.0.0` (PM2 ecosystem `env` / systemd `Environment=`) and restart — only behind a firewall or reverse proxy. Not affected: Docker / compose users, and configs that already contain `host = "0.0.0.0"` (including ones auto-created by older releases). See README → *Upgrading: listen address*.
+- Listen address priority is now `GATEWAY_HOST` → `gateway.toml` `host` → `GATEWAY_DEFAULT_HOST` → `127.0.0.1`. The Docker image sets `GATEWAY_DEFAULT_HOST=0.0.0.0` (not `GATEWAY_HOST`), so a `host` in a mounted `gateway.toml` is honoured inside the container. A warning is logged when `GATEWAY_HOST` overrides a different `host` from `gateway.toml`.
+- The auto-created `gateway.toml` and `gateway.toml.example` no longer pin `host = "0.0.0.0"`; the line is commented out.
+
+---
+
 ## [20260903.1] — 2026-09-03
 
 ### Fixed

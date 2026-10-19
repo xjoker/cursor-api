@@ -6,6 +6,8 @@
 
 **You need:** [Docker Compose](https://docs.docker.com/compose/) and a [Cursor User API Key](https://cursor.com/settings).
 
+> **⚠️ BREAKING (next release) — running without Docker (PM2 / systemd / `npm start` with `NODE_ENV=production`)?** The gateway now listens on `127.0.0.1` only unless `host` or `GATEWAY_HOST` is set. Read [Upgrading: listen address](#upgrading-listen-address) before you upgrade. Docker / compose users are not affected.
+
 ## Deploy in 4 steps
 
 **No git clone.** Create a folder, save the `docker-compose.yml` below, pull `ghcr.io/xjoker/cursor-api:latest`, and go.
@@ -73,7 +75,7 @@ docker compose up -d
 Open the file the container created under `./data/config/gateway.toml`.
 
 ```toml
-# host = "127.0.0.1"  # the Docker image sets GATEWAY_HOST=0.0.0.0, which takes priority
+# host = "0.0.0.0"  # unset = image default 0.0.0.0; a value here wins (GATEWAY_HOST env wins over both)
 port = 8787
 
 cursor_api_key = "your-cursor-user-api-key"
@@ -211,9 +213,32 @@ Single file: `data/config/gateway.toml`. Optional overrides: [`.env.example`](./
 
 **Priority:** environment variables → `.env` → TOML → defaults.
 
-**Listen address:** the gateway listens on `127.0.0.1` (this machine only) unless `GATEWAY_HOST` or `host` says otherwise. The Docker image sets `GATEWAY_HOST=0.0.0.0` so published ports keep working; inside the container that env var wins over `host` in `gateway.toml`, so change the listen address there with `GATEWAY_HOST` (or keep the restriction on the `ports:` mapping, e.g. `127.0.0.1:8787:8787`). Running outside Docker and need LAN access? Set `host = "0.0.0.0"` or `GATEWAY_HOST=0.0.0.0` — only behind a firewall or reverse proxy.
+**Listen address** (highest priority first):
+
+1. `GATEWAY_HOST` environment variable (`docker run -e`, compose `environment:`, PM2 `env`, systemd `Environment=`, `.env`)
+2. `host` in `gateway.toml`
+3. `GATEWAY_DEFAULT_HOST` — set to `0.0.0.0` by the Docker image so published ports work out of the box; not meant to be set by hand
+4. `127.0.0.1` (this machine only)
+
+So in Docker the container listens on `0.0.0.0` unless your `gateway.toml` says otherwise, and outside Docker it listens on `127.0.0.1`. If `GATEWAY_HOST` overrides a different `host` from `gateway.toml`, the gateway logs a `warn` line at startup. Keep the host side of port mappings on loopback (`127.0.0.1:8787:8787`); do not drop the `127.0.0.1:` prefix unless you mean to expose the gateway.
 
 SQLite and workspace live under `./data`. Request logs and system logs are pruned by `[logs]` limits on each write and at startup. Container stdout is rotated by compose `logging.options` (max ~30 MB).
+
+---
+
+## Upgrading: listen address
+
+**BREAKING — non-Docker deployments now listen on `127.0.0.1` by default.**
+
+- **Affected:** running without Docker under `NODE_ENV=production` (PM2, systemd, …) where `gateway.toml` has no `host` and `GATEWAY_HOST` is not set. Older releases listened on `0.0.0.0` in that case.
+- **Symptom:** after upgrading, `curl http://127.0.0.1:8787/health` works on the server, but other machines get *connection refused*.
+- **Check:** `ss -ltnp | grep 8787` — `127.0.0.1:8787` means you are affected.
+- **Restore LAN access** (only behind a firewall or reverse proxy), then restart:
+  - `gateway.toml`: add `host = "0.0.0.0"`, or
+  - PM2: `env: { GATEWAY_HOST: "0.0.0.0" }` in the ecosystem file, then `pm2 restart <app> --update-env`, or
+  - systemd: `Environment=GATEWAY_HOST=0.0.0.0` in the unit (or a drop-in), then `systemctl daemon-reload && systemctl restart <unit>`.
+- **Not affected:** Docker / compose users, and configs that already contain `host = "0.0.0.0"` (including ones auto-created by older releases).
+- **Docker note:** the image now sets `GATEWAY_DEFAULT_HOST=0.0.0.0` instead of `GATEWAY_HOST`, so a `host` written in a mounted `gateway.toml` takes effect inside the container.
 
 ---
 
