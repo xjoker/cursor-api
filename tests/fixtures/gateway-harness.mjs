@@ -9,7 +9,8 @@ import { join } from "node:path";
 
 export const CLIENT_KEY = "cgk_integration_test_key";
 
-export async function startFakeGateway(extraEnv = {}) {
+/** `options.keyPolicy` seeds per-key policy columns (allowed_models, quota_requests, ...) on the client key. */
+export async function startFakeGateway(extraEnv = {}, options = {}) {
   const { digestClientKey } = await import("../../dist/auth.js");
   const { insertApiKey, openDb } = await import("../../dist/db.js");
   const dataDir = mkdtempSync(join(tmpdir(), "cursor-api-it-"));
@@ -23,6 +24,7 @@ export async function startFakeGateway(extraEnv = {}) {
     key_digest: digestClientKey(pepper, CLIENT_KEY),
     created_at: now,
     updated_at: now,
+    ...(options.keyPolicy ?? {}),
   });
   db.close();
 
@@ -66,6 +68,7 @@ export async function startFakeGateway(extraEnv = {}) {
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
+    dataDir,
     output: () => output,
     async stop() {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");

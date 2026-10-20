@@ -5,6 +5,7 @@ import type {
   OpenAiToolFunction,
   ParsedChatMessage,
   ParsedChatRequest,
+  OutputFormat,
   ParsedImage,
   Usage,
 } from "./contracts.js";
@@ -36,6 +37,8 @@ const ACCEPTED_FIELDS = new Set([
   "tool_choice",
   "parallel_tool_calls",
   "conversation_id",
+  "reasoning",
+  "stop",
 ]);
 
 const REJECTED_FIELDS = [
@@ -51,14 +54,38 @@ const REJECTED_FIELDS = [
   "presence_penalty",
   "frequency_penalty",
   "seed",
-  "stop",
   "logit_bias",
+  "top_logprobs",
+  "min_p",
+  "top_a",
+  "repetition_penalty",
 ] as const;
 
-const SAMPLING_FIELDS = new Set(["temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty", "seed"]);
+/**
+ * Dropped (not 400) with `ignore_sampling_params`: pure sampling knobs (incl. OpenRouter's
+ * `min_p` / `top_a` / `repetition_penalty`). Output-shaping fields (`stop`, `logit_bias`,
+ * `top_logprobs`) stay rejected; `stop` is honoured with `enforce_output_limits`.
+ */
+const SAMPLING_FIELDS = new Set([
+  "temperature",
+  "top_p",
+  "top_k",
+  "presence_penalty",
+  "frequency_penalty",
+  "seed",
+  "min_p",
+  "top_a",
+  "repetition_penalty",
+]);
+
+const MAX_STOP_SEQUENCES = 4;
+/** Longest accepted stop sequence (Chat `stop` and Messages `stop_sequences`); bounds stream hold-back. */
+export const MAX_STOP_SEQUENCE_CHARS = 256;
 
 export interface ChatParseOptions {
   ignoreSamplingParams?: boolean;
+  /** `enforce_output_limits`: honour `max_tokens` / `stop` at the gateway. */
+  enforceOutputLimits?: boolean;
 }
 
 const ALLOWED_ROLES = new Set(["system", "developer", "user", "assistant", "tool"]);
@@ -91,12 +118,12 @@ export function parseChatCompletionsRequest(input: unknown, options: ChatParseOp
     throw invalidRequest("Only parallel_tool_calls=true is supported");
   }
 
-  if ("response_format" in body) {
-    const format = body.response_format;
-    if (!isPlainObject(format) || format.type !== "text") {
-      throw invalidRequest("Only response_format.type 'text' is supported");
-    }
-  }
+  const outputFormat = parseResponseFormat(body.response_format);
+  const reasoning = parseReasoningObject(body.reasoning);
+  const stop = parseStop(body.stop, options);
+  const maxOutputTokens = options.enforceOutputLimits
+    ? pickMaxTokens(body)
+    : undefined;
 
   for (const key of Object.keys(body)) {
     if (!ACCEPTED_FIELDS.has(key)) {
@@ -140,6 +167,12 @@ export function parseChatCompletionsRequest(input: unknown, options: ChatParseOp
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     ...(conversationId ? { conversation_id: conversationId } : {}),
+    ...(typeof body.user === "string" && body.user !== "" ? { user: body.user } : {}),
+    ...(reasoning.effort !== undefined ? { reasoning_effort_hint: reasoning.effort } : {}),
+    ...(reasoning.exclude ? { reasoning_exclude: true } : {}),
+    ...(stop !== undefined ? { stop } : {}),
+    ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
+    ...(outputFormat !== undefined ? { output_format: outputFormat } : {}),
   };
 }
 
@@ -150,6 +183,106 @@ function withoutSamplingParams(body: Record<string, unknown>): Record<string, un
     copy[key] = value;
   }
   return copy;
+}
+
+/**
+ * `response_format`: `text` (no-op), `json_object`, `json_schema`. JSON modes are best-effort:
+ * the gateway adds an instruction to the prompt and checks the reply parses (Cursor has no
+ * constrained decoding).
+ */
+export function parseResponseFormat(value: unknown, field = "response_format"): OutputFormat | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) throw invalidRequest(`Field '${field}' must be an object`);
+  if (value.type === "text") return undefined;
+  if (value.type === "json_object") return { type: "json_object" };
+  if (value.type === "json_schema") {
+    // Chat: { json_schema: { name, schema, strict } }; Responses text.format: flat.
+    const spec = isPlainObject(value.json_schema) ? value.json_schema : value;
+    if (spec.schema !== undefined && !isPlainObject(spec.schema)) {
+      throw invalidRequest(`Field '${field}' json_schema.schema must be an object`);
+    }
+    const format: OutputFormat = { type: "json_schema" };
+    if (typeof spec.name === "string" && spec.name !== "") format.name = spec.name;
+    if (spec.schema !== undefined) format.schema = spec.schema;
+    if (typeof spec.strict === "boolean") format.strict = spec.strict;
+    return format;
+  }
+  throw invalidRequest(`${field}.type must be one of 'text', 'json_object', 'json_schema'`);
+}
+
+/**
+ * OpenRouter-style `reasoning` object. Every member is a soft hint: `effort` is mapped to the
+ * nearest level, `max_tokens` to a level by budget, `enabled: false` to the lowest level, and
+ * `exclude: true` hides thinking text from the reply. Never a 400 for models without effort.
+ */
+export function parseReasoningObject(value: unknown): { effort?: string; exclude?: boolean } {
+  if (value === undefined || value === null) return {};
+  if (!isPlainObject(value)) throw invalidRequest("Field 'reasoning' must be an object");
+  for (const key of Object.keys(value)) {
+    if (!["effort", "max_tokens", "enabled", "exclude", "summary"].includes(key)) {
+      throw invalidRequest(`Unknown reasoning field '${key}'`);
+    }
+  }
+  if (value.effort !== undefined && (typeof value.effort !== "string" || value.effort === "")) {
+    throw invalidRequest("reasoning.effort must be a non-empty string");
+  }
+  if (value.max_tokens !== undefined && !(Number.isInteger(value.max_tokens) && (value.max_tokens as number) >= 0)) {
+    throw invalidRequest("reasoning.max_tokens must be a non-negative integer");
+  }
+  for (const key of ["enabled", "exclude"] as const) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") {
+      throw invalidRequest(`reasoning.${key} must be a boolean`);
+    }
+  }
+  const result: { effort?: string; exclude?: boolean } = {};
+  if (value.exclude === true) result.exclude = true;
+  if (value.enabled === false) result.effort = "none";
+  else if (typeof value.effort === "string") result.effort = value.effort;
+  else if (typeof value.max_tokens === "number") result.effort = effortForBudget(value.max_tokens);
+  else if (value.enabled === true) result.effort = "medium";
+  return result;
+}
+
+/** Same thresholds as Anthropic `thinking.budget_tokens`. */
+export function effortForBudget(budget: number): string {
+  if (budget <= 0) return "none";
+  if (budget < 4096) return "low";
+  if (budget < 16384) return "medium";
+  return "high";
+}
+
+function parseStop(value: unknown, options: ChatParseOptions): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!options.enforceOutputLimits) {
+    throw invalidRequest("Field 'stop' is not supported (enable enforce_output_limits)");
+  }
+  const list = typeof value === "string" ? [value] : value;
+  if (
+    !Array.isArray(list) ||
+    list.length > MAX_STOP_SEQUENCES ||
+    !list.every((item): item is string => typeof item === "string" && item !== "")
+  ) {
+    throw invalidRequest(`Field 'stop' must be a non-empty string or up to ${String(MAX_STOP_SEQUENCES)} non-empty strings`);
+  }
+  if (list.some((item) => item.length > MAX_STOP_SEQUENCE_CHARS)) {
+    throw invalidRequest(`Field 'stop' entries must be at most ${String(MAX_STOP_SEQUENCE_CHARS)} characters`);
+  }
+  return list.length > 0 ? list : undefined;
+}
+
+/** Both fields are validated; `max_completion_tokens` wins when both are set. */
+function pickMaxTokens(body: Record<string, unknown>): number | undefined {
+  const completion = parseMaxTokens(body.max_completion_tokens, "max_completion_tokens");
+  const legacy = parseMaxTokens(body.max_tokens, "max_tokens");
+  return completion ?? legacy;
+}
+
+function parseMaxTokens(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Number.isInteger(value) || (value as number) < 1) {
+    throw invalidRequest(`Field '${field}' must be a positive integer`);
+  }
+  return value as number;
 }
 
 /** 只取最后一条 user 上的图，避免把历史轮次的图摊到本次 send。 */
@@ -208,7 +341,7 @@ export function encodeNonStreamCompletion(input: {
   cost?: CursorCost | null;
   params?: ModelParam[];
   tool_calls?: OpenAiToolCall[];
-  finish_reason?: "stop" | "tool_calls";
+  finish_reason?: "stop" | "tool_calls" | "length";
   reasoning_content?: string;
 }): Record<string, unknown> {
   const toolCalls = input.tool_calls;
@@ -220,6 +353,8 @@ export function encodeNonStreamCompletion(input: {
   };
   if (input.reasoning_content) {
     message.reasoning_content = input.reasoning_content;
+    // OpenRouter / some SDKs read `reasoning`; same text under both names.
+    message.reasoning = input.reasoning_content;
   }
   if (toolCalls && toolCalls.length > 0) {
     message.tool_calls = toolCalls.map(encodeToolCall);
@@ -251,7 +386,7 @@ export function encodeStreamChunk(input: {
   content?: string | null;
   reasoning_content?: string | null;
   role?: "assistant";
-  finish_reason?: "stop" | "tool_calls" | null;
+  finish_reason?: "stop" | "tool_calls" | "length" | null;
   usage?: Usage | null;
   cost?: CursorCost | null;
   params?: ModelParam[];
@@ -285,7 +420,10 @@ export function encodeStreamChunk(input: {
 
   const delta: Record<string, unknown> = {};
   if (hasRole) delta.role = input.role;
-  if (hasReasoning) delta.reasoning_content = input.reasoning_content;
+  if (hasReasoning) {
+    delta.reasoning_content = input.reasoning_content;
+    delta.reasoning = input.reasoning_content;
+  }
   if (hasContent) delta.content = input.content;
   if (hasTools) {
     delta.tool_calls = input.tool_calls?.map((call) => {
@@ -533,7 +671,7 @@ function parseStreamOptions(value: unknown): boolean {
     throw invalidRequest("Field 'stream_options' must be an object");
   }
   for (const key of Object.keys(value)) {
-    if (key !== "include_usage") {
+    if (key !== "include_usage" && key !== "include_obfuscation") {
       throw invalidRequest(`Unknown stream_options field '${key}'`);
     }
   }

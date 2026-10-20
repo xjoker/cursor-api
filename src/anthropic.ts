@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { CursorCost, ModelParam, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
 import { GatewayError, invalidRequest, serverError } from "./errors.js";
-import { parseChatCompletionsRequest } from "./openai.js";
+import { MAX_STOP_SEQUENCE_CHARS, parseChatCompletionsRequest } from "./openai.js";
+
+/** Messages `stop_sequences` cap (each delta is scanned for every sequence). */
+const MAX_MESSAGES_STOP_SEQUENCES = 16;
 
 /**
  * Anthropic Messages API (`POST /v1/messages`) adapter.
@@ -38,7 +41,10 @@ const SKIPPED_BLOCK_TYPES = new Set([
   "container_upload",
 ]);
 
-export function parseAnthropicMessagesRequest(body: unknown): ParsedChatRequest {
+export function parseAnthropicMessagesRequest(
+  body: unknown,
+  options: { enforceOutputLimits?: boolean } = {},
+): ParsedChatRequest {
   if (!isPlainObject(body)) {
     throw invalidRequest("Request body must be a JSON object");
   }
@@ -51,8 +57,17 @@ export function parseAnthropicMessagesRequest(body: unknown): ParsedChatRequest 
     if (!Array.isArray(body.stop_sequences)) {
       throw invalidRequest("Field 'stop_sequences' must be an array");
     }
-    if (body.stop_sequences.length > 0) {
-      throw invalidRequest("Field 'stop_sequences' is not supported");
+    if (body.stop_sequences.length > 0 && !options.enforceOutputLimits) {
+      throw invalidRequest("Field 'stop_sequences' is not supported (enable enforce_output_limits)");
+    }
+    if (!body.stop_sequences.every((item) => typeof item === "string" && item !== "")) {
+      throw invalidRequest("Field 'stop_sequences' must contain non-empty strings");
+    }
+    if (body.stop_sequences.length > MAX_MESSAGES_STOP_SEQUENCES) {
+      throw invalidRequest(`Field 'stop_sequences' accepts at most ${String(MAX_MESSAGES_STOP_SEQUENCES)} entries`);
+    }
+    if (body.stop_sequences.some((item: string) => item.length > MAX_STOP_SEQUENCE_CHARS)) {
+      throw invalidRequest(`Field 'stop_sequences' entries must be at most ${String(MAX_STOP_SEQUENCE_CHARS)} characters`);
     }
   }
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
@@ -88,6 +103,12 @@ export function parseAnthropicMessagesRequest(body: unknown): ParsedChatRequest 
   const parsed = parseChatCompletionsRequest(chatBody);
   parsed.includeUsage = true;
   if (effortHint !== undefined) parsed.reasoning_effort_hint = effortHint;
+  if (options.enforceOutputLimits) {
+    if (typeof body.max_tokens === "number") parsed.max_output_tokens = body.max_tokens;
+    if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
+      parsed.stop = body.stop_sequences as string[];
+    }
+  }
   return parsed;
 }
 
@@ -393,15 +414,18 @@ function conversationIdOf(body: Record<string, unknown>): unknown {
   return metadata.conversation_id;
 }
 
-export type AnthropicStopReason = "end_turn" | "tool_use";
+export type AnthropicStopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
 
-export function anthropicStopReason(finishReason: string | undefined): AnthropicStopReason {
-  return finishReason === "tool_calls" ? "tool_use" : "end_turn";
+export function anthropicStopReason(finishReason: string | undefined, stopSequence?: string): AnthropicStopReason {
+  if (finishReason === "tool_calls") return "tool_use";
+  if (finishReason === "length") return "max_tokens";
+  return stopSequence !== undefined ? "stop_sequence" : "end_turn";
 }
 
 export function encodeAnthropicUsage(usage: Usage | null): Record<string, number> {
   return {
-    input_tokens: usage?.prompt_tokens ?? 0,
+    // Anthropic `input_tokens` excludes cache reads / writes (reported separately below).
+    input_tokens: Math.max(0, (usage?.prompt_tokens ?? 0) - (usage?.cache_read_tokens ?? 0) - (usage?.cache_write_tokens ?? 0)),
     output_tokens: usage?.completion_tokens ?? 0,
     cache_creation_input_tokens: usage?.cache_write_tokens ?? 0,
     cache_read_input_tokens: usage?.cache_read_tokens ?? 0,
@@ -431,7 +455,8 @@ export function encodeAnthropicMessage(input: {
   content: string;
   reasoning_content?: string;
   tool_calls?: OpenAiToolCall[];
-  finish_reason?: "stop" | "tool_calls";
+  finish_reason?: "stop" | "tool_calls" | "length";
+  stop_sequence?: string;
   usage: Usage | null;
   cost?: CursorCost | null;
   params?: ModelParam[];
@@ -454,8 +479,8 @@ export function encodeAnthropicMessage(input: {
     role: "assistant",
     model: input.model,
     content,
-    stop_reason: anthropicStopReason(finish),
-    stop_sequence: null,
+    stop_reason: anthropicStopReason(finish, input.stop_sequence),
+    stop_sequence: input.stop_sequence ?? null,
     usage: encodeAnthropicUsage(input.usage),
     cursor: encodeCursorExtra(input.cost, input.params),
   };
@@ -581,7 +606,8 @@ export class AnthropicStreamWriter {
   async complete(result: {
     content: string;
     tool_calls?: OpenAiToolCall[];
-    finish_reason?: "stop" | "tool_calls";
+    finish_reason?: "stop" | "tool_calls" | "length";
+    stop_sequence?: string;
     usage: Usage | null;
   }): Promise<void> {
     if (!this.sentText && result.content !== "") {
@@ -593,7 +619,10 @@ export class AnthropicStreamWriter {
     await this.closeBlock();
     await this.emit("message_delta", {
       type: "message_delta",
-      delta: { stop_reason: anthropicStopReason(result.finish_reason), stop_sequence: null },
+      delta: {
+        stop_reason: anthropicStopReason(result.finish_reason, result.stop_sequence),
+        stop_sequence: result.stop_sequence ?? null,
+      },
       usage: encodeAnthropicUsage(result.usage),
     });
     await this.emit("message_stop", { type: "message_stop" });

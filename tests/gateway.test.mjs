@@ -1693,3 +1693,18 @@ test("aliasLiveConversation is a no-op for the same id", async () => {
   const { aliasLiveConversation } = await import("../dist/session.js");
   assert.equal(aliasLiveConversation("key-1", "resp_1", "resp_1"), false);
 });
+
+test("model listing exposes is_max_mode only for max-only variants", async () => {
+  const { toOpenAiModel } = await import("../dist/cursor.js");
+  const encoded = toOpenAiModel({
+    id: "max-only",
+    displayName: "Max Only",
+    parameters: [],
+    variants: [
+      { displayName: "Max", isMaxMode: true, isDefault: true, params: [] },
+      { displayName: "Normal", params: [] },
+    ],
+  });
+  assert.equal(encoded.variants[0].is_max_mode, true);
+  assert.equal("is_max_mode" in encoded.variants[1], false);
+});

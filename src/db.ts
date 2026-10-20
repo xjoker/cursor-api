@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   ApiKeyRow,
   KeyTokenRow,
+  KeyUsageRow,
+  QuotaPeriod,
   LogPolicy,
   ModelTokenRow,
   RequestLogFilters,
@@ -24,7 +26,8 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
 /** Per-row cap for the client-controlled `model` column (UTF-8 bytes). */
 export const MAX_LOG_MODEL_BYTES = 256;
 
-export const SCHEMA_VERSION = 8;
+/** 9: request_logs.max_mode. 10: per-key model / quota policy + api_key_usage. 11: api_keys.quota_cache_read_weight. */
+export const SCHEMA_VERSION = 11;
 const MAX_CONVERSATIONS_PER_KEY = 1_000;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
@@ -84,6 +87,31 @@ CREATE INDEX IF NOT EXISTS idx_conversations_api_key_updated_at
   ON conversations(api_key_id, updated_at DESC);
 `;
 
+/**
+ * v11 changed `request_logs.input_tokens` to OpenAI semantics (cache reads and writes included).
+ * Rows written by older builds hold uncached input; rewrite them once so admin aggregates
+ * (`SUM(input_tokens)`) never mix the two. `total_tokens` was already cache-inclusive.
+ */
+function migrateUsageSemantics(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
+    const previous = Number(row?.user_version ?? 0);
+    if (previous < 11) {
+      db.exec(
+        `UPDATE request_logs
+            SET input_tokens = input_tokens + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
+          WHERE input_tokens IS NOT NULL`,
+      );
+    }
+    if (previous < SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)}`);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
   fs.mkdirSync(dataDir, { recursive: true });
   const dbPath = path.join(dataDir, "cursor-api.sqlite");
@@ -94,6 +122,11 @@ export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY):
   migrateRequestLogs(db);
   migrateSystemLogs(db);
   migrateConversations(db);
+  migrateApiKeyPolicy(db);
+  // Migrations probe columns; user_version additionally gates the one-shot data migration below.
+  // Rolling back to a build older than v10 ignores the policy columns, i.e. every client key
+  // becomes unrestricted again.
+  migrateUsageSemantics(db);
   logPolicies.set(db, policy);
   pruneRequestLogs(db);
   pruneSystemLogs(db);
@@ -122,16 +155,43 @@ function chmodOwnerOnly(filePath: string): void {
   }
 }
 
+/** Policy columns accepted on create / PATCH. Omitted fields keep their defaults (unrestricted). */
+export type ApiKeyPolicyFields = Pick<
+  ApiKeyRow,
+  | "allowed_models"
+  | "allow_max_mode"
+  | "quota_requests"
+  | "quota_tokens"
+  | "quota_period"
+  | "quota_tz"
+  | "max_concurrent"
+  | "quota_cache_read_weight"
+>;
+
+export const DEFAULT_KEY_POLICY: ApiKeyPolicyFields = {
+  allowed_models: null,
+  allow_max_mode: null,
+  quota_requests: null,
+  quota_tokens: null,
+  quota_period: "total",
+  quota_tz: "UTC",
+  max_concurrent: null,
+  quota_cache_read_weight: null,
+};
+
 export function insertApiKey(
   db: DatabaseSync,
-  row: Omit<ApiKeyRow, "used_requests" | "request_limit" | "enabled"> & {
+  row: Omit<ApiKeyRow, "used_requests" | "request_limit" | "enabled" | keyof ApiKeyPolicyFields> & {
     enabled?: number;
-  },
+  } & Partial<ApiKeyPolicyFields>,
 ): void {
+  const policy = { ...DEFAULT_KEY_POLICY, ...pickPolicy(row) };
   db.prepare(
     `INSERT INTO api_keys (
-      id, name, key_prefix, key_digest, enabled, request_limit, used_requests, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, name, key_prefix, key_digest, enabled, request_limit, used_requests, created_at, updated_at,
+      allowed_models, allow_max_mode, quota_requests, quota_tokens, quota_period, quota_tz, max_concurrent,
+      quota_cache_read_weight
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.name,
@@ -142,7 +202,47 @@ export function insertApiKey(
     0,
     row.created_at,
     row.updated_at,
+    ...policyColumns(policy),
   );
+}
+
+/** Applies a partial policy update. Returns the updated row, or undefined when the key does not exist. */
+export function updateApiKeyPolicy(
+  db: DatabaseSync,
+  id: string,
+  patch: Partial<ApiKeyPolicyFields> & { name?: string },
+): ApiKeyRow | undefined {
+  const existing = getApiKeyById(db, id);
+  if (!existing) return undefined;
+  const merged: ApiKeyPolicyFields = { ...pickPolicy(existing) as ApiKeyPolicyFields, ...pickPolicy(patch) };
+  db.prepare(
+    `UPDATE api_keys SET
+       name = ?, allowed_models = ?, allow_max_mode = ?, quota_requests = ?, quota_tokens = ?,
+       quota_period = ?, quota_tz = ?, max_concurrent = ?, quota_cache_read_weight = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(patch.name ?? existing.name, ...policyColumns(merged), new Date().toISOString(), id);
+  return getApiKeyById(db, id);
+}
+
+function pickPolicy(row: Partial<ApiKeyPolicyFields>): Partial<ApiKeyPolicyFields> {
+  const out: Partial<ApiKeyPolicyFields> = {};
+  for (const key of Object.keys(DEFAULT_KEY_POLICY) as Array<keyof ApiKeyPolicyFields>) {
+    if (row[key] !== undefined) (out as Record<string, unknown>)[key] = row[key];
+  }
+  return out;
+}
+
+function policyColumns(policy: ApiKeyPolicyFields): Array<string | number | null> {
+  return [
+    policy.allowed_models === null ? null : JSON.stringify(policy.allowed_models),
+    policy.allow_max_mode === null ? null : policy.allow_max_mode ? 1 : 0,
+    policy.quota_requests,
+    policy.quota_tokens,
+    policy.quota_period,
+    policy.quota_tz,
+    policy.max_concurrent,
+    policy.quota_cache_read_weight,
+  ];
 }
 
 export function getApiKeyByDigest(db: DatabaseSync, digest: string): ApiKeyRow | undefined {
@@ -173,6 +273,7 @@ export function deleteApiKey(db: DatabaseSync, id: string): ApiKeyRow | undefine
   db.exec("PRAGMA foreign_keys=OFF");
   try {
     db.prepare("DELETE FROM conversations WHERE api_key_id = ?").run(id);
+    db.prepare("DELETE FROM api_key_usage WHERE api_key_id = ?").run(id);
     db.prepare("DELETE FROM api_keys WHERE id = ?").run(id);
   } finally {
     db.exec("PRAGMA foreign_keys=ON");
@@ -188,6 +289,128 @@ function setApiKeyEnabled(db: DatabaseSync, id: string, enabled: 0 | 1): ApiKeyR
   return getApiKeyById(db, id);
 }
 
+export type QuotaReservation =
+  | { ok: true; requests: number; tokens: number }
+  | { ok: false; reason: "requests" | "tokens"; requests: number; tokens: number };
+
+/**
+ * Atomically pre-charges one request for `period`. A single conditional UPDATE inside
+ * BEGIN IMMEDIATE, so concurrent callers (even other processes on the same file) cannot overspend
+ * `quotaRequests`. `quotaTokens` is a soft cap: a request is admitted while used tokens (including
+ * reservations of in-flight requests) are below it; `reserveTokens` is added in the same UPDATE.
+ */
+export function reserveKeyRequest(
+  db: DatabaseSync,
+  apiKeyId: string,
+  period: string,
+  limits: { quotaRequests: number | null; quotaTokens: number | null; reserveTokens?: number },
+): QuotaReservation {
+  const reserve = Math.max(0, Math.trunc(limits.reserveTokens ?? 0));
+  const now = new Date().toISOString();
+  return immediate(db, () => {
+    db.prepare(
+      `INSERT INTO api_key_usage (api_key_id, period_start, requests, tokens, updated_at)
+       VALUES (?, ?, 0, 0, ?) ON CONFLICT(api_key_id, period_start) DO NOTHING`,
+    ).run(apiKeyId, period, now);
+    const updated = db
+      .prepare(
+        `UPDATE api_key_usage SET requests = requests + 1, tokens = tokens + ?, updated_at = ?
+         WHERE api_key_id = ? AND period_start = ?
+           AND (? IS NULL OR requests < ?)
+           AND (? IS NULL OR tokens < ?)
+         RETURNING requests, tokens`,
+      )
+      .get(reserve, now, apiKeyId, period, limits.quotaRequests, limits.quotaRequests, limits.quotaTokens, limits.quotaTokens);
+    if (updated) {
+      return { ok: true as const, requests: asNumber(updated.requests), tokens: asNumber(updated.tokens) };
+    }
+    const row = getKeyUsageRow(db, apiKeyId, period);
+    const requests = row?.requests ?? 0;
+    const tokens = row?.tokens ?? 0;
+    const reason =
+      limits.quotaRequests !== null && requests >= limits.quotaRequests ? ("requests" as const) : ("tokens" as const);
+    return { ok: false as const, reason, requests, tokens };
+  });
+}
+
+/** Gives back a pre-charged request (and its token reservation) whose upstream call never started. */
+export function refundKeyRequest(db: DatabaseSync, apiKeyId: string, period: string, reservedTokens = 0): void {
+  db.prepare(
+    `UPDATE api_key_usage SET requests = MAX(requests - 1, 0), tokens = MAX(tokens - ?, 0), updated_at = ?
+     WHERE api_key_id = ? AND period_start = ?`,
+  ).run(Math.max(0, Math.trunc(reservedTokens)), new Date().toISOString(), apiKeyId, period);
+}
+
+/**
+ * Settles tokens for one request: `delta` = charged − reserved (may be negative). UPDATE only:
+ * the row exists from admission, and a key deleted meanwhile must not get an orphan row back (F5).
+ */
+export function adjustKeyTokens(db: DatabaseSync, apiKeyId: string, period: string, delta: number): void {
+  if (!Number.isFinite(delta) || Math.trunc(delta) === 0) return;
+  db.prepare(
+    `UPDATE api_key_usage SET tokens = MAX(tokens + ?, 0), updated_at = ?
+     WHERE api_key_id = ? AND period_start = ?`,
+  ).run(Math.trunc(delta), new Date().toISOString(), apiKeyId, period);
+}
+
+/** Adds tokens to a period, creating the row if needed (admin / tests; settlement uses adjustKeyTokens). */
+export function addKeyTokens(db: DatabaseSync, apiKeyId: string, period: string, tokens: number): void {
+  if (!Number.isFinite(tokens) || tokens <= 0) return;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO api_key_usage (api_key_id, period_start, requests, tokens, updated_at)
+     VALUES (?, ?, 0, ?, ?)
+     ON CONFLICT(api_key_id, period_start) DO UPDATE SET tokens = tokens + excluded.tokens, updated_at = excluded.updated_at`,
+  ).run(apiKeyId, period, Math.trunc(tokens), now);
+}
+
+export function getKeyUsageRow(db: DatabaseSync, apiKeyId: string, period: string): KeyUsageRow | undefined {
+  const row = db
+    .prepare("SELECT * FROM api_key_usage WHERE api_key_id = ? AND period_start = ?")
+    .get(apiKeyId, period);
+  return row ? mapKeyUsage(row) : undefined;
+}
+
+export function listKeyUsage(db: DatabaseSync, apiKeyId: string, limit = 31): KeyUsageRow[] {
+  return db
+    .prepare("SELECT * FROM api_key_usage WHERE api_key_id = ? ORDER BY updated_at DESC LIMIT ?")
+    .all(apiKeyId, limit)
+    .map(mapKeyUsage);
+}
+
+/** Zeroes the counters for one period. Returns true when a row existed. */
+export function resetKeyUsage(db: DatabaseSync, apiKeyId: string, period: string): boolean {
+  const result = db
+    .prepare(
+      `UPDATE api_key_usage SET requests = 0, tokens = 0, updated_at = ?
+       WHERE api_key_id = ? AND period_start = ?`,
+    )
+    .run(new Date().toISOString(), apiKeyId, period);
+  return asNumber(result.changes) > 0;
+}
+
+function immediate<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const value = fn();
+    db.exec("COMMIT");
+    return value;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function mapKeyUsage(row: Record<string, unknown>): KeyUsageRow {
+  return {
+    api_key_id: asString(row.api_key_id),
+    period_start: asString(row.period_start),
+    requests: asNumber(row.requests),
+    tokens: asNumber(row.tokens),
+    updated_at: asString(row.updated_at),
+  };
+}
+
 export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
   db.prepare(
     `INSERT INTO request_logs (
@@ -195,8 +418,8 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
       input_tokens, output_tokens, total_tokens,
       cache_read_tokens, cache_write_tokens, reasoning_tokens,
       error_code, created_at,
-      upstream_ms, gateway_ms, request_detail, response_detail
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      upstream_ms, gateway_ms, request_detail, response_detail, max_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.api_key_id,
@@ -217,6 +440,7 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.gateway_ms,
     row.request_detail,
     row.response_detail,
+    row.max_mode ?? null,
   );
   pruneRequestLogs(db);
 }
@@ -233,7 +457,7 @@ export function listRequestLogs(db: DatabaseSync, query: RequestLogQuery): {
               l.input_tokens, l.output_tokens, l.total_tokens,
               l.cache_read_tokens, l.cache_write_tokens, l.reasoning_tokens,
               l.error_code, l.created_at,
-              l.upstream_ms, l.gateway_ms,
+              l.upstream_ms, l.gateway_ms, l.max_mode,
               CASE WHEN l.request_detail IS NOT NULL OR l.response_detail IS NOT NULL THEN 1 ELSE 0 END AS has_detail,
               k.name AS key_name, k.key_prefix AS key_prefix
        FROM request_logs l
@@ -524,8 +748,50 @@ function migrateRequestLogs(db: DatabaseSync): void {
   if (!columns.has("reasoning_tokens")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER");
   }
+  if (!columns.has("max_mode")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN max_mode INTEGER");
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
+}
+
+/** Two processes opening a fresh v9 file at once may race on ALTER; the loser just continues. */
+function addColumnIfMissing(db: DatabaseSync, statement: string): void {
+  try {
+    db.exec(statement);
+  } catch (error) {
+    if (!(error instanceof Error && /duplicate column/i.test(error.message))) throw error;
+  }
+}
+
+function migrateApiKeyPolicy(db: DatabaseSync): void {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(api_keys)").all().map((row) => asString(row.name)),
+  );
+  // Existing keys get NULL / defaults = unrestricted, so behavior is unchanged after upgrade.
+  const added: Array<[string, string]> = [
+    ["allowed_models", "TEXT"],
+    ["allow_max_mode", "INTEGER"],
+    ["quota_requests", "INTEGER"],
+    ["quota_tokens", "INTEGER"],
+    ["quota_period", "TEXT NOT NULL DEFAULT 'total'"],
+    ["quota_tz", "TEXT NOT NULL DEFAULT 'UTC'"],
+    ["max_concurrent", "INTEGER"],
+    ["quota_cache_read_weight", "REAL"],
+  ];
+  for (const [name, type] of added) {
+    if (!columns.has(name)) addColumnIfMissing(db, `ALTER TABLE api_keys ADD COLUMN ${name} ${type}`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS api_key_usage (
+      api_key_id TEXT NOT NULL,
+      period_start TEXT NOT NULL,
+      requests INTEGER NOT NULL DEFAULT 0,
+      tokens INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (api_key_id, period_start)
+    );
+  `);
 }
 
 function migrateSystemLogs(db: DatabaseSync): void {
@@ -732,7 +998,32 @@ function mapApiKey(row: Record<string, unknown>): ApiKeyRow {
     used_requests: asNumber(row.used_requests),
     created_at: asString(row.created_at),
     updated_at: asString(row.updated_at),
+    allowed_models: parseAllowedModels(row.allowed_models),
+    allow_max_mode:
+      row.allow_max_mode === undefined || row.allow_max_mode === null ? null : asNumber(row.allow_max_mode) !== 0,
+    quota_requests: asNullableNumber(row.quota_requests),
+    quota_tokens: asNullableNumber(row.quota_tokens),
+    quota_period: parseQuotaPeriod(row.quota_period),
+    quota_tz: asNullableString(row.quota_tz) ?? "UTC",
+    max_concurrent: asNullableNumber(row.max_concurrent),
+    quota_cache_read_weight: asNullableNumber(row.quota_cache_read_weight),
   };
+}
+
+function parseAllowedModels(value: unknown): string[] | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(asString(value));
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed;
+  } catch {
+    // fall through
+  }
+  // Corrupt value: fail closed (no models) rather than silently unrestricted.
+  return [];
+}
+
+function parseQuotaPeriod(value: unknown): QuotaPeriod {
+  return value === "daily" || value === "monthly" ? value : "total";
 }
 
 function mapRequestLog(row: Record<string, unknown>): RequestLogRow {
@@ -756,6 +1047,7 @@ function mapRequestLog(row: Record<string, unknown>): RequestLogRow {
     gateway_ms: asNullableNumber(row.gateway_ms),
     request_detail: asNullableString(row.request_detail),
     response_detail: asNullableString(row.response_detail),
+    max_mode: asNullableNumber(row.max_mode),
     has_detail:
       asNullableString(row.request_detail) !== null || asNullableString(row.response_detail) !== null,
     key_name: asNullableString(row.key_name),

@@ -24,6 +24,11 @@ api_key_pepper = ""
 # max_live_sessions = 256
 # conversation_ttl_days = 30
 # ignore_sampling_params = false
+# enforce_output_limits = false   # true: max_tokens / stop are enforced by the gateway (estimated tokens)
+# history_resume = false          # opt-in: no conversation_id → resume the previous agent on a history-hash match
+# allow_max_mode = true          # false: never run Cursor max-mode variants (non-max fallback or 403)
+# quota_cache_read_weight = 1.0  # 0..1 weight of cache-read tokens in per-key token quotas
+# quota_reserve_recent_runs = 20  # quota_tokens reservation >= average of the key's last N runs; 0 = input estimate only
 # sse_keepalive_ms = 15000
 # auth_failure_limit = 20
 # cors_allow_origins = "*" # exact HTTP(S) origins separated by commas; empty disables CORS
