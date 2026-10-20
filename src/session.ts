@@ -27,7 +27,7 @@ import {
   runFailureError,
   toChatUsage,
 } from "./cursor.js";
-import { getConversationMapping, pruneConversations, upsertConversation, type ConversationMapping } from "./db.js";
+import { deleteAgentConversations, getConversationMapping, pruneConversations, upsertConversation, type ConversationMapping } from "./db.js";
 import { estimateTokens, holdParkedSlot } from "./key-policy.js";
 import { conversationBusyError, GatewayError, invalidRequest, maxModeNotAllowed } from "./errors.js";
 import { logError, logInfo, logWarn } from "./log.js";
@@ -440,11 +440,18 @@ export function resumesParkedTurn(apiKeyId: string, request: ParsedChatRequest):
     return false;
   }
   if (turn.kind !== "tool_results") return false;
-  const candidates = [
-    sessions.get(sessionKey(apiKeyId, hashMessages(turn.stem))),
-    request.conversation_id ? sessions.get(conversationKey(apiKeyId, request.conversation_id)) : undefined,
-  ];
-  return candidates.some((session) => session !== undefined && session.parks.size > 0 && session.releaseParkedSlot !== undefined);
+  const byStem = sessions.get(sessionKey(apiKeyId, hashMessages(turn.stem)));
+  const byConversation = request.conversation_id
+    ? sessions.get(conversationKey(apiKeyId, request.conversation_id))
+    : undefined;
+  const route = resolveParkedRoute({
+    conversationId: request.conversation_id,
+    conversationIdGenerated: request.conversation_id_generated,
+    hasConversationParks: Boolean(byConversation && byConversation.parks.size > 0),
+    hasStemParks: Boolean(byStem && byStem.parks.size > 0),
+  });
+  const session = route === "conversation" ? byConversation : route === "stem" ? byStem : undefined;
+  return session?.releaseParkedSlot !== undefined;
 }
 
 export function conversationKey(apiKeyId: string, conversationId: string): string {
@@ -888,6 +895,7 @@ async function sendOnSession(
     sink?: ChatTurnSink;
     onUpstreamStarted?: () => void;
     quotaPrompt?: string;
+    db?: DatabaseSync;
   },
 ): Promise<CursorChatResult> {
   session.text = "";
@@ -939,8 +947,13 @@ async function sendOnSession(
       });
       // Keep holding (and discarding) deltas: the cancelled run may still emit some.
       session.heldDeltas = [];
-      if (run.supports("cancel")) await run.cancel().catch(() => undefined);
-      await dropSession(session);
+      // The rejected send has already changed upstream context; every alias must stop resuming it.
+      try {
+        if (options.db) deleteAgentConversations(options.db, session.apiKeyId, session.agent.agentId);
+      } finally {
+        if (run.supports("cancel")) await run.cancel().catch(() => undefined);
+        await dropSession(session);
+      }
       throw maxModeNotAllowed(run.model.id, { dispatched: true });
     }
   }

@@ -888,6 +888,11 @@ export function upsertConversation(
   ).run(apiKeyId, MAX_CONVERSATIONS_PER_KEY);
 }
 
+/** A rejected dispatched turn has changed agent context; invalidate all aliases owned by this key. */
+export function deleteAgentConversations(db: DatabaseSync, apiKeyId: string, agentId: string): void {
+  db.prepare("DELETE FROM conversations WHERE api_key_id = ? AND agent_id = ?").run(apiKeyId, agentId);
+}
+
 /** Drops conversation → agent mappings not used since `olderThanIso`. Returns rows removed. */
 export function pruneConversations(db: DatabaseSync, olderThanIso: string): number {
   const result = db.prepare("DELETE FROM conversations WHERE updated_at < ?").run(olderThanIso);

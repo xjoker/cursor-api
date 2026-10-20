@@ -30,6 +30,8 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ### Fixed
 
+- 工具续接只采用实际选中会话的停车并发槽，显式其他会话不能绕过单 Key 并发限制。
+- SDK 已派发但被 max-mode 策略拒绝时，取消 run 并清除该 Key 下指向该 agent 的全部会话映射，后续请求重新建会话。
 - 请求和响应日志入库前递归脱敏，遮盖模型字段、上游错误和凭据形状；详细日志在截断前脱敏，仍应谨慎开启以保护普通提示词内容。
 - 测试默认使用假 SDK 和出网守卫；Linux CI 使用空网络命名空间。临时目录检查同样保留守卫，新功能测试结束后回收临时目录。
 
