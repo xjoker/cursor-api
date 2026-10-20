@@ -238,6 +238,8 @@ print(client.chat.completions.create(
 
 浏览器访问 `/admin/`：总览（含近 7 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除 / 策略与配额）、请求日志、系统日志。
 
+总览展示运行中的版本、提交、数据库 schema 和当前生效配置（只读）。请求日志为常见错误码提供中文说明并保留原始码，显示 Max 模式的 Max、普通、未记录三种状态；未记录不能用于判断是否请求过上游或产生费用。
+
 管理 API：`/admin/api/*`，用同一把 `admin_access_key`（`Authorization: Bearer` 或 `X-Management-Key`）。`DELETE /admin/api/keys/{id}` 删除客户端 Key，历史请求日志保留。`GET /admin/api/system-logs` 列出写入 SQLite 的网关 stdout/stderr 事件。`GET /admin/api/cursor-keys` 查看上游 key 池状态（sha256 指纹、`healthy` / `cooling_down`、失败计数；不返回 key 本身）。概览接口包含 `cursor_keys: {total, healthy}`。
 
 ### 按 Key 的模型策略与配额

@@ -90,6 +90,16 @@ async function dispatch(
       schema_version: SCHEMA_VERSION,
       upstream,
       account: peekCursorAccount(),
+      settings: {
+        rate_limit_per_key: ctx.config.rateLimitPerKey,
+        allow_max_mode: ctx.config.allowMaxMode,
+        enforce_output_limits: ctx.config.enforceOutputLimits,
+        history_resume: ctx.config.historyResume,
+        ignore_sampling_params: ctx.config.ignoreSamplingParams,
+        sse_keepalive_ms: ctx.config.sseKeepaliveMs,
+        max_live_sessions: ctx.config.maxLiveSessions,
+        conversation_ttl_days: ctx.config.conversationTtlDays,
+      },
       sessions: { ...sessionStats(), conversations_stored: countConversations(ctx.db) },
       cursor_keys: summarizeKeys(ctx.keyPool),
       keys: {
