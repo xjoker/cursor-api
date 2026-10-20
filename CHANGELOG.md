@@ -53,7 +53,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
   - `PRAGMA user_version` 写入 schema 版本，迁移容忍并发的 duplicate column。
   - **全局 `ALLOW_MAX_MODE=false` 是硬上限**，按 Key 的 `allow_max_mode` 只能进一步收紧（实际生效 = 全局 AND Key）。
   - 管理接口返回 `effective_allow_max_mode`，Key 设为 `true` 但被全局上限压住时带 `warnings`；管理台显示实际生效值。
-- 已知限制：以客户端工具调用结束的轮次可能少计 Token；暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。
+- 已知限制：暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。挂起的工具轮先按估算计费，续轮再补计实际差额。
+- SAF-95 审查第 3 轮（最终轮，Elliot r2）：
+  - `quota_tokens` 预留取「输入估算」和「该 Key 最近 N 次 run 的平均实际用量」中的较大者（`QUOTA_RESERVE_RECENT_RUNS`，默认 20；0 关闭）。额度 100k、100 个 20k 并发时约放行 5 个，原来是 98 个。
+  - 中断或失败的 run 按 `max(上游 usage, 本地估算)` 计费，取消后上游报 0 也不会计 0。
+  - K10 测试改为断言 404（而不是 429），并检查退款后的状态。
+  - 回滚说明补充 3 条：回滚期间的用量不补记；旧版本删除 Key 会留下孤儿行；每次启动都把 schema 版本写成 10。
 
 ---
 

@@ -7,6 +7,7 @@ import { requireClientKey } from "./auth.js";
 import {
   admitKeyRequest,
   configureQuota,
+  configureQuotaReserve,
   isListedModelAllowed,
   keyModelPolicy,
   needsModelPrecheck,
@@ -86,6 +87,7 @@ try {
 configureSse({ keepaliveMs: config.sseKeepaliveMs });
 configureMaxMode({ allowMaxMode: config.allowMaxMode });
 configureQuota({ cacheReadWeight: config.quotaCacheReadWeight });
+configureQuotaReserve({ recentRuns: config.quotaReserveRecentRuns });
 try {
   configureAuthThrottle(config.authFailureLimit, { trustedProxies: config.trustedProxies });
 } catch (error) {
@@ -1095,7 +1097,7 @@ async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<Ke
     });
   }
   return admitKeyRequest(db, key, Date.now(), {
-    reserveTokens: reservationFor(request),
+    reserveTokens: reservationFor(request, key.id),
     resumesParked: resumesParkedTurn(key.id, request),
   });
 }
