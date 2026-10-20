@@ -4,6 +4,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import path from "node:path";
 import { handleAdminRequest } from "./admin.js";
 import { requireClientKey } from "./auth.js";
+import {
+  admitKeyRequest,
+  isListedModelAllowed,
+  keyModelPolicy,
+  needsModelPrecheck,
+  type KeyTicket,
+} from "./key-policy.js";
 import { configureAuthThrottle } from "./auth-throttle.js";
 import { loadConfig } from "./config.js";
 import { resolveModelAlias } from "./model-alias.js";
@@ -51,7 +58,9 @@ import {
   getCursorModel,
   listCursorModels,
   runFailureError,
+  validateChatRequestModel,
   warmCursorAccount,
+  type ModelSelectionOptions,
 } from "./cursor.js";
 import {
   aliasLiveConversation,
@@ -60,7 +69,7 @@ import {
   startSessionSweeper,
   validateChatTurnRequest,
 } from "./session.js";
-import type { AppConfig, CursorChatResult, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
+import type { ApiKeyRow, AppConfig, CursorChatResult, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
 
 let config: AppConfig;
 try {
@@ -214,7 +223,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     if (req.method === "GET" && url.pathname === "/v1/models") {
       const key = requireClientKey(req, db, config.apiKeyPepper);
-      const models = await keyPool.run((apiKey) => listCursorModels(apiKey));
+      const policy = keyModelPolicy(key);
+      const models = (await keyPool.run((apiKey) => listCursorModels(apiKey))).filter((model) =>
+        isListedModelAllowed(policy, model),
+      );
       logInfo("models listed", { api_key_id: key.id, count: models.length });
       sendJson(res, 200, { object: "list", data: models }, cors);
       return;
@@ -227,7 +239,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         throw modelNotFound(id);
       }
       const model = await keyPool.run((apiKey) => getCursorModel(apiKey, id));
-      if (!model) {
+      if (!model || !isListedModelAllowed(keyModelPolicy(key), model)) {
         throw modelNotFound(id);
       }
       sendJson(res, 200, model, cors);
@@ -288,6 +300,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let requestDetail: string | null = null;
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
+  let ticket: KeyTicket | undefined;
 
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
@@ -298,6 +311,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
     validateChatTurnRequest(parsed);
+    ticket = await admitTurn(key, parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
@@ -397,6 +411,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
+        modelPolicy: modelOptionsFor(key),
+        onUpstreamStarted: () => ticket?.markStarted(),
       });
       upstreamMs = Date.now() - upstreamStarted;
       chatResult = result;
@@ -497,6 +513,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       res.end();
     }
   } finally {
+    ticket?.finish(chatResult);
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
     responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
@@ -575,6 +592,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   let requestDetail: string | null = null;
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
+  let ticket: KeyTicket | undefined;
   let writer: AnthropicStreamWriter | undefined;
 
   try {
@@ -586,6 +604,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
     validateChatTurnRequest(parsed);
+    ticket = await admitTurn(key, parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
@@ -640,6 +659,8 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
+        modelPolicy: modelOptionsFor(key),
+        onUpstreamStarted: () => ticket?.markStarted(),
       });
       upstreamMs = Date.now() - upstreamStarted;
       chatResult = result;
@@ -704,6 +725,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       res.end();
     }
   } finally {
+    ticket?.finish(chatResult);
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
     responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
@@ -766,6 +788,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   let requestDetail: string | null = null;
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
+  let ticket: KeyTicket | undefined;
   let writer: ResponsesStreamWriter | undefined;
 
   try {
@@ -782,6 +805,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       parsed.conversation_id_generated = true;
     }
     validateChatTurnRequest(parsed);
+    ticket = await admitTurn(key, parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
@@ -846,6 +870,8 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
+        modelPolicy: modelOptionsFor(key),
+        onUpstreamStarted: () => ticket?.markStarted(),
       });
       rememberResponseChain(key.id, resumeId, requestId);
       upstreamMs = Date.now() - upstreamStarted;
@@ -932,6 +958,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       res.end();
     }
   } finally {
+    ticket?.finish(chatResult);
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
     responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
@@ -1040,6 +1067,22 @@ function buildResponseDetail(
     error_code: errorCode,
     ...(errorMessage ? { error_message: errorMessage } : {}),
   });
+}
+
+function modelOptionsFor(key: ApiKeyRow): ModelSelectionOptions {
+  return { allowedModels: key.allowed_models, allowMaxMode: key.allow_max_mode };
+}
+
+/**
+ * Per-key gate before any upstream run: keys with a model / quota policy resolve the model first
+ * (403 model_not_allowed / max_mode_not_allowed and 404 win over 429, nothing is pre-charged), then
+ * the request is admitted (concurrency slot + atomic request pre-charge). Unrestricted keys skip both.
+ */
+async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<KeyTicket> {
+  if (needsModelPrecheck(key)) {
+    await keyPool.run((apiKey) => validateChatRequestModel(apiKey, request, modelOptionsFor(key)));
+  }
+  return admitKeyRequest(db, key);
 }
 
 /** 1 / 0 when a run happened, null when the request never reached a run. */

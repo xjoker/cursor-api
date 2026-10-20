@@ -67,6 +67,39 @@ export interface ApiKeyRow {
   used_requests: number;
   created_at: string;
   updated_at: string;
+  /** Allowed model patterns (exact id or `*` glob, case-insensitive). `null` = unrestricted, `[]` = none. */
+  allowed_models: string[] | null;
+  /**
+   * Per-key max-mode override: `null` = inherit the gateway `allow_max_mode` (default true),
+   * `false` = never run max-mode variants (non-max fallback or 403), `true` = allow even when the
+   * gateway default is false.
+   */
+  allow_max_mode: boolean | null;
+  /** Requests allowed per quota period. `null` = unlimited. */
+  quota_requests: number | null;
+  /** `total_tokens` allowed per quota period (soft cap). `null` = unlimited. */
+  quota_tokens: number | null;
+  quota_period: QuotaPeriod;
+  /** IANA time zone used to cut daily / monthly periods. */
+  quota_tz: string;
+  /** Max in-flight requests for this key. `null` = unlimited. */
+  max_concurrent: number | null;
+}
+
+export type QuotaPeriod = "total" | "daily" | "monthly";
+
+/** Policy fields that govern which models / variants a client key may use. */
+export interface KeyModelPolicy {
+  allowedModels: string[] | null;
+  allowMaxMode: boolean | null;
+}
+
+export interface KeyUsageRow {
+  api_key_id: string;
+  period_start: string;
+  requests: number;
+  tokens: number;
+  updated_at: string;
 }
 
 export interface RequestLogQuery {
@@ -251,4 +284,9 @@ export interface CursorChatResult {
   reasoning?: string;
   /** True when the run was sent with Cursor max mode (billed at max rates). */
   max_mode?: boolean;
+  /**
+   * Where `usage` came from: `run` = this run only (`run.wait().usage`),
+   * `agent_total` = cumulative `agent.getUsage()` fallback (may include earlier turns).
+   */
+  usageScope?: "run" | "agent_total";
 }

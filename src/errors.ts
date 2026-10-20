@@ -64,6 +64,35 @@ export function permissionError(message: string): GatewayError {
   return new GatewayError(403, "permission_error", message, "permission_error");
 }
 
+export function modelNotAllowed(id: string, detail?: string): GatewayError {
+  const error = new GatewayError(
+    403,
+    "model_not_allowed",
+    detail ?? `The model '${id}' is not allowed for this API key`,
+    "permission_error",
+  );
+  error.param = "model";
+  return error;
+}
+
+/** OpenAI-style quota exhaustion: 429 + `insufficient_quota` (OpenAI SDKs do not auto-retry it). */
+export function quotaExceeded(message: string, retryAfterSeconds?: number): GatewayError {
+  const error = new GatewayError(429, "insufficient_quota", message, "insufficient_quota");
+  if (retryAfterSeconds !== undefined) error.retryAfterSeconds = retryAfterSeconds;
+  return error;
+}
+
+export function concurrencyLimitExceeded(limit: number): GatewayError {
+  const error = new GatewayError(
+    429,
+    "concurrency_limit_exceeded",
+    `Too many concurrent requests for this API key (limit ${String(limit)})`,
+    "rate_limit_error",
+  );
+  error.retryAfterSeconds = 1;
+  return error;
+}
+
 export function rateLimitError(message: string): GatewayError {
   return new GatewayError(429, "rate_limit_error", message, "rate_limit_error");
 }

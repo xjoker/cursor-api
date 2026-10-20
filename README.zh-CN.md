@@ -267,9 +267,32 @@ print(client.chat.completions.create(
 
 ## 管理台
 
-浏览器访问 `/admin/`：总览（含近 7 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除）、请求日志、系统日志。
+浏览器访问 `/admin/`：总览（含近 7 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除 / 策略与配额）、请求日志、系统日志。
 
 管理 API：`/admin/api/*`，用同一把 `admin_access_key`（`Authorization: Bearer` 或 `X-Management-Key`）。`DELETE /admin/api/keys/{id}` 删除客户端 Key，历史请求日志保留。`GET /admin/api/system-logs` 列出写入 SQLite 的网关 stdout/stderr 事件。`GET /admin/api/cursor-keys` 查看上游 key 池状态（sha256 指纹、`healthy` / `cooling_down`、失败计数；不返回 key 本身）。概览接口包含 `cursor_keys: {total, healthy}`。
+
+### 按 Key 的模型策略与配额
+
+每把客户端 Key 都可以单独设置策略，所有字段都可选。已有的 Key（以及创建时没带这些字段的新 Key）默认不受限制，升级后什么都不会变，直到你主动设置。
+
+| 字段 | 含义 |
+| --- | --- |
+| `allowed_models` | `null` = 不限模型；否则是精确模型 id 或 `*` 通配（不区分大小写）的列表，例如 `["gemini-*", "composer-2.5"]`。在 `model_aliases` 映射之后检查，并对解析出的目录 id 再检查一次，所以别名无法绕过白名单。通配只匹配目录 id，目录别名必须精确列出。`GET /v1/models` 只列出允许的模型，`GET /v1/models/{id}` 对其余模型返回 404。不允许的模型返回 `403 model_not_allowed`（`param: "model"`）。 |
+| `allow_max_mode` | `null` = 继承网关的 `allow_max_mode`；`true` / `false` 为该 Key 双向覆盖全局设置，回退 / `403 max_mode_not_allowed` 行为与全局一致。 |
+| `quota_requests` | 每周期最多请求数。在上游 run 之前原子预扣（并发请求不会超额），run 没有启动则退还。 |
+| `quota_tokens` | 每周期 Token 额度，属于**软上限**：已用 Token 低于额度就放行，请求结束后再累加，所以最后一个请求可能超出。 |
+| `quota_period` | `total`（默认，永不重置）、`daily`、`monthly`。 |
+| `quota_tz` | 计算周期边界用的 IANA 时区（默认 `UTC`），例如 `Asia/Singapore`。 |
+| `max_concurrent` | 该 Key 同时进行中的最大请求数（按网关进程计）。 |
+
+超出配额返回 `429 insufficient_quota`，带 `Retry-After`（距下个周期的秒数；`total` 不带）。超出并发上限返回 `429 concurrency_limit_exceeded`，`Retry-After: 1`。模型检查在配额之前，所以不允许的模型得到 403/404 而不是 429，也不扣次数。
+
+管理 API：`POST /admin/api/keys` 接受以上字段；`PATCH /admin/api/keys/{id}` 修改任意字段（以及 `name`；没传的字段不变，传 `null` 表示取消限制）；`GET /admin/api/keys/{id}/usage` 返回本周期用量（`requests`、`tokens`、`remaining_*`、`in_flight`、`resets_at`）和最近几个周期；`POST /admin/api/keys/{id}/usage/reset` 把本周期清零。`GET /admin/api/keys` 会带上每把 Key 的策略和 `usage_current`。管理台在 **客户端 Key → 策略** 中编辑。
+
+Token 计量的限制：
+- Token 取自 SDK 每次 run 的用量（`run.wait().usage`）。Agent 累计总量永远不计入，否则续会话会重复计算。用量来源可插拔，便于以后接入官方的按 run 用量接口。
+- 以客户端工具调用结束的轮次（挂起的 run）在返回响应时可能还没有用量；这些轮次照常计入 `quota_requests`，但计入的 Token 可能少于实际消耗。
+- 暂不支持按费用（美元）设配额：本地 SDK Agent 不提供单次请求的费用。
 
 ---
 

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
-import type { ApiKeyRow, AppConfig } from "./contracts.js";
+import type { ApiKeyRow, AppConfig, QuotaPeriod } from "./contracts.js";
 import type { CursorKeyPool } from "./keypool.js";
 import { generateClientKey, requireAdminKey } from "./auth.js";
 import {
@@ -10,9 +10,14 @@ import {
   deleteApiKey,
   enableApiKey,
   getApiKeyById,
+  getKeyUsageRow,
   getRequestLogById,
   insertApiKey,
   listApiKeys,
+  listKeyUsage,
+  resetKeyUsage,
+  updateApiKeyPolicy,
+  type ApiKeyPolicyFields,
   listRequestLogFilters,
   listRequestLogs,
   listSystemLogs,
@@ -25,6 +30,14 @@ import { GatewayError, invalidRequest } from "./errors.js";
 import { readJsonBody, sendJson, sendSimpleError } from "./http.js";
 import { listCursorModels, peekCursorAccount } from "./cursor.js";
 import { sessionStats } from "./session.js";
+import {
+  inFlightRequests,
+  isValidTimeZone,
+  parseAllowedModelsInput,
+  periodKey,
+  periodResetsAt,
+} from "./key-policy.js";
+import { logInfo } from "./log.js";
 
 const ADMIN_PREFIX = "/admin/api/";
 
@@ -58,6 +71,8 @@ async function dispatch(
   const disableMatch = /^\/admin\/api\/keys\/([^/]+)\/disable$/.exec(pathname);
   const enableMatch = /^\/admin\/api\/keys\/([^/]+)\/enable$/.exec(pathname);
   const deleteMatch = /^\/admin\/api\/keys\/([^/]+)$/.exec(pathname);
+  const usageMatch = /^\/admin\/api\/keys\/([^/]+)\/usage$/.exec(pathname);
+  const usageResetMatch = /^\/admin\/api\/keys\/([^/]+)\/usage\/reset$/.exec(pathname);
 
   if (method === "GET" && pathname === "/admin/api/overview") {
     const keys = listApiKeys(ctx.db);
@@ -111,6 +126,7 @@ async function dispatch(
         const usage = usageById.get(key.id);
         return {
           ...publicKey(key),
+          usage_current: currentUsage(ctx.db, key),
           request_count: usage?.request_count ?? 0,
           input_tokens: usage?.input_tokens ?? 0,
           output_tokens: usage?.output_tokens ?? 0,
@@ -136,6 +152,7 @@ async function dispatch(
       key_digest: generated.digestPeppered(ctx.config.apiKeyPepper),
       created_at: now,
       updated_at: now,
+      ...parsePolicyFields(body),
     };
     insertApiKey(ctx.db, row);
     const created = getApiKeyById(ctx.db, row.id);
@@ -161,6 +178,47 @@ async function dispatch(
       throw notFound("API key not found");
     }
     sendJson(res, 200, publicKey(updated));
+    return;
+  }
+
+  if (method === "PATCH" && deleteMatch) {
+    const id = decodeURIComponent(deleteMatch[1] ?? "");
+    const body = await readJsonBody(req, ctx.config.maxBodyBytes);
+    if (!isRecord(body)) throw invalidRequest("Request body must be a JSON object");
+    const patch: Partial<ApiKeyPolicyFields> & { name?: string } = parsePolicyFields(body);
+    if (body.name !== undefined) {
+      if (typeof body.name !== "string" || body.name.trim() === "") {
+        throw invalidRequest("name must be a non-empty string");
+      }
+      patch.name = body.name.trim();
+    }
+    const updated = updateApiKeyPolicy(ctx.db, id, patch);
+    if (!updated) throw notFound("API key not found");
+    logInfo("api key policy updated", { api_key_id: id, fields: Object.keys(patch) });
+    sendJson(res, 200, { ...publicKey(updated), usage_current: currentUsage(ctx.db, updated) });
+    return;
+  }
+
+  if (method === "GET" && usageMatch) {
+    const key = getApiKeyById(ctx.db, decodeURIComponent(usageMatch[1] ?? ""));
+    if (!key) throw notFound("API key not found");
+    sendJson(res, 200, {
+      api_key_id: key.id,
+      quota_period: key.quota_period,
+      quota_tz: key.quota_tz,
+      current: currentUsage(ctx.db, key),
+      history: listKeyUsage(ctx.db, key.id),
+    });
+    return;
+  }
+
+  if (method === "POST" && usageResetMatch) {
+    const key = getApiKeyById(ctx.db, decodeURIComponent(usageResetMatch[1] ?? ""));
+    if (!key) throw notFound("API key not found");
+    const period = periodKey(key.quota_period, key.quota_tz);
+    resetKeyUsage(ctx.db, key.id, period);
+    logInfo("api key usage reset", { api_key_id: key.id, period_start: period });
+    sendJson(res, 200, { api_key_id: key.id, current: currentUsage(ctx.db, key) });
     return;
   }
 
@@ -223,6 +281,73 @@ async function dispatch(
 function publicKey(row: ApiKeyRow): Omit<ApiKeyRow, "key_digest" | "request_limit" | "used_requests"> {
   const { key_digest: _digest, request_limit: _limit, used_requests: _used, ...rest } = row;
   return rest;
+}
+
+/** Validates the optional per-key policy fields shared by POST /keys and PATCH /keys/{id}. */
+function parsePolicyFields(body: unknown): Partial<ApiKeyPolicyFields> {
+  if (!isRecord(body)) return {};
+  const out: Partial<ApiKeyPolicyFields> = {};
+  if (body.allowed_models !== undefined) out.allowed_models = parseAllowedModelsInput(body.allowed_models);
+  if (body.allow_max_mode !== undefined) {
+    if (body.allow_max_mode !== null && typeof body.allow_max_mode !== "boolean") {
+      throw invalidRequest("allow_max_mode must be true, false or null (inherit gateway allow_max_mode)");
+    }
+    out.allow_max_mode = body.allow_max_mode;
+  }
+  if (body.quota_requests !== undefined) out.quota_requests = parseLimit0(body.quota_requests, "quota_requests");
+  if (body.quota_tokens !== undefined) out.quota_tokens = parseLimit0(body.quota_tokens, "quota_tokens");
+  if (body.max_concurrent !== undefined) {
+    const value = parseLimit0(body.max_concurrent, "max_concurrent");
+    if (value !== null && (value < 1 || value > 10_000)) {
+      throw invalidRequest("max_concurrent must be between 1 and 10000, or null");
+    }
+    out.max_concurrent = value;
+  }
+  if (body.quota_period !== undefined) {
+    if (body.quota_period !== "total" && body.quota_period !== "daily" && body.quota_period !== "monthly") {
+      throw invalidRequest("quota_period must be 'total', 'daily' or 'monthly'");
+    }
+    out.quota_period = body.quota_period as QuotaPeriod;
+  }
+  if (body.quota_tz !== undefined) {
+    if (typeof body.quota_tz !== "string" || body.quota_tz.trim() === "" || !isValidTimeZone(body.quota_tz.trim())) {
+      throw invalidRequest("quota_tz must be an IANA time zone such as 'UTC' or 'Asia/Singapore'");
+    }
+    out.quota_tz = body.quota_tz.trim();
+  }
+  return out;
+}
+
+function parseLimit0(value: unknown, field: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidRequest(`${field} must be a non-negative integer or null`);
+  }
+  return value;
+}
+
+function currentUsage(db: DatabaseSync, key: ApiKeyRow): {
+  period_start: string;
+  requests: number;
+  tokens: number;
+  in_flight: number;
+  remaining_requests: number | null;
+  remaining_tokens: number | null;
+  resets_at: string | null;
+} {
+  const period = periodKey(key.quota_period, key.quota_tz);
+  const row = getKeyUsageRow(db, key.id, period);
+  const requests = row?.requests ?? 0;
+  const tokens = row?.tokens ?? 0;
+  return {
+    period_start: period,
+    requests,
+    tokens,
+    in_flight: inFlightRequests(key.id),
+    remaining_requests: key.quota_requests === null ? null : Math.max(0, key.quota_requests - requests),
+    remaining_tokens: key.quota_tokens === null ? null : Math.max(0, key.quota_tokens - tokens),
+    resets_at: periodResetsAt(key.quota_period, key.quota_tz)?.toISOString() ?? null,
+  };
 }
 
 function parseCreateKeyBody(body: unknown): { name: string } {

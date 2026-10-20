@@ -23,6 +23,7 @@ import {
   GatewayError,
   invalidRequest,
   maxModeNotAllowed,
+  modelNotAllowed,
   modelNotFound,
   rateLimitError,
   conversationBusyError,
@@ -32,6 +33,7 @@ import {
   upstreamUnavailable,
 } from "./errors.js";
 import { logError, scrubSecrets } from "./log.js";
+import { isCatalogModelAllowed } from "./key-policy.js";
 
 const CATALOG_TTL_MS = 60_000;
 const ACCOUNT_TTL_MS = 10 * 60 * 1000;
@@ -94,9 +96,12 @@ export async function getCursorAccount(apiKey: string): Promise<{
   }
 }
 
-/** Per-request model policy. `allowMaxMode` is ANDed with the gateway-wide `allow_max_mode`. */
+/** Per-request (per client key) model policy. */
 export interface ModelSelectionOptions {
-  allowMaxMode?: boolean;
+  /** Overrides the gateway-wide `allow_max_mode` when not null/undefined. */
+  allowMaxMode?: boolean | null;
+  /** Client-key allowlist (exact ids or `*` globs); null/undefined = unrestricted. */
+  allowedModels?: string[] | null;
 }
 
 let gatewayAllowMaxMode = true;
@@ -240,9 +245,12 @@ export function resolveCatalogModelSelection(
   if (!item) {
     throw modelNotFound(request.model);
   }
+  if (!isCatalogModelAllowed({ allowedModels: options?.allowedModels ?? null, allowMaxMode: null }, request.model, item.id)) {
+    throw modelNotAllowed(request.model);
+  }
   const params = resolveChatParams(item, request);
   const autoMax = sdkWouldUseMaxMode(item, params);
-  const allowMaxMode = gatewayAllowMaxMode && options?.allowMaxMode !== false;
+  const allowMaxMode = options?.allowMaxMode ?? gatewayAllowMaxMode;
   if (allowMaxMode) {
     return autoMax ? { id: item.id, params, maxMode: true } : { id: item.id, params };
   }

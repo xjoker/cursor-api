@@ -20,6 +20,7 @@ import {
   disposeAgent,
   mapCursorError,
   resolveChatModel,
+  type ModelSelectionOptions,
   resumeLocalChatAgent,
   runFailureError,
   toChatUsage,
@@ -227,6 +228,10 @@ interface RunChatTurnOptions {
   sink?: ChatTurnSink;
   parkTimeoutMs?: number;
   db?: DatabaseSync;
+  /** Client-key model policy (allowlist + max-mode override), applied on every model resolution. */
+  modelPolicy?: ModelSelectionOptions;
+  /** Called once an upstream run exists (send accepted or parked run continued). */
+  onUpstreamStarted?: () => void;
 }
 
 type TurnOptions = Omit<RunChatTurnOptions, "onClaimed"> & {
@@ -476,6 +481,7 @@ async function runClaimedChatTurn(
     }
     parked.lastRequestMessages = options.request.messages;
     indexSession(parked, options.apiKeyId, hashMessages(options.request.messages));
+    options.onUpstreamStarted?.();
     const operation = async (): Promise<CursorChatResult> =>
       ensureSuccessfulRun(await continueRun(parked, options.abortSignal));
     return options.keyPool
@@ -556,7 +562,7 @@ async function resumeUserTurnWithKey(
   options: TurnOptions,
   storedAgentId: string,
 ): Promise<CursorChatResult> {
-  const model = await resolveChatModel(options.apiKey, options.request);
+  const model = await resolveChatModel(options.apiKey, options.request, options.modelPolicy);
   await options.claimOutput?.();
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
   const session = emptySession(options, model.params, model.maxMode === true);
@@ -617,7 +623,7 @@ async function startAgentSession(prompt: string, options: TurnOptions): Promise<
 }
 
 async function startAgentSessionWithKey(prompt: string, options: TurnOptions): Promise<CursorChatResult> {
-  const model = await resolveChatModel(options.apiKey, options.request);
+  const model = await resolveChatModel(options.apiKey, options.request, options.modelPolicy);
   await options.claimOutput?.();
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
   const session = emptySession(options, model.params, model.maxMode === true);
@@ -733,6 +739,7 @@ async function sendOnSession(
     request: ParsedChatRequest;
     abortSignal: AbortSignal;
     sink?: ChatTurnSink;
+    onUpstreamStarted?: () => void;
   },
 ): Promise<CursorChatResult> {
   session.text = "";
@@ -760,6 +767,7 @@ async function sendOnSession(
     await dropSession(session);
     throw mapCursorError(error);
   }
+  options.onUpstreamStarted?.();
   session.run = run;
   session.waitPromise = settleRun(session, options.abortSignal);
   bindAbort(session, options.abortSignal);
@@ -964,6 +972,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
     const result = await run.wait();
     const billed = await billedUsageOf(session.agent);
     const rawUsage = result.usage ?? billed?.usage;
+    const usageScope = result.usage ? ("run" as const) : billed?.usage ? ("agent_total" as const) : undefined;
     if (result.status === "cancelled") {
       return {
         text: session.text,
@@ -981,6 +990,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         text: session.text,
         usage: toChatUsage(rawUsage),
         usageKnown: rawUsage !== undefined,
+        ...(usageScope ? { usageScope } : {}),
         status: "error",
         finish_reason: "error",
         params: session.modelParams,
@@ -991,6 +1001,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
       text: result.result ?? session.text,
       usage: toChatUsage(rawUsage),
       usageKnown: rawUsage !== undefined,
+      ...(usageScope ? { usageScope } : {}),
       cost: billed?.cost
         ? { raw_cost_cents: billed.cost.rawCostCents, charged_cents: billed.cost.chargedCents }
         : null,

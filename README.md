@@ -265,9 +265,32 @@ print(client.chat.completions.create(
 
 ## Admin UI
 
-Browser console at `/admin/`: overview (including a 7-day call chart), client keys (create / disable / enable / delete), request logs, and system logs.
+Browser console at `/admin/`: overview (including a 7-day call chart), client keys (create / disable / enable / delete / policy & quota), request logs, and system logs.
 
 Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`). `DELETE /admin/api/keys/{id}` removes a client key and keeps its request logs. `GET /admin/api/system-logs` lists gateway stdout/stderr events stored in SQLite. `GET /admin/api/cursor-keys` shows the upstream key pool (sha256 fingerprint, `healthy` / `cooling_down`, failure counters; keys are never returned). The overview includes `cursor_keys: {total, healthy}`.
+
+### Per-key model policy and quotas
+
+Each client key can carry its own policy. Every field is optional; existing keys (and new keys created without these fields) stay unrestricted, so upgrading changes nothing until you set one.
+
+| Field | Meaning |
+| --- | --- |
+| `allowed_models` | `null` = any model. Otherwise a list of exact model ids or `*` wildcards (case-insensitive), e.g. `["gemini-*", "composer-2.5"]`. Checked after `model_aliases` and again on the catalog id the model resolves to, so an alias cannot unlock a model the list does not allow. Wildcards match catalog ids only; a catalog alias must be listed exactly. `GET /v1/models` only lists allowed models and `GET /v1/models/{id}` returns 404 for the rest. A disallowed model returns `403 model_not_allowed` (`param: "model"`). |
+| `allow_max_mode` | `null` = inherit the gateway `allow_max_mode`. `true` / `false` overrides it for this key in either direction, with the same fallback / `403 max_mode_not_allowed` behaviour. |
+| `quota_requests` | Maximum requests per period. Pre-charged atomically before the upstream run (concurrent requests cannot overspend) and refunded if the run never starts. |
+| `quota_tokens` | Token budget per period, a **soft cap**: a request is admitted while used tokens are below the limit; its tokens are added after it finishes, so the last request can go over. |
+| `quota_period` | `total` (default, never resets), `daily` or `monthly`. |
+| `quota_tz` | IANA time zone for period boundaries (default `UTC`), e.g. `Asia/Singapore`. |
+| `max_concurrent` | Maximum in-flight requests for the key (per gateway process). |
+
+Over quota: `429 insufficient_quota` with `Retry-After` (seconds until the period resets; omitted for `total`). Over the concurrency cap: `429 concurrency_limit_exceeded` with `Retry-After: 1`. Model checks run first, so a disallowed model gets 403/404, not 429, and is not charged.
+
+Admin API: `POST /admin/api/keys` accepts the fields above; `PATCH /admin/api/keys/{id}` updates any of them (plus `name`; omitted fields are unchanged, `null` clears a limit); `GET /admin/api/keys/{id}/usage` returns the current period (`requests`, `tokens`, `remaining_*`, `in_flight`, `resets_at`) and recent periods; `POST /admin/api/keys/{id}/usage/reset` zeroes the current period. `GET /admin/api/keys` includes each key's policy and `usage_current`. The admin UI edits these under **Client keys → Policy**.
+
+Token accounting limits:
+- Tokens come from the SDK's per-run usage (`run.wait().usage`). Cumulative agent totals are never charged, because they would double count continued conversations. The source is pluggable for a future per-run usage API.
+- Turns that end in client tool calls (parked runs) may report no usage at the point the response is sent; those turns count against `quota_requests` but may add fewer tokens than were actually used.
+- Cost (USD) quotas are not available yet: local SDK agents do not expose per-request cost.
 
 ---
 
