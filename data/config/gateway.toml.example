@@ -25,6 +25,7 @@ api_key_pepper = ""
 # conversation_ttl_days = 30
 # ignore_sampling_params = false
 # allow_max_mode = true          # false: never run Cursor max-mode variants (non-max fallback or 403)
+# quota_reserve_recent_runs = 20  # quota_tokens reservation >= average of the key's last N runs; 0 = input estimate only
 # sse_keepalive_ms = 15000
 # auth_failure_limit = 20
 # cors_allow_origins = "*" # exact HTTP(S) origins separated by commas; empty disables CORS

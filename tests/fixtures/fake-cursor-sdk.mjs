@@ -251,9 +251,15 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
             result: status === "finished" ? text : undefined,
             ...(runError ? { error: runError } : {}),
             // FAKE_SDK_NO_USAGE_ON_CANCEL=1: a cancelled run reports no usage (forces the estimate path).
+            // FAKE_SDK_ZERO_USAGE_ON_CANCEL=1: a cancelled run reports all-zero usage.
+            // FAKE_SDK_RUN_TOKENS=N: every run reports N total tokens (N - 2 input, 2 output).
             ...(status === "cancelled" && process.env.FAKE_SDK_NO_USAGE_ON_CANCEL === "1"
               ? {}
-              : { usage: { inputTokens: 11, outputTokens: 2, totalTokens: 13, cacheReadTokens: 3, cacheWriteTokens: 0 } }),
+              : status === "cancelled" && process.env.FAKE_SDK_ZERO_USAGE_ON_CANCEL === "1"
+                ? { usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+                : process.env.FAKE_SDK_RUN_TOKENS
+                  ? { usage: { inputTokens: Number(process.env.FAKE_SDK_RUN_TOKENS) - 2, outputTokens: 2, totalTokens: Number(process.env.FAKE_SDK_RUN_TOKENS), cacheReadTokens: 0, cacheWriteTokens: 0 } }
+                  : { usage: { inputTokens: 11, outputTokens: 2, totalTokens: 13, cacheReadTokens: 3, cacheWriteTokens: 0 } }),
           };
         },
       };

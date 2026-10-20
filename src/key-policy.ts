@@ -269,7 +269,11 @@ export type QuotaUsageSource = (result: CursorChatResult) => number | null;
 
 export const runScopedUsageSource: QuotaUsageSource = (result) => {
   if (result.usageKnown && (result.usageScope === undefined || result.usageScope === "run")) {
-    return Math.max(0, result.usage.total_tokens - (result.quota_precharged_tokens ?? 0));
+    const reported = Math.max(0, result.usage.total_tokens - (result.quota_precharged_tokens ?? 0));
+    // Aborted / failed runs (R2-2): upstream may report partial or zero usage after a cancel, so
+    // never charge less than the local estimate of what was sent and produced.
+    if (result.status !== "finished") return Math.max(reported, result.quota_estimate_tokens ?? 0);
+    return reported;
   }
   if (result.quota_estimate_tokens !== undefined) return result.quota_estimate_tokens;
   return null;
@@ -289,14 +293,50 @@ export function estimateTokens(chars: number): number {
 /** Output allowance reserved per in-flight request on top of the input estimate (F2). */
 export const QUOTA_RESERVE_OUTPUT_TOKENS = 1024;
 
-/** Token reservation for one request at admission: estimated input + a fixed output allowance. */
-export function reservationFor(request: Pick<ParsedChatRequest, "messages">): number {
+let recentRunsWindow = 20;
+/** Actual per-run charges of recent runs, per client key (newest last, in-memory, per process). */
+const recentRuns = new Map<string, number[]>();
+
+/** `QUOTA_RESERVE_RECENT_RUNS`: how many recent runs feed the reservation (0 = input estimate only). */
+export function configureQuotaReserve(options: { recentRuns: number }): void {
+  recentRunsWindow = Math.max(0, Math.trunc(options.recentRuns));
+  if (recentRunsWindow === 0) recentRuns.clear();
+}
+
+/** Records the actual token charge of one finished run for `apiKeyId` (R2-1). */
+export function recordRunTokens(apiKeyId: string, tokens: number): void {
+  if (recentRunsWindow === 0 || !Number.isFinite(tokens) || tokens <= 0) return;
+  const runs = recentRuns.get(apiKeyId) ?? [];
+  runs.push(Math.trunc(tokens));
+  while (runs.length > recentRunsWindow) runs.shift();
+  recentRuns.set(apiKeyId, runs);
+}
+
+/** Average actual tokens of the key's recent runs (0 without history). */
+export function recentRunAverage(apiKeyId: string): number {
+  const runs = recentRuns.get(apiKeyId);
+  if (!runs || runs.length === 0) return 0;
+  return Math.ceil(runs.reduce((sum, value) => sum + value, 0) / runs.length);
+}
+
+export function clearRecentRuns(apiKeyId?: string): void {
+  if (apiKeyId === undefined) recentRuns.clear();
+  else recentRuns.delete(apiKeyId);
+}
+
+/**
+ * Token reservation for one request at admission (R2-1): the larger of the input estimate plus a
+ * fixed output allowance and the key's recent average actual run usage, so runs that use far more
+ * than their visible input (harness prompt, tools, agent context) still reserve realistically.
+ */
+export function reservationFor(request: Pick<ParsedChatRequest, "messages">, apiKeyId?: string): number {
   let chars = 0;
   for (const message of request.messages) {
     chars += message.content?.length ?? 0;
     for (const call of message.tool_calls ?? []) chars += (call.name?.length ?? 0) + (call.arguments?.length ?? 0);
   }
-  return estimateTokens(chars) + QUOTA_RESERVE_OUTPUT_TOKENS;
+  const estimate = estimateTokens(chars) + QUOTA_RESERVE_OUTPUT_TOKENS;
+  return apiKeyId === undefined ? estimate : Math.max(estimate, recentRunAverage(apiKeyId));
 }
 
 const inFlight = new Map<string, number>();
@@ -411,6 +451,10 @@ export function admitKeyRequest(db: DatabaseSync, key: ApiKeyRow, now = Date.now
       }
       // Unknown usage keeps the reservation as the charge (conservative floor).
       const charge = tokens === null ? reserved : Math.max(0, Math.trunc(tokens));
+      // Feed the next reservations with what finished runs really used (whole run, incl. tool rounds).
+      if (result && result.status === "finished" && result.usageKnown && (result.usageScope ?? "run") === "run") {
+        recordRunTokens(key.id, result.usage.total_tokens);
+      }
       adjustKeyTokens(db, key.id, period, charge - reserved);
     },
   };

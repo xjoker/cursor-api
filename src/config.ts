@@ -41,6 +41,7 @@ api_key_pepper = ""
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
 # allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
+# quota_reserve_recent_runs = 20 # quota_tokens reservation >= average of the key's last N runs; 0 = input estimate only
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
 # auth_failure_limit = 20        # failed auth attempts per address per minute; 0 = off
 # cors_allow_origins = "*"       # comma-separated HTTP origins; empty disables CORS
@@ -170,6 +171,11 @@ export function loadConfig(
     allowMaxMode: parseBoolean(
       pickConfigured(env, "ALLOW_MAX_MODE", boolToString(tomlBool(toml, "allow_max_mode")), "allow_max_mode"),
       true,
+    ),
+    quotaReserveRecentRuns: parseOptionalInterval(
+      pickConfigured(env, "QUOTA_RESERVE_RECENT_RUNS", intToString(tomlInt(toml, "quota_reserve_recent_runs")), "quota_reserve_recent_runs"),
+      20,
+      { min: 1, max: 1000 },
     ),
     sseKeepaliveMs: parseOptionalInterval(
       pickConfigured(env, "SSE_KEEPALIVE_MS", intToString(tomlInt(toml, "sse_keepalive_ms")), "sse_keepalive_ms"),

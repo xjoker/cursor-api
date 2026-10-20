@@ -9,6 +9,10 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { getApiKeyById, getKeyUsageRow, insertApiKey, openDb, SCHEMA_VERSION } from "../dist/db.js";
 import {
+  clearRecentRuns,
+  configureQuotaReserve,
+  recentRunAverage,
+  recordRunTokens,
   admitKeyRequest,
   canonicalTimeZone,
   estimateTokens,
@@ -240,12 +244,16 @@ test("parked slots count toward max_concurrent unless the request resumes that a
 // --- K10 / K12 / K20 / F5 -----------------------------------------------------------------------
 
 test("K10: a quota-only key prechecks the model before charging (404 costs nothing)", { timeout: 20_000 }, async () => {
-  const gateway = await startFakeGateway({}, { keyPolicy: { quota_requests: 5 } });
+  // quota_requests = 0: without the model precheck the request would hit the quota first (429).
+  const gateway = await startFakeGateway({}, { keyPolicy: { quota_requests: 0, quota_tokens: 100 } });
   try {
     const res = await fetch(`${gateway.baseUrl}/v1/chat/completions`, { method: "POST", headers: HEADERS, body: JSON.stringify({ model: "no-such-model", messages: [{ role: "user", content: "hi" }] }) });
-    assert.equal(res.status, 404);
+    assert.equal(res.status, 404, "unknown model wins over the exhausted quota");
+    assert.equal((await res.json()).error.code, "model_not_found");
     const usage = await usageOf(gateway);
-    assert.equal(usage.requests, 0);
+    assert.deepEqual([usage.requests, usage.tokens, usage.in_flight], [0, 0, 0], "nothing charged, nothing reserved, no slot held");
+    const known = await fetch(`${gateway.baseUrl}/v1/chat/completions`, { method: "POST", headers: HEADERS, body: JSON.stringify({ model: "fake-model", messages: [{ role: "user", content: "hi" }] }) });
+    assert.equal(known.status, 429, "a valid model then meets the quota");
   } finally {
     await gateway.stop();
   }
@@ -362,6 +370,93 @@ test("P3: admin returns the effective max-mode permission and warns when the gat
     assert.deepEqual([body.effective_allow_max_mode, body.warnings], [false, undefined]);
     body = await (await patch(gateway, { allow_max_mode: true })).json();
     assert.deepEqual([body.effective_allow_max_mode, body.warnings], [true, undefined]);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+// --- Round 3 (Elliot r2): R2-1 realistic reservations, R2-2 abort floor ---------------------------
+
+test("R2-2: usage source charges max(upstream usage, estimate) for aborted / failed runs", () => {
+  const base = { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, usageKnown: true, usageScope: "run", quota_estimate_tokens: 50 };
+  assert.equal(runScopedUsageSource({ ...base, status: "cancelled" }), 50, "zero usage after cancel → estimate");
+  assert.equal(runScopedUsageSource({ ...base, status: "error" }), 50);
+  assert.equal(runScopedUsageSource({ ...base, status: "cancelled", usage: { ...base.usage, total_tokens: 80 } }), 80, "larger upstream usage wins");
+  assert.equal(runScopedUsageSource({ ...base, status: "finished" }), 0, "finished runs trust upstream usage");
+});
+
+test("R2-2 e2e: an abort with zero upstream usage still charges the estimate of what was produced", { timeout: 30_000 }, async () => {
+  const gateway = await startFakeGateway({ FAKE_SDK_ZERO_USAGE_ON_CANCEL: "1" }, { keyPolicy: { quota_tokens: 1_000_000 } });
+  try {
+    await abortMidRun(gateway, ...routes.chat(true));
+    const usage = await waitFor(async () => {
+      const current = await usageOf(gateway);
+      return current.in_flight === 0 && current.tokens > 0 && current.tokens < QUOTA_RESERVE_OUTPUT_TOKENS ? current : undefined;
+    }, "estimate charged");
+    assert.ok(usage.tokens >= estimateTokens(17), String(usage.tokens));
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test("R2-1: reservation covers the key's recent actual run usage", () => {
+  clearRecentRuns();
+  configureQuotaReserve({ recentRuns: 3 });
+  try {
+    const request = { messages: [{ role: "user", content: "hi" }] };
+    assert.equal(reservationFor(request, "k"), 1 + QUOTA_RESERVE_OUTPUT_TOKENS, "cold start: input estimate");
+    for (const tokens of [20_000, 20_000, 20_000, 2_000]) recordRunTokens("k", tokens);
+    assert.equal(recentRunAverage("k"), 14_000, "window of the last 3 runs");
+    assert.equal(reservationFor(request, "k"), 14_000);
+    assert.equal(reservationFor(request, "other"), 1 + QUOTA_RESERVE_OUTPUT_TOKENS, "per key");
+    configureQuotaReserve({ recentRuns: 0 });
+    assert.equal(reservationFor(request, "k"), 1 + QUOTA_RESERVE_OUTPUT_TOKENS, "0 disables");
+  } finally {
+    configureQuotaReserve({ recentRuns: 20 });
+    clearRecentRuns();
+  }
+});
+
+async function concurrentBurst(gateway, count) {
+  const statuses = await Promise.all(
+    Array.from({ length: count }, () =>
+      fetch(`${gateway.baseUrl}/v1/chat/completions`, { method: "POST", headers: HEADERS, body: JSON.stringify({ model: "fake-model", messages: [{ role: "user", content: "hi" }] }) }).then(async (res) => {
+        await res.arrayBuffer();
+        return res.status;
+      }),
+    ),
+  );
+  return statuses.filter((status) => status === 200).length;
+}
+
+async function resetUsage(gateway) {
+  const res = await fetch(`${gateway.baseUrl}/admin/api/keys/it-key/usage/reset`, { method: "POST", headers: ADMIN });
+  assert.equal(res.status, 200);
+}
+
+test("R2-1 e2e: 100 concurrent 20k-token runs under a 100k quota admit about 5, not ~98", { timeout: 60_000 }, async () => {
+  const env = { FAKE_SDK_RUN_TOKENS: "20000", FAKE_SDK_DELAY_MS: "400" };
+  let gateway = await startFakeGateway(env, { keyPolicy: { quota_tokens: 100_000 } });
+  try {
+    // Warm the key's history with one real run, then start the period from zero.
+    assert.equal(await concurrentBurst(gateway, 1), 1);
+    await resetUsage(gateway);
+    const admitted = await concurrentBurst(gateway, 100);
+    assert.ok(admitted >= 4 && admitted <= 6, `admitted ${String(admitted)}`);
+    const usage = await waitFor(async () => {
+      const current = await usageOf(gateway);
+      return current.in_flight === 0 ? current : undefined;
+    }, "settled");
+    assert.ok(usage.tokens <= 120_000, `used ${String(usage.tokens)} (≤ quota + one run)`);
+  } finally {
+    await gateway.stop();
+  }
+  // Same burst with the history disabled: the input-only reservation lets nearly everything through.
+  gateway = await startFakeGateway({ ...env, QUOTA_RESERVE_RECENT_RUNS: "0" }, { keyPolicy: { quota_tokens: 100_000 } });
+  try {
+    assert.equal(await concurrentBurst(gateway, 1), 1);
+    await resetUsage(gateway);
+    assert.ok((await concurrentBurst(gateway, 100)) > 50, "input-only reservation over-admits");
   } finally {
     await gateway.stop();
   }

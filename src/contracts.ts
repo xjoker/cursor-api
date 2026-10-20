@@ -38,6 +38,8 @@ export interface AppConfig {
    * automatically for those). When false the gateway picks a non-max variant or rejects.
    */
   allowMaxMode: boolean;
+  /** Per-key token reservation also covers the average of the key's last N runs (0 = off). */
+  quotaReserveRecentRuns: number;
   /** SSE comment heartbeat interval while a stream is open; 0 disables it. */
   sseKeepaliveMs: number;
   /** Failed authentication attempts allowed per address each minute; 0 disables throttling. */
