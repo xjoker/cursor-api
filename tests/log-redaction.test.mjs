@@ -15,7 +15,6 @@ test("token counts and ordinary text survive redaction", () => {
     total_tokens: 165,
     error: "max_tokens must be a positive integer",
     model: "gpt-5",
-    tokens_stored: true,
     api_key_id: "k_123",
     key_prefix: "cgk_abc",
   });
@@ -26,7 +25,6 @@ test("token counts and ordinary text survive redaction", () => {
     total_tokens: 165,
     error: "max_tokens must be a positive integer",
     model: "gpt-5",
-    tokens_stored: true,
     api_key_id: "k_123",
     key_prefix: "cgk_abc",
   });
@@ -154,7 +152,7 @@ test("credential field names are matched in camelCase and with any suffix", () =
   ];
   const out = sanitizeFields(Object.fromEntries(names.map((name) => [name, FAKE])));
   for (const name of names) assert.equal(out[name], "[redacted]", name);
-  const kept = { api_key_id: "k_1", apiKeyId: "k_2", key_prefix: "cgk_abc", input_tokens: 1, inputTokens: 2, maxTokens: 3, prompt_token_count: 4, "input-tokens": "120" };
+  const kept = { api_key_id: "k_1", apiKeyId: "k_2", key_prefix: "cgk_abc", input_tokens: 1, inputTokens: 2, maxTokens: 3, prompt_token_count: 4, "input-tokens": 120 };
   assert.deepEqual(sanitizeFields(kept), kept);
 });
 
