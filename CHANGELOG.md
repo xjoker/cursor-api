@@ -9,84 +9,29 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
-## [Unreleased]
-
-### Changed
-
-- 升级 `@cursor/sdk` 至 1.0.38。`zod` 改为 SDK 的 peer 依赖（npm 自动安装，无需手动添加）。
-- **Max mode 计费提示**：新版 SDK 只要「与 params 匹配的目录变体全部是 max-only」就会自动以 max mode 发送；调用方显式传 `maxMode: false` 会被 SDK 覆盖。网关以默认变体参数为基础，所以默认变体是 max-only 的模型只写模型名也会走 max（默认行为保持不变）。
-- 1.0.38 每次 send 都会按目录解析模型；目录暂时不可用时抛出的可重试 `ConfigurationError` 现在映射为 `503 upstream_unavailable`（原来是 400）。
-
-### Changed (BREAKING)
-
-- **BREAKING：Usage 口径对齐 OpenAI**：SDK 的 `inputTokens` 不含缓存，现在 `prompt_tokens = input + cacheRead + cacheWrite`，`total_tokens = prompt + completion`（之前 `prompt + completion ≠ total`）。`prompt_tokens_details.cached_tokens` = 缓存读，`completion_tokens_details.reasoning_tokens` 在模型上报时返回。Responses 同口径；Anthropic `input_tokens` 仍不含缓存。请求日志 `input_tokens` 从此含缓存。
-  - 下游需要调整：自行计算 `prompt_tokens + cached_tokens` 的客户端会重复计数；按 `prompt_tokens` 对账或计价的数字会变大。
-  - 升级时，请求日志里旧行的 `input_tokens` 会一次性改写为含缓存的口径（以 `user_version` < 11 为条件），管理台的汇总不会混用两种口径。回滚到旧版本后，这些行仍然是新口径。
+## [20261020.2] — 2026-10-20
 
 ### Added
 
-- `allow_max_mode`（`ALLOW_MAX_MODE`，默认 `true`）：设为 `false` 时网关按 SDK 的同一规则检测 max mode，自动换成非 max 变体，无法换时返回 `403 max_mode_not_allowed`（覆盖 `params`、`variant`、`reasoning_effort`、Anthropic `output_config.effort`、模型别名、续会话和换 Key 重试）。
-- `allow_max_mode=false` 加固（Elliot 第 2 轮审查）：只在 max 变体里出现的参数值（如 `context=1m` 混搭 `reasoning_effort=low`）一律 `403`，不再原样放行；`Agent.create`/`resume`/`send` 后检查 SDK 实际解析的 `agent.model` / `run.model`，是 max 就释放 agent / 取消 run 并 403（禁用时流式输出会等这一步检查完再开始）；回退变体同分时按参数字典序决定，不依赖目录顺序；软提示被丢弃时写日志；设置了 `CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON` 时启动告警。
-- Max mode 第 4 轮（Elliot 第 3 轮审查）：
-  - `params` 按目录规范值转发（`1M`、`"1m context"` → `1m`），max-only 检查也不区分大小写。
-  - resume 路径上 send 阶段被拦不再重放（避免 max 请求发 2 次）。
-  - send 阶段被拦的请求日志记 `max_mode=1`；文档写明 send 阶段只能「发出后取消」。
-- 请求日志新增 `max_mode` 列（记录 SDK 实际解析值）（1/0，未跑到 run 时为空），`GET /admin/api/logs` 返回该字段；系统日志 `chat/messages/responses completed` 带 `max_mode`。
-- `/v1/models` 的 `variants[]` 对仅支持 max mode 的变体返回 `is_max_mode: true`。
-- **按 Key 的模型策略与配额**（SAF-95）：客户端 Key 新增 `allowed_models`（精确 / `*` 通配，别名无法绕过，`/v1/models` 按 Key 过滤，`403 model_not_allowed`）、`allow_max_mode`（`null` 继承全局，`true/false` 覆盖）、`quota_requests` / `quota_tokens`（`total` / `daily` / `monthly`，按 `quota_tz` 时区；请求数原子预扣、run 未启动则退还；Token 为软上限，结束后按单次 run 用量累加）、`max_concurrent`。超额返回 `429 insufficient_quota`（带 `Retry-After`），超并发返回 `429 concurrency_limit_exceeded`。
-- 管理 API：`PATCH /admin/api/keys/{id}`、`GET /admin/api/keys/{id}/usage`、`POST /admin/api/keys/{id}/usage/reset`；`POST /admin/api/keys` 与 `GET /admin/api/keys` 支持 / 返回策略字段与本周期用量。管理台「客户端 Key」新增策略编辑。
-- 数据库：`api_keys` 新增策略列、新表 `api_key_usage`，schema 版本 10（与 max_mode 的 9 合并升级）。旧 Key 迁移后不受限制。
-- **`reasoning_effort` 改为软提示**（Chat Completions / Responses 顶层 / Messages）：模型取值精确匹配优先，否则映射到最接近档位，模型没有 effort 参数时忽略（之前 400）；只有非标准且模型也没有的值才 400。
-- `quota_cache_read_weight`（全局 `QUOTA_CACHE_READ_WEIGHT`，默认 1.0，与之前一致；Key 级同名字段可覆盖）：缓存读 Token 计入 Token 配额的权重。schema 版本 11。gateway.toml 现支持小数。
-- #41 审查第 1 轮返工（Elliot）：
-  - 「最接近档位」映射和布尔思考开关不再选只在 max 变体里出现的取值（即使允许 max），只有精确的显式取值才可能走 max。
-  - 关闭 max 时，Chat `reasoning_effort` 与 Responses / Anthropic 的 effort 行为一致：降到最高的非 max 档位，不再 403；显式的 `variant` / `params` 仍然 403。
-  - TOML 整数键写成小数（如 `auth_failure_limit = 0.5`、`5.0`）启动时直接报错；`quota_cache_read_weight = true` 也报错。
-- SAF-95 审查第 1 轮返工（Elliot）：
-  - 客户端中断：run 启动后中断按 run 用量计 Token，拿不到用量时按估算计。
-  - `quota_tokens` 准入时预留估算值，结束后多退少补，并发不再能成倍超额。
-  - 挂起的工具轮在挂起时按估算计费，并占用 `max_concurrent` 槽直到续轮或超时。
-  - 午夜夏令时时区的 `resets_at` 不再早 1 小时。
-  - 删 Key 后在途请求不再写回孤儿 usage 行。
-  - `quota_tz` 存规范 IANA 名，拒绝 UTC 偏移，读时回退 UTC。
-  - 准入预检不再计入上游 Key 统计，也不推进轮转。
-  - `PRAGMA user_version` 写入 schema 版本，迁移容忍并发的 duplicate column。
-  - **全局 `ALLOW_MAX_MODE=false` 是硬上限**，按 Key 的 `allow_max_mode` 只能进一步收紧（实际生效 = 全局 AND Key）。
-  - 管理接口返回 `effective_allow_max_mode`，Key 设为 `true` 但被全局上限压住时带 `warnings`；管理台显示实际生效值。
-- 已知限制：暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。挂起的工具轮先按估算计费，续轮再补计实际差额。
-- SAF-95 审查第 3 轮（最终轮，Elliot r2）：
-  - `quota_tokens` 预留取「输入估算」和「该 Key 最近 N 次 run 的平均实际用量」中的较大者（`QUOTA_RESERVE_RECENT_RUNS`，默认 20；0 关闭）。额度 100k、100 个 20k 并发时约放行 5 个，原来是 98 个。
-  - 中断或失败的 run 按 `max(上游 usage, 本地估算)` 计费，取消后上游报 0 也不会计 0。
-  - K10 测试改为断言 404（而不是 429），并检查退款后的状态。
-  - 回滚说明补充 3 条：回滚期间的用量不补记；旧版本删除 Key 会留下孤儿行；每次启动都把 schema 版本写成 10。
+- 客户端 Key 支持模型白名单、请求与 Token 配额、每日/月度周期及并发上限；管理台可编辑策略、查看和重置本期用量。
+- `allow_max_mode` 默认开启；关闭时限制 SDK 自动选择 max 变体，全局关闭是硬上限，Key 只能进一步收紧。SDK 已发送的 max run 只能取消，可能仍产生费用。
+- `quota_cache_read_weight` 控制缓存读 Token 的配额权重，默认 1；准入预留参考最近 20 次 run 用量，可通过 `quota_reserve_recent_runs` 调整。
+- Chat 支持 OpenRouter reasoning 对象与双字段推理输出；支持尽力而为的 JSON 输出格式，不保证合法 JSON 或 schema 合规。
+- `enforce_output_limits` 默认关闭；开启后执行三协议输出长度和 stop 序列限制，Token 按每 4 字符估算，触发时取消上游 run。
+- `GET /v1/responses/{id}` 按客户端 Key 隔离读取内存中的 Response；1 小时过期，每 Key 100 条、总计 1000 条，重启丢失，`store:false` 不保存。
+- `history_resume` 默认关闭；开启后按 Key、user 和完整历史复用已完成的 agent，记录一次性使用，agent 忙时显式续接返回 409。未证实能节省上游计费 Token。
 
-- **OpenAI 兼容补全**（SAF-95 PR B）：
-  - Chat Completions 接受 OpenRouter 风格 `reasoning: { effort, max_tokens, enabled, exclude }`（软提示，不 400；`exclude: true` 不返回思考文本）。
-  - 思考文本同时以 `reasoning_content` 和 `reasoning` 返回（非流式 `message`、流式 `delta`）。
-  - `enforce_output_limits`（`ENFORCE_OUTPUT_LIMITS`，默认 `false` = 行为不变）：网关执行 `max_tokens` / `max_completion_tokens` / `max_output_tokens` / Messages `max_tokens` 与 `stop` / `stop_sequences`，截断并取消 run，返回 `length`（Responses `incomplete`、Messages `max_tokens`）或 `stop`（Messages `stop_sequence`）。Token 按 4 字符估算。
-  - `ignore_sampling_params` 额外忽略 OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`；`stream_options.include_obfuscation` 接受并忽略。
-  - `response_format` `json_object` / `json_schema` 与 Responses `text.format` 尽力而为：上游 prompt 附加 JSON 指令，非流式去掉外层代码块，非法 JSON 写日志。
-  - `GET /v1/responses/{id}`：内存保存已完成的 Response（按 Key、1 小时、每个 Key 最多 100 条、总共最多 1000 条，`store: false` 不保存）。
-- #42 审查第 1 轮返工（Elliot）：
-  - `reasoning.exclude: true` 只影响返回给客户端的内容，思考文本照常计入配额估算。
-  - JSON 模式附加的指令和 schema 计入配额估算和准入预留。
-  - 工具结果续轮使用本次请求的 `max_tokens` / `stop` / `stream` / 输出格式 / `exclude`，不再沿用首轮。
-  - `GET /v1/responses/{id}` 路径编码错误返回 400（原来 500）。
-  - `stop` 每项最长 256 字符；Messages `stop_sequences` 最多 16 个、每项最长 256 字符。
-  - 同时传 `max_completion_tokens` 和 `max_tokens` 时两者都校验。
-  - Response 存储按 Key 限 100 条；总量满时淘汰条目最多的 Key 的最旧条目，一个 Key 不能挤掉其他 Key 的数据。
-- **按历史 hash 续用 agent**（SAF-95 PR C）：`history_resume`（`HISTORY_RESUME`，默认 `false`，需主动开启：实测续用回合的未缓存输入没有减少，反而多出缓存读，计费 Token 上升）。客户端没有 `conversation_id` 时，历史匹配上一个已完成回合就续用该 agent，只发送新消息；一次性匹配，按 Key 隔离，内存 1 小时；截断或 JSON 模式的回复不记录；续用失败回退完整 transcript。
-- #44 审查第 1 轮返工（Elliot）：
-  - 记录真正一次性：取用即删除；agent 被 `previous_response_id` / `conversation_id` 续用、工具续轮或更新回合使用时，指向它的记录全部作废。加入按 agent 的进行中锁：hash 命中忙碌 agent 时改用新 agent，显式续用遇忙返回 409。
-  - 续用回合在没有上游 usage 时按完整 transcript 估算配额，与 `HISTORY_RESUME=false` 一致（工具轮预扣同样）。
-  - 上限改为每个 Key 10000 条，过期条目主动清理；请求带 `user` 时按 `user` 区分；禁用或删除 Key 时立即清除其记录。
-  - 关闭时不再计算 hash；合入 Elliot 的 killer 测试。
-  - 回滚：设 `HISTORY_RESUME=false` 重启即可，只有内存状态，没有 schema 变更。
+### Changed
 
----
+- 升级 `@cursor/sdk` 至 1.0.38，新增模型变体 `is_max_mode`，可重试的目录配置错误返回 503。
+- **BREAKING：OpenAI usage 输入包含缓存读写**，`prompt_tokens + completion_tokens = total_tokens`；Responses 同口径，Anthropic 保持未缓存输入与缓存分列。schema 11 会一次性改写旧请求日志的输入计数；回滚后旧行仍保留新口径。
+- 推理档位采用模型可支持的相近档位；精确 variant / params 继续校验，软提示不会选中仅 max 可用的值。
+- Token 配额是软上限：准入原子预留，run 未启动时退还，完成后按单次用量结算；中断、失败及缺少 usage 时计入估算，工具停车占用并发槽。冷启动及在途请求仍可能超额。
+
 ### Fixed
 
-- 测试默认不出网（SAF-102）：`tests/http-smoke.test.mjs` 改用假 SDK（原来会拿假 Key 请求真实 Cursor）；`npm test` 改为 `scripts/run-tests.mjs`，通过 `NODE_OPTIONS` 给所有测试进程和子进程预加载网络守卫，任何非回环连接（含 http/https/http2/fetch）、DNS 解析和 UDP 发送都会被拦截并让整个测试失败，`localhost` 按解析结果判断；测试临时目录放在运行专用的 `TMPDIR` 里，跑完删除。新增 `npm run test:offline`（Linux，`unshare -rn`，去掉凭据类变量），CI 和发布流程的测试 job 都改跑它。CI 的 Docker 健康检查改为 `--network none`；发布流程只有 docker job 有 `packages: write`。
+- 请求和响应日志入库前递归脱敏，遮盖模型字段、上游错误和凭据形状；详细日志在截断前脱敏，仍应谨慎开启以保护普通提示词内容。
+- 测试默认使用假 SDK 和出网守卫；Linux CI 使用空网络命名空间。临时目录检查同样保留守卫，新功能测试结束后回收临时目录。
 
 ## [20261020.1] — 2026-10-20
 

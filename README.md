@@ -301,10 +301,10 @@ Token accounting limits:
 - Charge per request, in order: (1) the SDK's per-run usage (`run.wait().usage`); for runs that were aborted or failed after starting, the larger of that usage and the estimate in (2), so partial or zero usage reported after a cancel never undercharges; (2) otherwise a conservative estimate: input sent upstream plus streamed text, thinking and tool-call arguments, at ~4 characters per token (client abort without usage, cumulative-only usage); (3) if nothing at all is known (the run failed after starting), the admission reservation stays as the charge. Cumulative agent totals are never charged, because they would double count continued conversations. The source is pluggable for a future per-run usage API.
 - Turns that end in client tool calls (suspended runs) are charged the estimate when the response is sent, so an abandoned tool round is never free. When the tool results come back and the run finishes, the run's actual usage minus what was already charged is added (never negative).
 - A request whose run never started (validation errors, failed send) is refunded: request count and reservation.
-- Database: `PRAGMA user_version` records the schema version (10). Rolling back to a build older than v10 ignores the policy columns, i.e. **every client key becomes unrestricted**; upgrading again restores the policies.
+- Database: `PRAGMA user_version` records the schema version (11). Rolling back to a build older than v10 ignores the policy columns, i.e. **every client key becomes unrestricted**; upgrading again restores the policies.
   - Usage made while rolled back is not back-filled into `api_key_usage` after upgrading again.
   - On the old build, deleting a key leaves its `api_key_usage` rows behind (orphans; harmless, not counted).
-  - The schema version is written as 10 on every start, also when an older build had set it differently.
+  - Upgrading from a schema below 11 adds cached reads/writes to historical `request_logs.input_tokens` once and records version 11. Back up SQLite using its online backup API, or stop the gateway and back up its data directory before upgrading; rolling back code does not undo these counts.
 - Cost (USD) quotas are not available yet: local SDK agents do not expose per-request cost.
 
 ---
