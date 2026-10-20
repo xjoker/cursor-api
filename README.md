@@ -236,6 +236,8 @@ print(client.chat.completions.create(
 
 Browser console at `/admin/`: overview (including a 7-day call chart), client keys (create / disable / enable / delete / policy & quota), request logs, and system logs.
 
+The overview shows the running version, commit, database schema, and effective runtime settings (read-only). Request logs translate common failure codes while retaining the original code and display Max mode as Max, Standard, or Not recorded; an unrecorded mode does not establish whether an upstream request ran or incurred charges.
+
 Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`). `DELETE /admin/api/keys/{id}` removes a client key and keeps its request logs. `GET /admin/api/system-logs` lists gateway stdout/stderr events stored in SQLite. `GET /admin/api/cursor-keys` shows the upstream key pool (sha256 fingerprint, `healthy` / `cooling_down`, failure counters; keys are never returned). The overview includes `cursor_keys: {total, healthy}`.
 
 ### Per-key model policy and quotas

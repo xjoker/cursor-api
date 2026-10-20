@@ -505,6 +505,60 @@
       overflow-wrap: anywhere;
     }
 
+    .overview-settings { margin-bottom: 16px; }
+    .overview-settings .panel-head .hint { color: var(--muted); }
+    .settings-list {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      margin: 0;
+      background: var(--border-soft);
+      border: 1px solid var(--border-soft);
+    }
+    .settings-list .setting-item {
+      min-width: 0;
+      padding: 10px 12px;
+      background: var(--field);
+    }
+    .settings-list dt {
+      color: var(--muted);
+      font-size: var(--text-xs);
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .settings-list dd { margin: 4px 0 0; min-width: 0; }
+    .settings-list .setting-value {
+      display: block;
+      color: var(--fg-2);
+      font-family: var(--font-mono);
+      font-size: var(--text-sm);
+      font-weight: 600;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .settings-list .setting-note {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .error-summary {
+      display: inline-flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 6px;
+      max-width: 20rem;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .error-summary code { font-size: 11px; }
+    .logs-table td.error-cell { white-space: normal; }
+    .status-stack .tag + .tag { margin-left: 2px; }
+
     /* ─── Panels / tables ─────────────────────────────────────────── */
     .panel {
       background: var(--surface);
@@ -765,6 +819,7 @@
     }
     @media (max-width: 1100px) and (min-width: 861px) {
       .cards-group { grid-template-columns: 1fr 1fr; }
+      .settings-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .filters .filter-item label .hint { display: none; }
     }
     @media (max-width: 860px) {
@@ -772,6 +827,7 @@
         grid-template-columns: minmax(0, 1fr);
         grid-template-rows: auto minmax(0, 1fr);
       }
+      .settings-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       nav {
         height: auto;
         max-height: none;
@@ -817,6 +873,7 @@
     }
     @media (max-width: 560px) {
       .cards-group { grid-template-columns: 1fr; }
+      .settings-list { grid-template-columns: 1fr; }
       .filters .filter-item,
       .filters .filter-item.range,
       .filters .filter-item.page { flex: 1 1 100%; max-width: none; }
@@ -995,6 +1052,15 @@
           <p id="overview-retention-hint" data-i18n="overview.hint">Gateway status, token totals, and the OpenAI base URL for clients.</p>
         </div>
         <div id="overview-cards"></div>
+        <div class="panel overview-settings">
+          <div class="panel-head">
+            <h3 data-i18n="overview.config">Effective runtime configuration</h3>
+            <span class="hint" data-i18n="overview.configHint">Read-only</span>
+          </div>
+          <dl id="runtime-settings" class="settings-list">
+            <div class="setting-item"><dt data-i18n="common.loading">Loading</dt><dd></dd></div>
+          </dl>
+        </div>
         <div class="panel" id="calls-panel">
           <div class="panel-head">
             <h3 data-i18n="overview.calls">Calls last 7 days</h3>
@@ -1209,6 +1275,35 @@
       "nav.upstream": "上游状态",
       "overview.title": "总览",
       "overview.hint": "网关状态、{days} 天 Token 账本，以及给客户端复制的 OpenAI 入口。",
+      "overview.config": "当前生效配置",
+      "overview.configHint": "只读；来自当前运行实例",
+      "overview.gitCommit": "Git commit",
+      "overview.gitCommitHint": "完整提交 SHA",
+      "overview.schemaVersion": "Schema version",
+      "overview.schemaVersionHint": "数据结构版本",
+      "overview.setting.rateLimit": "每 Key 生成请求上限",
+      "overview.setting.rateLimitHint": "Chat / Responses；当前进程内每个 Key 滚动 60 秒；0 = 关闭",
+      "overview.setting.allowMax": "Max mode",
+      "overview.setting.allowMaxHint": "全局硬上限",
+      "overview.setting.outputLimits": "网关输出限制",
+      "overview.setting.outputLimitsHint": "执行 max_tokens / stop",
+      "overview.setting.historyResume": "历史续接",
+      "overview.setting.historyResumeHint": "按匹配历史续接已完成对话",
+      "overview.setting.ignoreSampling": "忽略采样参数",
+      "overview.setting.ignoreSamplingHint": "丢弃不支持的采样项",
+      "overview.setting.sseKeepalive": "SSE 保活间隔",
+      "overview.setting.sseKeepaliveHint": "空闲流注释；0 = 关闭",
+      "overview.setting.maxLiveSessions": "活动会话上限",
+      "overview.setting.maxLiveSessionsHint": "运行中或等待工具结果的会话",
+      "overview.setting.conversationTtl": "对话映射保留",
+      "overview.setting.conversationTtlHint": "未使用映射保留天数",
+      "overview.on": "开启",
+      "overview.off": "关闭",
+      "overview.allowed": "允许",
+      "overview.denied": "禁止",
+      "overview.unknownValue": "未知",
+      "overview.sessionsUnit": "个会话",
+      "overview.daysUnit": "天",
       "overview.tokens": "各模型进出 Token",
       "overview.last7": "最近 {days} 天",
       "overview.openai": "给客户端用的 OpenAI 入口",
@@ -1339,6 +1434,9 @@
       "logs.body": "正文",
       "logs.clickDetail": "点击查看详情",
       "logs.upGate": "上游 {up} · 网关 {gw}",
+      "logs.maxModeMax": "Max",
+      "logs.maxModeStandard": "普通",
+      "logs.maxModeUnknown": "未记录",
       "logs.days": "{days} 天",
       "logs.httpStatus": "HTTP 状态：",
       "logs.prev": "上一页",
@@ -1368,6 +1466,7 @@
       "modal.up": "上游耗时",
       "modal.gw": "网关耗时",
       "modal.err": "错误",
+      "modal.maxMode": "Max mode",
       "modal.in": "输入 Token",
       "modal.out": "输出 Token",
       "modal.total": "合计 Token",
@@ -1406,6 +1505,29 @@
       "err.fetch": "连不上网关。确认 cursor-api 进程已在跑，且本文件由其进程同源提供。",
       "err.copyEmpty": "没有可复制的内容",
       "err.copyFail": "复制失败，请手动选中",
+      "errorReason.invalid_request": "请求不符合接口要求",
+      "errorReason.invalid_json": "请求体不是有效 JSON",
+      "errorReason.payload_too_large": "请求体过大",
+      "errorReason.model_not_found": "模型不存在",
+      "errorReason.not_found": "资源不存在",
+      "errorReason.model_not_allowed": "客户端 Key 策略禁止该模型",
+      "errorReason.max_mode_not_allowed": "策略禁止 Max mode",
+      "errorReason.conversation_busy": "对话仍在处理中",
+      "errorReason.conversation_key_unknown": "对话所属上游 Key 未知",
+      "errorReason.conversation_key_unavailable": "对话所属上游 Key 不可用",
+      "errorReason.authentication_error": "客户端认证失败",
+      "errorReason.permission_error": "权限不足",
+      "errorReason.rate_limit_exceeded": "客户端 Key 频率上限已达",
+      "errorReason.insufficient_quota": "客户端 Key 配额已用尽",
+      "errorReason.concurrency_limit_exceeded": "客户端 Key 并发上限已达",
+      "errorReason.too_many_sessions": "网关会话上限已达",
+      "errorReason.rate_limit_error": "上游限流",
+      "errorReason.upstream_authentication_error": "上游认证失败",
+      "errorReason.upstream_timeout": "上游超时",
+      "errorReason.upstream_unavailable": "上游暂不可用",
+      "errorReason.upstream_error": "上游请求失败",
+      "errorReason.cancelled": "请求已取消",
+      "errorReason.server_error": "网关内部错误",
     };
     const EN = {
       "title": "cursor-api Admin",
@@ -1425,6 +1547,35 @@
       "nav.upstream": "Upstream",
       "overview.title": "Overview",
       "overview.hint": "Gateway status, {days}-day token ledger, and the OpenAI base URL for clients.",
+      "overview.config": "Effective runtime configuration",
+      "overview.configHint": "Read-only; from this running instance",
+      "overview.gitCommit": "Git commit",
+      "overview.gitCommitHint": "Full commit SHA",
+      "overview.schemaVersion": "Schema version",
+      "overview.schemaVersionHint": "Data structure version",
+      "overview.setting.rateLimit": "Generation requests per key",
+      "overview.setting.rateLimitHint": "Chat / Responses; per client key in this process, rolling 60s; 0 = off",
+      "overview.setting.allowMax": "Max mode",
+      "overview.setting.allowMaxHint": "Global hard ceiling",
+      "overview.setting.outputLimits": "Gateway output limits",
+      "overview.setting.outputLimitsHint": "Enforce max_tokens / stop",
+      "overview.setting.historyResume": "History resume",
+      "overview.setting.historyResumeHint": "Resume a completed conversation on a history match",
+      "overview.setting.ignoreSampling": "Ignore sampling params",
+      "overview.setting.ignoreSamplingHint": "Drop unsupported sampling knobs",
+      "overview.setting.sseKeepalive": "SSE keepalive interval",
+      "overview.setting.sseKeepaliveHint": "Idle stream comments; 0 = off",
+      "overview.setting.maxLiveSessions": "Live session cap",
+      "overview.setting.maxLiveSessionsHint": "Running or waiting for tool results",
+      "overview.setting.conversationTtl": "Conversation mapping retention",
+      "overview.setting.conversationTtlHint": "Days to retain unused mappings",
+      "overview.on": "On",
+      "overview.off": "Off",
+      "overview.allowed": "Allowed",
+      "overview.denied": "Denied",
+      "overview.unknownValue": "Unknown",
+      "overview.sessionsUnit": "sessions",
+      "overview.daysUnit": "days",
       "overview.tokens": "Tokens by model",
       "overview.last7": "Last {days} days",
       "overview.openai": "OpenAI endpoint for clients",
@@ -1555,6 +1706,9 @@
       "logs.body": "body",
       "logs.clickDetail": "Click for detail",
       "logs.upGate": "up {up} · gw {gw}",
+      "logs.maxModeMax": "Max",
+      "logs.maxModeStandard": "Standard",
+      "logs.maxModeUnknown": "Not recorded",
       "logs.days": "{days} days",
       "logs.httpStatus": "HTTP status: ",
       "logs.prev": "Prev",
@@ -1584,6 +1738,7 @@
       "modal.up": "Upstream",
       "modal.gw": "Gateway",
       "modal.err": "Error",
+      "modal.maxMode": "Max mode",
       "modal.in": "Input tokens",
       "modal.out": "Output tokens",
       "modal.total": "Total tokens",
@@ -1622,7 +1777,67 @@
       "err.fetch": "Cannot reach the gateway. Confirm cursor-api is running and this page is same-origin.",
       "err.copyEmpty": "Nothing to copy",
       "err.copyFail": "Copy failed — select manually",
+      "errorReason.invalid_request": "Invalid request",
+      "errorReason.invalid_json": "Invalid JSON body",
+      "errorReason.payload_too_large": "Request body too large",
+      "errorReason.model_not_found": "Model not found",
+      "errorReason.not_found": "Resource not found",
+      "errorReason.model_not_allowed": "Model blocked by client key policy",
+      "errorReason.max_mode_not_allowed": "Max mode blocked by policy",
+      "errorReason.conversation_busy": "Conversation is still busy",
+      "errorReason.conversation_key_unknown": "Conversation owner key is unknown",
+      "errorReason.conversation_key_unavailable": "Conversation owner key is unavailable",
+      "errorReason.authentication_error": "Client authentication failed",
+      "errorReason.permission_error": "Permission denied",
+      "errorReason.rate_limit_exceeded": "Client key rate limit reached",
+      "errorReason.insufficient_quota": "Client key quota exhausted",
+      "errorReason.concurrency_limit_exceeded": "Client key concurrency limit reached",
+      "errorReason.too_many_sessions": "Gateway session capacity reached",
+      "errorReason.rate_limit_error": "Upstream rate limit",
+      "errorReason.upstream_authentication_error": "Upstream authentication failed",
+      "errorReason.upstream_timeout": "Upstream timed out",
+      "errorReason.upstream_unavailable": "Upstream unavailable",
+      "errorReason.upstream_error": "Upstream request failed",
+      "errorReason.cancelled": "Request cancelled",
+      "errorReason.server_error": "Gateway internal error",
     };
+
+    const RUNTIME_SETTING_FIELDS = Object.freeze([
+      { name: "rate_limit_per_key", label: "overview.setting.rateLimit", hint: "overview.setting.rateLimitHint" },
+      { name: "allow_max_mode", label: "overview.setting.allowMax", hint: "overview.setting.allowMaxHint" },
+      { name: "enforce_output_limits", label: "overview.setting.outputLimits", hint: "overview.setting.outputLimitsHint" },
+      { name: "history_resume", label: "overview.setting.historyResume", hint: "overview.setting.historyResumeHint" },
+      { name: "ignore_sampling_params", label: "overview.setting.ignoreSampling", hint: "overview.setting.ignoreSamplingHint" },
+      { name: "sse_keepalive_ms", label: "overview.setting.sseKeepalive", hint: "overview.setting.sseKeepaliveHint" },
+      { name: "max_live_sessions", label: "overview.setting.maxLiveSessions", hint: "overview.setting.maxLiveSessionsHint" },
+      { name: "conversation_ttl_days", label: "overview.setting.conversationTtl", hint: "overview.setting.conversationTtlHint" },
+    ]);
+
+    const ERROR_CODE_REASON_KEYS = new Map([
+      ["invalid_request", "errorReason.invalid_request"],
+      ["invalid_json", "errorReason.invalid_json"],
+      ["payload_too_large", "errorReason.payload_too_large"],
+      ["model_not_found", "errorReason.model_not_found"],
+      ["not_found", "errorReason.not_found"],
+      ["model_not_allowed", "errorReason.model_not_allowed"],
+      ["max_mode_not_allowed", "errorReason.max_mode_not_allowed"],
+      ["conversation_busy", "errorReason.conversation_busy"],
+      ["conversation_key_unknown", "errorReason.conversation_key_unknown"],
+      ["conversation_key_unavailable", "errorReason.conversation_key_unavailable"],
+      ["authentication_error", "errorReason.authentication_error"],
+      ["permission_error", "errorReason.permission_error"],
+      ["rate_limit_exceeded", "errorReason.rate_limit_exceeded"],
+      ["insufficient_quota", "errorReason.insufficient_quota"],
+      ["concurrency_limit_exceeded", "errorReason.concurrency_limit_exceeded"],
+      ["too_many_sessions", "errorReason.too_many_sessions"],
+      ["rate_limit_error", "errorReason.rate_limit_error"],
+      ["upstream_authentication_error", "errorReason.upstream_authentication_error"],
+      ["upstream_timeout", "errorReason.upstream_timeout"],
+      ["upstream_unavailable", "errorReason.upstream_unavailable"],
+      ["upstream_error", "errorReason.upstream_error"],
+      ["cancelled", "errorReason.cancelled"],
+      ["server_error", "errorReason.server_error"],
+    ]);
 
     function browserPrefersZh() {
       const langs = [...(navigator.languages || []), navigator.language || ""];
@@ -1869,6 +2084,75 @@
       syncLogTimer();
     }
 
+    function displayRuntimeValue(value) {
+      if (value === null || value === undefined || value === "") return t("overview.unknownValue");
+      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+        return t("overview.unknownValue");
+      }
+      return String(value);
+    }
+
+    function formatRuntimeSetting(name, value) {
+      if (name === "allow_max_mode") {
+        if (value === true) return t("overview.allowed");
+        if (value === false) return t("overview.denied");
+        return t("overview.unknownValue");
+      }
+      if (["enforce_output_limits", "history_resume", "ignore_sampling_params"].includes(name)) {
+        if (value === true) return t("overview.on");
+        if (value === false) return t("overview.off");
+        return t("overview.unknownValue");
+      }
+      if (name === "rate_limit_per_key") {
+        if (typeof value !== "number" || !Number.isFinite(value)) return displayRuntimeValue(value);
+        return value === 0 ? t("overview.off") : String(fmtNum(value)) + " / 60s";
+      }
+      if (name === "sse_keepalive_ms") {
+        if (typeof value !== "number" || !Number.isFinite(value)) return displayRuntimeValue(value);
+        return value === 0 ? t("overview.off") : String(fmtNum(value)) + " ms";
+      }
+      if (name === "max_live_sessions") {
+        if (typeof value !== "number" || !Number.isFinite(value)) return displayRuntimeValue(value);
+        return String(fmtNum(value)) + " " + t("overview.sessionsUnit");
+      }
+      if (name === "conversation_ttl_days") {
+        if (typeof value !== "number" || !Number.isFinite(value)) return displayRuntimeValue(value);
+        return String(fmtNum(value)) + " " + t("overview.daysUnit");
+      }
+      return displayRuntimeValue(value);
+    }
+
+    function renderRuntimeSettings(data) {
+      const host = $("runtime-settings");
+      if (!host) return;
+      const rawSettings = data?.settings;
+      const settings = rawSettings && typeof rawSettings === "object" && !Array.isArray(rawSettings)
+        ? rawSettings
+        : {};
+      const items = [
+        {
+          label: t("overview.gitCommit"),
+          value: displayRuntimeValue(data?.git_commit),
+          hint: t("overview.gitCommitHint"),
+        },
+        {
+          label: t("overview.schemaVersion"),
+          value: displayRuntimeValue(data?.schema_version),
+          hint: t("overview.schemaVersionHint"),
+        },
+        ...RUNTIME_SETTING_FIELDS.map((field) => ({
+          label: t(field.label),
+          value: formatRuntimeSetting(field.name, settings[field.name]),
+          hint: t(field.hint),
+        })),
+      ];
+      host.innerHTML = items.map((item) => "<div class=\"setting-item\">" +
+        "<dt>" + escapeHtml(item.label) + "</dt>" +
+        "<dd><span class=\"setting-value\">" + escapeHtml(item.value) +
+        "</span><span class=\"setting-note\">" + escapeHtml(item.hint) + "</span></dd>" +
+        "</div>").join("");
+    }
+
     function renderOverview(data) {
       const upstreamOk = data.upstream === "ok";
       const tokens = data.tokens ?? {};
@@ -1883,6 +2167,7 @@
         days: logRetentionDays,
         detail: logDetailedEnabled ? t("logs.detailOn") : t("logs.detailOff"),
       });
+      renderRuntimeSettings(data);
       const status = [
         card(t("overview.version"), String(data.version ?? ""), null, "text"),
         card(t("overview.upstream"), upstreamOk ? t("overview.upstreamOk") : t("overview.upstreamBad"), upstreamOk ? "ok" : "bad"),
@@ -2500,21 +2785,53 @@
       renderPager(limit);
     }
 
+    function maxModeLabel(value) {
+      if (value === 1) return t("logs.maxModeMax");
+      if (value === 0) return t("logs.maxModeStandard");
+      return t("logs.maxModeUnknown");
+    }
+
+    function maxModeTag(value) {
+      const label = maxModeLabel(value);
+      return "<span class=\"tag max-mode-tag\" aria-label=\"" +
+        escapeHtml(t("modal.maxMode")) + ": " + escapeHtml(label) + "\">" +
+        escapeHtml(label) + "</span>";
+    }
+
+    function errorCodeText(code) {
+      if (code === null || code === undefined || code === "") return "";
+      const raw = String(code);
+      const key = ERROR_CODE_REASON_KEYS.get(raw);
+      const reason = key ? t(key) : "";
+      return reason && reason !== raw ? reason + " (" + raw + ")" : raw;
+    }
+
+    function errorCodeHtml(code) {
+      const raw = code === null || code === undefined || code === "" ? "" : String(code);
+      if (raw === "") return '<span class="muted">—</span>';
+      const key = ERROR_CODE_REASON_KEYS.get(raw);
+      const reason = key ? t(key) : "";
+      if (!reason || reason === raw) return "<code>" + escapeHtml(raw) + "</code>";
+      return "<span class=\"error-summary\"><span>" + escapeHtml(reason) + "</span><code>" +
+        escapeHtml(raw) + "</code></span>";
+    }
+
     function logRow(row) {
-      const error = row.error_code ? escapeHtml(String(row.error_code)) : '<span class="muted">—</span>';
+      const error = errorCodeHtml(row.error_code);
       const streamTag = row.stream ? '<span class="tag">' + t("logs.stream") + '</span>' : "";
       const detailTag = row.has_detail ? '<span class="tag">' + t("logs.body") + '</span>' : "";
+      const modeTag = maxModeTag(row.max_mode);
       const id = escapeHtml(String(row.id ?? ""));
       return `<tr class="log-row" data-log-id="${id}" tabindex="0" title="${escapeHtml(t("logs.clickDetail"))}">
         <td class="muted nowrap">${escapeHtml(formatTime(row.created_at))}</td>
         <td class="nowrap"><code>${escapeHtml(String(row.key_prefix ?? row.key_name ?? ""))}</code></td>
         <td class="nowrap"><code>${escapeHtml(String(row.model ?? ""))}</code>${detailTag}</td>
-        <td class="status-cell"><span class="status-stack">${statusPill(row.http_status)}${streamTag}</span></td>
+        <td class="status-cell"><span class="status-stack">${statusPill(row.http_status)}${streamTag}${modeTag}</span></td>
         <td class="num duration-cell">${durationCell(row)}</td>
         <td class="num">${row.input_tokens == null ? "—" : fmtNum(row.input_tokens)}</td>
         <td class="num">${row.output_tokens == null ? "—" : fmtNum(row.output_tokens)}</td>
         <td class="num">${row.total_tokens == null ? "—" : fmtNum(row.total_tokens)}</td>
-        <td>${error}</td>
+        <td class="error-cell">${error}</td>
       </tr>`;
     }
 
@@ -2545,6 +2862,7 @@
         [t("modal.time"), formatTime(row.created_at)],
         [t("modal.model"), String(row.model ?? "")],
         [t("modal.status"), String(row.http_status ?? "")],
+        [t("modal.maxMode"), maxModeLabel(row.max_mode)],
         [t("modal.dur"), row.duration_ms == null ? "—" : `${fmtNum(row.duration_ms)} ms`],
         [t("modal.up"), row.upstream_ms == null ? "—" : `${fmtNum(row.upstream_ms)} ms`],
         [t("modal.gw"), row.gateway_ms == null ? "—" : `${fmtNum(row.gateway_ms)} ms`],
@@ -2589,9 +2907,10 @@
     }
 
     function detailErrorText(row) {
-      if (!row.error_code) return "—";
+      if (row.error_code === null || row.error_code === undefined || row.error_code === "") return "—";
       const extra = parseDetailField(row.response_detail, "error_message");
-      return extra ? `${String(row.error_code)}: ${extra}` : String(row.error_code);
+      const summary = errorCodeText(row.error_code);
+      return extra ? summary + ": " + extra : summary;
     }
 
     function parseDetailField(raw, key) {

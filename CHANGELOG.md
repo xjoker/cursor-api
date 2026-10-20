@@ -9,6 +9,13 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20261020.4] — 2026-10-20
+
+### Added
+
+- 管理台总览展示当前生效的非敏感运行配置、完整提交和数据库 schema；概览 API 通过显式白名单返回 `settings`，仅管理员可读。
+- 请求日志列表和详情显示 Max 模式三态，并提供常见失败原因的中英说明，保留原始错误码与上游详情。
+
 ## [20261020.3] — 2026-10-20
 
 ### Changed
