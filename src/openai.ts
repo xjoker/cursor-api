@@ -79,7 +79,7 @@ const SAMPLING_FIELDS = new Set([
 ]);
 
 const MAX_STOP_SEQUENCES = 4;
-/** Longest accepted stop sequence (Chat `stop` and Messages `stop_sequences`); bounds stream hold-back. */
+/** Longest accepted Chat stop sequence; bounds stream hold-back. */
 export const MAX_STOP_SEQUENCE_CHARS = 256;
 
 export interface ChatParseOptions {
@@ -243,7 +243,7 @@ export function parseReasoningObject(value: unknown): { effort?: string; exclude
   return result;
 }
 
-/** Same thresholds as Anthropic `thinking.budget_tokens`. */
+/** Maps a reasoning token budget to the nearest standard effort level. */
 export function effortForBudget(budget: number): string {
   if (budget <= 0) return "none";
   if (budget < 4096) return "low";

@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { toChatUsage } from "../dist/cursor.js";
-import { encodeAnthropicUsage } from "../dist/anthropic.js";
 import { loadConfig } from "../dist/config.js";
 import { getApiKeyById, getKeyUsageRow, insertApiKey, openDb } from "../dist/db.js";
 import { admitKeyRequest, configureQuota, runScopedUsageSource } from "../dist/key-policy.js";
@@ -22,15 +21,9 @@ test("SDK TokenUsage maps to OpenAI usage with consistent totals", () => {
   assert.equal(usage.cache_read_tokens, 7106);
   assert.equal(usage.reasoning_tokens, 30);
   assert.equal("reasoning_tokens" in toChatUsage({ inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2 }), false);
-  assert.deepEqual(encodeAnthropicUsage(usage), {
-    input_tokens: 14551,
-    output_tokens: 159,
-    cache_creation_input_tokens: 40,
-    cache_read_input_tokens: 7106,
-  });
 });
 
-test("all three routes report consistent usage", { timeout: 30_000 }, async () => {
+test("Chat and Responses report consistent usage", { timeout: 30_000 }, async () => {
   const gateway = await startFakeGateway();
   const headers = { authorization: `Bearer ${CLIENT_KEY}`, "content-type": "application/json" };
   const post = (path, body, extra = {}) =>
@@ -48,9 +41,6 @@ test("all three routes report consistent usage", { timeout: 30_000 }, async () =
     res = await post("/v1/responses", { model: "fake-model", input: "hi" });
     usage = (await res.json()).usage;
     assert.deepEqual([usage.input_tokens, usage.output_tokens, usage.total_tokens, usage.input_tokens_details.cached_tokens], [14, 2, 16, 3]);
-    res = await post("/v1/messages", { model: "fake-model", max_tokens: 8, messages: [{ role: "user", content: "hi" }] }, { "anthropic-version": "2023-06-01" });
-    usage = (await res.json()).usage;
-    assert.deepEqual([usage.input_tokens, usage.cache_read_input_tokens, usage.output_tokens], [11, 3, 2]);
   } finally {
     await gateway.stop();
   }

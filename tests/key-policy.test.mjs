@@ -45,12 +45,6 @@ function api(gateway) {
   return {
     chat: (body) => post("/v1/chat/completions", { messages: [{ role: "user", content: "hi" }], ...body }),
     responses: (body) => post("/v1/responses", body),
-    messages: (body) =>
-      fetch(`${gateway.baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: { ...headers, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ max_tokens: 16, messages: [{ role: "user", content: "hi" }], ...body }),
-      }),
     models: () => fetch(`${gateway.baseUrl}/v1/models`, { headers }),
     model: (id) => fetch(`${gateway.baseUrl}/v1/models/${encodeURIComponent(id)}`, { headers }),
     admin: (method, path, body) =>
@@ -266,9 +260,9 @@ test("migration: pre-SAF-95 keys come up unrestricted, and corrupt allowlists fa
 
 // --- End to end through the gateway (fake SDK) --------------------------------------------------
 
-test("e2e: allowlist on every route, /v1/models filtered, gateway alias cannot bypass", { timeout: 30_000 }, async () => {
+test("e2e: allowlist on every OpenAI route, /v1/models filtered, gateway alias cannot bypass", { timeout: 30_000 }, async () => {
   const gateway = await startFakeGateway(
-    { MODEL_ALIASES: "claude-opus-*=fake-reasoner" },
+    { MODEL_ALIASES: "client-*=fake-reasoner" },
     { keyPolicy: { allowed_models: ["fake-model"] } },
   );
   const c = api(gateway);
@@ -280,9 +274,8 @@ test("e2e: allowlist on every route, /v1/models filtered, gateway alias cannot b
     for (const send of [
       () => c.chat({ model: "fake-reasoner" }),
       () => c.chat({ model: "fake-reasoner", stream: true }),
-      () => c.chat({ model: "claude-opus-4" }),
+      () => c.chat({ model: "client-4" }),
       () => c.responses({ model: "fake-reasoner", input: "hi" }),
-      () => c.messages({ model: "claude-opus-4" }),
     ]) {
       res = await send();
       assert.equal(res.status, 403);

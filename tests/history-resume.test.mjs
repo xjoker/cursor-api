@@ -153,7 +153,7 @@ test("e2e: a failed resume falls back to the full transcript", { timeout: 20_000
   }
 });
 
-test("e2e: stateless Responses / Messages clients resume by history too", { timeout: 20_000 }, async () => {
+test("e2e: stateless Responses clients resume by history too", { timeout: 20_000 }, async () => {
   const gateway = await startFakeGateway({ HISTORY_RESUME: "true" });
   try {
     let res = await fetch(`${gateway.baseUrl}/v1/responses`, { method: "POST", headers, body: JSON.stringify({ model: "fake-model", input: "ECHO_AGENT", store: false }) });
@@ -173,18 +173,6 @@ test("e2e: stateless Responses / Messages clients resume by history too", { time
     });
     assert.equal((await res.json()).output.find((item) => item.type === "message").content[0].text, first);
 
-    const messages = (body) => fetch(`${gateway.baseUrl}/v1/messages`, { method: "POST", headers, body: JSON.stringify({ model: "fake-model", max_tokens: 100, ...body }) });
-    res = await messages({ system: "S", messages: [{ role: "user", content: "ECHO_AGENT" }] });
-    const agent = (await res.json()).content.find((block) => block.type === "text").text;
-    res = await messages({
-      system: "S",
-      messages: [
-        { role: "user", content: "ECHO_AGENT" },
-        { role: "assistant", content: [{ type: "thinking", thinking: "pondering", signature: "" }, { type: "text", text: agent }] },
-        { role: "user", content: [{ type: "text", text: "ECHO_PROMPT_TAIL" }] },
-      ],
-    });
-    assert.equal((await res.json()).content.find((block) => block.type === "text").text, "ECHO_PROMPT_TAIL");
   } finally {
     await gateway.stop();
   }

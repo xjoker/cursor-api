@@ -6,7 +6,6 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { parseAnthropicMessagesRequest } from "../dist/anthropic.js";
 import { QUOTA_RESERVE_OUTPUT_TOKENS, reservationFor } from "../dist/key-policy.js";
 import { parseChatCompletionsRequest } from "../dist/openai.js";
 import { OutputLimiter } from "../dist/output-limits.js";
@@ -203,27 +202,6 @@ test("#4: a run that still finishes after the cut never returns the untruncated 
   }
 });
 
-test("#4: Messages streaming reports the earliest matching stop_sequence", { timeout: 20_000 }, async () => {
-  const gateway = await startFakeGateway({ ENFORCE_OUTPUT_LIMITS: "true" });
-  try {
-    const res = await post(gateway, "/v1/messages", {
-      model: "fake-model",
-      max_tokens: 100,
-      stream: true,
-      stop_sequences: ["world", "STOP"],
-      messages: user("SAY<<hello STOP world>>"),
-    });
-    const events = parseSse(await res.text());
-    const text = events.filter((frame) => frame.event === "content_block_delta").map((frame) => frame.data.delta.text ?? "").join("");
-    assert.equal(text, "hello ");
-    const delta = events.find((frame) => frame.event === "message_delta");
-    assert.equal(delta.data.delta.stop_reason, "stop_sequence");
-    assert.equal(delta.data.delta.stop_sequence, "STOP");
-  } finally {
-    await gateway.stop();
-  }
-});
-
 test("#4: OutputLimiter flush stays within the length cap", () => {
   const limiter = new OutputLimiter(["ZZZZZZZZ"], 1);
   const visible = limiter.push("abcdefgh") + limiter.flush();
@@ -249,10 +227,6 @@ test("#6/#7: stop sequences are bounded; max_tokens is validated next to max_com
   const chatBase = { model: "m", messages: user("hi") };
   assert.throws(() => parseChatCompletionsRequest({ ...chatBase, stop: "x".repeat(257) }, enforce), /at most 256/);
   assert.deepEqual(parseChatCompletionsRequest({ ...chatBase, stop: "x".repeat(256) }, enforce).stop, ["x".repeat(256)]);
-  const messages = (stop_sequences) => ({ model: "m", max_tokens: 9, stop_sequences, messages: user("hi") });
-  assert.throws(() => parseAnthropicMessagesRequest(messages(Array.from({ length: 17 }, (_, i) => `s${String(i)}`)), enforce), /at most 16/);
-  assert.equal(parseAnthropicMessagesRequest(messages(Array.from({ length: 16 }, (_, i) => `s${String(i)}`)), enforce).stop.length, 16);
-  assert.throws(() => parseAnthropicMessagesRequest(messages(["y".repeat(257)]), enforce), /at most 256/);
   assert.throws(() => parseChatCompletionsRequest({ ...chatBase, max_completion_tokens: 5, max_tokens: "abc" }, enforce), /max_tokens/);
   assert.equal(parseChatCompletionsRequest({ ...chatBase, max_completion_tokens: 5, max_tokens: 9 }, enforce).max_output_tokens, 5);
 });

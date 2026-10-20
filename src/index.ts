@@ -16,6 +16,7 @@ import {
 } from "./key-policy.js";
 import { configureAuthThrottle } from "./auth-throttle.js";
 import { loadConfig } from "./config.js";
+import { createKeyRateLimiter } from "./key-rate-limit.js";
 import { resolveModelAlias } from "./model-alias.js";
 import { CursorKeyPool } from "./keypool.js";
 import {
@@ -33,18 +34,10 @@ import {
   corsHeaders,
   readJsonBody,
   sendJson,
-  sendAnthropicError,
   sendOpenAiError,
   writeSse,
   writeSseEvent,
 } from "./http.js";
-import {
-  AnthropicStreamWriter,
-  encodeAnthropicMessage,
-  estimateAnthropicInputTokens,
-  newAnthropicMessageId,
-  parseAnthropicMessagesRequest,
-} from "./anthropic.js";
 import { logError, logInfo, redactLogText, redactValue, setSystemLogWriter, truncateUtf8 } from "./log.js";
 import {
   encodeNonStreamCompletion,
@@ -91,6 +84,7 @@ configureSse({ keepaliveMs: config.sseKeepaliveMs });
 configureMaxMode({ allowMaxMode: config.allowMaxMode });
 configureQuota({ cacheReadWeight: config.quotaCacheReadWeight });
 configureQuotaReserve({ recentRuns: config.quotaReserveRecentRuns });
+const keyRateLimiter = createKeyRateLimiter(config.rateLimitPerKey);
 try {
   configureAuthThrottle(config.authFailureLimit, { trustedProxies: config.trustedProxies });
 } catch (error) {
@@ -185,8 +179,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           chat_completions: "POST /v1/chat/completions",
           responses: "POST /v1/responses",
           response: "GET /v1/responses/{id} (in-memory, 1h)",
-          messages: "POST /v1/messages (Anthropic)",
-          count_tokens: "POST /v1/messages/count_tokens (estimate)",
           models: "GET /v1/models",
           model: "GET /v1/models/{id}",
         },
@@ -262,16 +254,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
-      await handleCountTokens(req, res);
-      return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/v1/messages") {
-      await handleMessages(req, res);
-      return;
-    }
-
     if (req.method === "POST" && url.pathname === "/v1/responses") {
       await handleResponses(req, res);
       return;
@@ -296,10 +278,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     sendJson(res, 404, { error: "Not found", code: "not_found" }, cors);
   } catch (error) {
     logError("request failed", { path: url.pathname, code: error instanceof GatewayError ? error.code : "server_error" });
-    if (url.pathname === "/v1/messages" || url.pathname.startsWith("/v1/messages/")) {
-      sendAnthropicError(res, error, undefined, cors);
-      return;
-    }
     if (url.pathname.startsWith("/v1/")) {
       sendOpenAiError(res, error, undefined, cors);
       return;
@@ -572,222 +550,6 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("chat completed", {
-      request_id: requestId,
-      api_key_id: key.id,
-      model,
-      stream: stream === 1,
-      http_status: httpStatus,
-      duration_ms: durationMs,
-      upstream_ms: upstreamMs,
-      gateway_ms: gatewayMs,
-      input_tokens: usage?.prompt_tokens ?? null,
-      output_tokens: usage?.completion_tokens ?? null,
-      total_tokens: usage?.total_tokens ?? null,
-      cache_read_tokens: usage?.cache_read_tokens ?? null,
-      cache_write_tokens: usage?.cache_write_tokens ?? null,
-      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
-      error_code: errorCode,
-      ...(errorMessage ? { error_message: errorMessage } : {}),
-    });
-  }
-}
-
-async function handleCountTokens(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  requireClientKey(req, db, config.apiKeyPepper);
-  if (config.anthropicCountTokens === "off") {
-    throw new GatewayError(404, "not_found", "count_tokens is disabled on this gateway", "invalid_request_error");
-  }
-  const body = await readJsonBody(req, config.maxBodyBytes);
-  // Validate the same shape /v1/messages accepts (count_tokens has no max_tokens).
-  const parsed = parseAnthropicMessagesRequest(body);
-  resolveModelAlias(config.modelAliases, parsed.model);
-  sendJson(
-    res,
-    200,
-    { input_tokens: estimateAnthropicInputTokens(body as Record<string, unknown>) },
-    { "x-token-count-estimated": "true", ...corsHeaders(req, config.corsAllowOrigins) },
-  );
-}
-
-async function handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const started = Date.now();
-  const requestId = newAnthropicMessageId();
-  const key = requireClientKey(req, db, config.apiKeyPepper);
-
-  let model = "";
-  let stream = 0;
-  let httpStatus = 200;
-  let errorCode: string | null = null;
-  let errorMessage: string | null = null;
-  let usage: Usage | null = null;
-  let upstreamMs: number | null = null;
-  let requestDetail: string | null = null;
-  let responseDetail: string | null = null;
-  let chatResult: CursorChatResult | null = null;
-  let ticket: KeyTicket | undefined;
-  let maxDispatched = false;
-  let writer: AnthropicStreamWriter | undefined;
-
-  try {
-    const body = await readJsonBody(req, config.maxBodyBytes);
-    model = peekModel(body);
-    requestDetail = snapshotIncomingBody(body);
-    const parsed = parseAnthropicMessagesRequest(body, { enforceOutputLimits: config.enforceOutputLimits });
-    parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
-    model = parsed.model;
-    stream = parsed.stream ? 1 : 0;
-    validateChatTurnRequest(parsed);
-    ticket = await admitTurn(key, parsed);
-    if (config.logDetailed) {
-      requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
-    }
-    const headers = corsHeaders(req, config.corsAllowOrigins);
-
-    const abort = new AbortController();
-    let holdForTools = false;
-    const onClose = (): void => {
-      if (holdForTools) return;
-      if (!res.writableEnded) abort.abort();
-    };
-    req.on("close", onClose);
-    res.on("close", onClose);
-
-    try {
-      const collectedTools: OpenAiToolCall[] = [];
-      if (parsed.stream) {
-        writer = new AnthropicStreamWriter(
-          async (event, data) => {
-            await writeSseEvent(res, event, data);
-          },
-          { id: requestId, model: parsed.model },
-        );
-      }
-      const sink = {
-        onText: async (text: string): Promise<void> => {
-          await writer?.onText(text);
-        },
-        onThinking: async (text: string): Promise<void> => {
-          await writer?.onThinking(text);
-        },
-        onToolCalls: async (calls: OpenAiToolCall[]): Promise<void> => {
-          collectedTools.push(...calls);
-          await writer?.onToolCalls(calls);
-        },
-      };
-
-      const upstreamStarted = Date.now();
-      const result = await runChatTurn({
-        apiKey: keyPool.primary,
-        keyPool,
-        apiKeyId: key.id,
-        workspaceDir: config.cursorWorkspace,
-        request: parsed,
-        abortSignal: abort.signal,
-        onClaimed: parsed.stream
-          ? async (): Promise<void> => {
-              beginSse(res, requestId, headers);
-              await writer?.start();
-            }
-          : undefined,
-        sink,
-        parkTimeoutMs: config.parkTimeoutMs,
-        db,
-        modelPolicy: modelOptionsFor(key),
-        onUpstreamStarted: () => ticket?.markStarted(),
-      });
-      upstreamMs = Date.now() - upstreamStarted;
-      chatResult = result;
-      if (result.usageKnown) usage = result.usage;
-
-      if (result.finish_reason === "tool_calls") {
-        holdForTools = true;
-      }
-
-      if (result.status === "cancelled" || result.finish_reason === "cancelled") {
-        httpStatus = 499;
-        errorCode = "cancelled";
-        throw cancelledError();
-      }
-      if (result.status === "error" || result.finish_reason === "error") {
-        httpStatus = 502;
-        errorCode = "upstream_error";
-        throw runFailureError(result.error);
-      }
-
-      const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = clientFinishReason(result);
-
-      if (parsed.stream) {
-        await writer?.complete({
-          content: result.text,
-          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-          finish_reason: finishReason,
-          ...(result.stop_sequence !== undefined ? { stop_sequence: result.stop_sequence } : {}),
-          usage: result.usageKnown ? result.usage : null,
-        });
-        res.end();
-      } else {
-        sendJson(
-          res,
-          200,
-          encodeAnthropicMessage({
-            id: requestId,
-            model: parsed.model,
-            content: result.text,
-            usage: result.usageKnown ? result.usage : null,
-            cost: result.cost,
-            params: result.params,
-            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-            finish_reason: finishReason,
-            ...(result.stop_sequence !== undefined ? { stop_sequence: result.stop_sequence } : {}),
-            ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
-          }),
-          { "x-request-id": requestId, "request-id": requestId, ...headers },
-        );
-      }
-    } finally {
-      req.off("close", onClose);
-      res.off("close", onClose);
-    }
-  } catch (error) {
-    httpStatus = httpStatusOf(error);
-    errorCode = error instanceof GatewayError ? error.code : "server_error";
-    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
-    errorMessage = error instanceof Error ? error.message : String(error);
-    if (!res.headersSent) {
-      sendAnthropicError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
-    } else {
-      await writer?.fail(error);
-      res.end();
-    }
-  } finally {
-    ticket?.finish(chatResult);
-    const durationMs = Date.now() - started;
-    const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
-    responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
-    insertRequestLog(db, {
-      id: requestId,
-      api_key_id: key.id,
-      path: "/v1/messages",
-      model,
-      stream,
-      http_status: httpStatus,
-      duration_ms: durationMs,
-      input_tokens: usage?.prompt_tokens ?? null,
-      output_tokens: usage?.completion_tokens ?? null,
-      total_tokens: usage?.total_tokens ?? null,
-      cache_read_tokens: usage?.cache_read_tokens ?? null,
-      cache_write_tokens: usage?.cache_write_tokens ?? null,
-      reasoning_tokens: usage?.reasoning_tokens ?? null,
-      error_code: errorCode,
-      created_at: new Date().toISOString(),
-      upstream_ms: upstreamMs,
-      gateway_ms: gatewayMs,
-      request_detail: requestDetail,
-      response_detail: responseDetail,
-      max_mode: maxModeOf(chatResult, maxDispatched),
-    });
-    logInfo("messages completed", {
       request_id: requestId,
       api_key_id: key.id,
       model,
@@ -1121,10 +883,14 @@ async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<Ke
       record: false,
     });
   }
-  return admitKeyRequest(db, key, Date.now(), {
+  const now = Date.now();
+  keyRateLimiter.check(key.id, now);
+  const ticket = admitKeyRequest(db, key, now, {
     reserveTokens: reservationFor(request, key.id),
     resumesParked: resumesParkedTurn(key.id, request),
   });
+  keyRateLimiter.record(key.id, now);
+  return ticket;
 }
 
 /**

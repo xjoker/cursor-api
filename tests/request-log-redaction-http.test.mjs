@@ -57,7 +57,6 @@ test("request_logs: request_detail, response_detail, error_message and model are
     assert.equal((await post(gateway, "/v1/chat/completions", { model: "fake-model", messages: [{ role: "user", content: PROMPT }], metadata: { accessToken: "FAKEs3cr3tVALUE9x" } })).status, 200);
     assert.equal((await post(gateway, "/v1/chat/completions", { model: "fake-model", stream: true, messages: [{ role: "user", content: PROMPT }] })).status, 200);
     assert.equal((await post(gateway, "/v1/responses", { model: "fake-model", input: PROMPT })).status, 200);
-    assert.equal((await post(gateway, "/v1/messages", { model: "fake-model", max_tokens: 64, messages: [{ role: "user", content: PROMPT }] }, { "x-api-key": CLIENT_KEY, "anthropic-version": "2023-06-01" })).status, 200);
     // Secret pasted into the model name: model column + "The model '<secret>' does not exist" error_message.
     for (const secret of [GHP, JWT, AKIA, CGK]) {
       assert.equal((await post(gateway, "/v1/chat/completions", { model: secret, messages: [{ role: "user", content: "hi" }] })).status, 404);
