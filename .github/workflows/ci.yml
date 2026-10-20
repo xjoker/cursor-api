@@ -28,8 +28,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      # scripts/run-tests.mjs: fake SDK everywhere + no-network guard (fails on any outbound attempt).
-      - run: npm test
+      # Ubuntu 24.04 runners restrict unprivileged user namespaces via AppArmor; allow them for unshare.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # test:offline = empty network namespace (unshare -rn) + scripts/run-tests.mjs (fake SDK, no-network
+      # guard that fails the run on any outbound attempt). Fails instead of skipping if unshare is unavailable.
+      - run: npm run test:offline
 
   docker:
     runs-on: ubuntu-latest

@@ -319,7 +319,7 @@ git clone https://github.com/xjoker/cursor-api.git && cd cursor-api
 npm ci && npm run dev
 ```
 
-快速单元测试用 `npm run test:unit`；`npm test` 还会运行回环 HTTP 鉴权冒烟测试。测试不会访问网络：测试启动的网关都用假 Cursor SDK（`tests/fixtures/fake-cursor-sdk.mjs`）；`scripts/run-tests.mjs` 通过 `NODE_OPTIONS` 预加载守卫 `tests/fixtures/no-network.mjs`（子进程同样生效），拦截所有非回环连接；只要有一次尝试，即使代码吞掉了错误，整个测试也判失败。`CURSOR_API_TEST_ALLOW_NETWORK=1` 可关闭守卫（目前没有测试需要）。Linux 上 `npm run test:offline` 会在空网络命名空间（`unshare -rn`）里、去掉 Cursor 凭据后再跑一遍。
+快速单元测试用 `npm run test:unit`；`npm test` 还会运行回环 HTTP 鉴权冒烟测试。测试不会访问网络：测试启动的网关都用假 Cursor SDK（`tests/fixtures/fake-cursor-sdk.mjs`）；`scripts/run-tests.mjs` 通过 `NODE_OPTIONS` 预加载守卫 `tests/fixtures/no-network.mjs`（子进程同样生效），拦截并记录非回环的 TCP/TLS 连接（`net`、`tls`、`http`、`https`、`http2`、`fetch`）、DNS 解析和查询以及 UDP 发送；`localhost` 只有解析结果是回环地址时才放行。只要记录到一次尝试，即使代码吞掉了错误，整个测试也判失败。测试创建的临时目录都在本次运行专用的 `TMPDIR` 里，跑完删除。`CURSOR_API_TEST_ALLOW_NETWORK=1` 可关闭守卫（目前没有测试需要）。JS 守卫看不到未继承其 `NODE_OPTIONS` 的子进程、worker 线程和原生二进制，所以 Linux 上 `npm run test:offline` 会在空网络命名空间（`unshare -rn`）里、去掉 `CURSOR_*` 及名字像 key/token/secret 的变量后运行；CI 跑的就是 `test:offline`。
 
 需 Node **22.13+** 与 `data/config/gateway.toml`。本地编译镜像见 [`docker-compose.yml`](./docker-compose.yml)。构建时传入 git SHA，`/health` 的 `git_commit` 才不是 `unknown`：
 

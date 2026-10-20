@@ -7,7 +7,7 @@
 //   node scripts/run-tests.mjs tests/x.test.mjs
 //   CURSOR_API_TEST_ALLOW_NETWORK=1 ...        # explicit opt-out (no test needs it today)
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,6 +25,9 @@ const env = { ...process.env };
 const allowNetwork = env.CURSOR_API_TEST_ALLOW_NETWORK === "1";
 const logDir = mkdtempSync(join(tmpdir(), "cursor-api-netguard-"));
 const log = join(logDir, "blocked.log");
+// Every temp dir the tests create lands in this run-scoped TMPDIR, removed when the run ends.
+env.TMPDIR = join(logDir, "tmp");
+mkdirSync(env.TMPDIR);
 if (!allowNetwork) {
   const guard = pathToFileURL(join(root, "tests", "fixtures", "no-network.mjs")).href;
   env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --import=${guard}`.trim();
