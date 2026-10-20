@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:unit": "npm run build && node scripts/run-tests.mjs tests/gateway.test.mjs",
     "test": "npm run build && node scripts/run-tests.mjs",
-    "test:offline": "npm run build && sh scripts/test-offline.sh"
+    "test:offline": "npm run build && sh scripts/test-offline.sh",
+    "test:tmpdirs": "npm run build && node scripts/check-test-tmpdirs.mjs"
   },
   "dependencies": {
     "@cursor/sdk": "1.0.38"

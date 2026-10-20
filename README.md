@@ -360,6 +360,8 @@ npm ci && npm run dev
 
 Use `npm run test:unit` for the fast unit suite. `npm test` also runs the loopback HTTP authentication smoke test. Tests never touch the network: every gateway they start uses the fake Cursor SDK (`tests/fixtures/fake-cursor-sdk.mjs`), and `scripts/run-tests.mjs` preloads a guard (`tests/fixtures/no-network.mjs`, via `NODE_OPTIONS`, so child processes are covered) that blocks and records non-loopback TCP/TLS connections (`net`, `tls`, `http`, `https`, `http2`, `fetch`), DNS lookups and queries, and UDP sends; `localhost` is allowed only when it resolves to loopback. Any recorded attempt fails the run, even when the code swallowed the error. Temp dirs created by tests live in a run-scoped `TMPDIR` that is removed afterwards. `CURSOR_API_TEST_ALLOW_NETWORK=1` disables the guard (no test needs it). The JS guard cannot see child processes started without its `NODE_OPTIONS`, worker threads or native binaries, so on Linux `npm run test:offline` runs the suite in an empty network namespace (`unshare -rn`) with `CURSOR_*` and key/token/secret-like variables removed; CI runs `test:offline`.
 
+`npm run test:tmpdirs` checks for leaked `cursor-api-*` temporary directories.
+
 Requires Node **22.13+** and `data/config/gateway.toml`. See [`docker-compose.yml`](./docker-compose.yml) to build the image locally. Pass the git SHA at image build time so `/health` `git_commit` is not `unknown`:
 
 ```bash

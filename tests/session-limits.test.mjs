@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { countConversations, openDb, pruneConversations, upsertConversation } from "../dist/db.js";
 import { sessionStats, sweepSessions } from "../dist/session.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
-test("conversation persistence failure disposes created and resumed agents and releases capacity", () => {
-  const directory = mkdtempSync(join(tmpdir(), "cursor-api-db-failure-"));
+test("conversation persistence failure disposes created and resumed agents and releases capacity", (context) => {
+  const directory = makeTempDir(context, "cursor-api-db-failure-");
   execFileSync(process.execPath, ["--import", new URL("./fixtures/register-fake-sdk.mjs", import.meta.url).pathname,
     "--input-type=module", "-e", `
       import assert from 'node:assert/strict';
@@ -41,7 +41,7 @@ test("conversation persistence failure disposes created and resumed agents and r
     `], { cwd: join(import.meta.dirname, ".."), env: { ...process.env, TEST_DATABASE: directory }, stdio: "pipe" });
 });
 
-test("simultaneous session creation cannot exceed the configured cap", () => {
+test("simultaneous session creation cannot exceed the configured cap", (context) => {
   execFileSync(process.execPath, ["--import", new URL("./fixtures/register-fake-sdk.mjs", import.meta.url).pathname,
     "--input-type=module", "-e", `
       import assert from 'node:assert/strict';
@@ -56,13 +56,13 @@ test("simultaneous session creation cannot exceed the configured cap", () => {
       for (const r of settled.filter(r => r.status === 'rejected')) assert.equal(r.reason.code, 'too_many_sessions');
     `], {
       cwd: join(import.meta.dirname, ".."),
-      env: { ...process.env, FAKE_SDK_DELAY_MS: "100", TEST_WORKSPACE: mkdtempSync(join(tmpdir(), "cursor-api-cap-")) },
+      env: { ...process.env, FAKE_SDK_DELAY_MS: "100", TEST_WORKSPACE: makeTempDir(context, "cursor-api-cap-") },
       stdio: "pipe",
     });
 });
 
-test("session limits config defaults and bounds", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-sessions-"));
+test("session limits config defaults and bounds", (context) => {
+  const root = makeTempDir(context, "cursor-api-sessions-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   writeFileSync(
     join(root, "data", "config", "gateway.toml"),
@@ -78,8 +78,8 @@ test("session limits config defaults and bounds", () => {
   assert.throws(() => loadConfig({ DATA_DIR: "data", CONVERSATION_TTL_DAYS: "9999" }, root), /CONVERSATION_TTL_DAYS/);
 });
 
-test("sweep prunes conversation mappings older than the TTL", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "cursor-api-sweep-"));
+test("sweep prunes conversation mappings older than the TTL", async (context) => {
+  const dir = makeTempDir(context, "cursor-api-sweep-");
   const db = openDb(dir, { retentionDays: 7, maxRows: 1000, maxDetailBytes: 1_048_576 });
   upsertConversation(db, "k1", "fresh", "agent-1");
   upsertConversation(db, "k1", "stale", "agent-2");

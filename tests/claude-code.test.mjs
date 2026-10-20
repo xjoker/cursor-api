@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
@@ -12,6 +11,7 @@ import { loadConfig } from "../dist/config.js";
 import { parseModelAliases, resolveModelAlias } from "../dist/model-alias.js";
 import { hashMessages } from "../dist/session.js";
 import { CLIENT_KEY, parseSse, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 // Shape of a Claude Code 2.1 request (fields observed on the wire, values shortened).
 function claudeCodeBody(messages, extra = {}) {
@@ -86,7 +86,7 @@ test("thinking and output_config map to effort hints", () => {
   assert.equal(anthropicEffortHint(undefined, {}), undefined);
 });
 
-test("model_aliases parse globs, keep order, and reject malformed entries", () => {
+test("model_aliases parse globs, keep order, and reject malformed entries", (context) => {
   const aliases = parseModelAliases("claude-haiku-*=fast-model; claude-*=composer-2.5\nexact=other");
   assert.equal(resolveModelAlias(aliases, "claude-haiku-4-5-20251001"), "fast-model");
   assert.equal(resolveModelAlias(aliases, "CLAUDE-OPUS-5-5"), "composer-2.5");
@@ -99,7 +99,7 @@ test("model_aliases parse globs, keep order, and reject malformed entries", () =
     assert.throws(() => parseModelAliases(bad), /model_aliases/);
   }
 
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-cc-"));
+  const root = makeTempDir(context, "cursor-api-cc-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   writeFileSync(
     join(root, "data", "config", "gateway.toml"),

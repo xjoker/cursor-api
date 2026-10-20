@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
-test("HTTP smoke covers health and client/admin authentication boundaries", { timeout: 10_000 }, async () => {
+test("HTTP smoke covers health and client/admin authentication boundaries", { timeout: 10_000 }, async (context) => {
   const { digestClientKey } = await import("../dist/auth.js");
   const { disableApiKey, insertApiKey, openDb } = await import("../dist/db.js");
-  const dataDir = mkdtempSync(join(tmpdir(), "cursor-api-http-"));
+  const dataDir = makeTempDir(context, "cursor-api-http-");
   const workspaceDir = join(dataDir, "workspace");
   const pepper = "test-pepper";
   const disabledKey = "cgk_disabled_test_key";

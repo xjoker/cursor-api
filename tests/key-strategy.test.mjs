@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { rateLimitError } from "../dist/errors.js";
 import { CursorKeyPool } from "../dist/keypool.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
-test("cursor_key_strategy defaults to round_robin and accepts least_active", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-strategy-"));
+test("cursor_key_strategy defaults to round_robin and accepts least_active", (context) => {
+  const root = makeTempDir(context, "cursor-api-strategy-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   writeFileSync(
     join(root, "data", "config", "gateway.toml"),

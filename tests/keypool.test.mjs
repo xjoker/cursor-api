@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -12,14 +11,15 @@ import {
   fingerprintKey,
 } from "../dist/keypool.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 function clock(start = 1_000_000) {
   let now = start;
   return { now: () => now, advance: (ms) => (now += ms) };
 }
 
-test("config merges cursor_api_key with comma-separated cursor_api_keys", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-keys-"));
+test("config merges cursor_api_key with comma-separated cursor_api_keys", (context) => {
+  const root = makeTempDir(context, "cursor-api-keys-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   writeFileSync(
     join(root, "data", "config", "gateway.toml"),
@@ -47,7 +47,7 @@ test("config merges cursor_api_key with comma-separated cursor_api_keys", () => 
   const defaults = loadConfig({ DATA_DIR: "data", CURSOR_KEY_COOLDOWN_MS: "" }, root);
   assert.equal(defaults.cursorKeyCooldownMs, 5000);
 
-  const emptyRoot = mkdtempSync(join(tmpdir(), "cursor-api-keys-empty-"));
+  const emptyRoot = makeTempDir(context, "cursor-api-keys-empty-");
   mkdirSync(join(emptyRoot, "data", "config"), { recursive: true });
   writeFileSync(
     join(emptyRoot, "data", "config", "gateway.toml"),
