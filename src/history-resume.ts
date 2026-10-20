@@ -25,7 +25,7 @@ export interface HistoryAgent {
 }
 
 const entries = new Map<string, HistoryAgent & { expiresAt: number }>();
-let enabled = true;
+let enabled = false; // opt-in (HISTORY_RESUME); see README for why
 
 export function configureHistoryResume(options: { enabled: boolean }): void {
   enabled = options.enabled;

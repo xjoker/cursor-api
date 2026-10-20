@@ -20,6 +20,7 @@ test("hashHistory: stable, trims assistant text only, sensitive to everything el
 
 test("history store: single-use, per client key, expiring, bounded, switchable", () => {
   clearHistory();
+  configureHistoryResume({ enabled: true });
   rememberHistory("k1", "h", { agentId: "a1", cursorKeyId: "c1" }, 1000);
   assert.equal(takeHistory("k2", "h", 1001), undefined);
   assert.deepEqual(takeHistory("k1", "h", 1001), { agentId: "a1", cursorKeyId: "c1" });
@@ -33,7 +34,6 @@ test("history store: single-use, per client key, expiring, bounded, switchable",
   assert.equal(historyEntryCount(), 0);
   rememberHistory("k1", "x", { agentId: "a" });
   assert.equal(takeHistory("k1", "x"), undefined);
-  configureHistoryResume({ enabled: true });
   clearHistory();
 });
 
@@ -49,7 +49,7 @@ async function chat(gateway, messages, extra = {}) {
 }
 
 test("e2e chat: matching history resumes the agent and sends only the new message", { timeout: 30_000 }, async () => {
-  const gateway = await startFakeGateway();
+  const gateway = await startFakeGateway({ HISTORY_RESUME: "true" });
   try {
     const system = { role: "system", content: "You are terse." };
     const first = (await chat(gateway, [system, user("ECHO_AGENT")])).message.content;
@@ -81,8 +81,8 @@ test("e2e chat: matching history resumes the agent and sends only the new messag
   }
 });
 
-test("e2e: truncated replies are not remembered; history_resume=false disables the lookup", { timeout: 30_000 }, async () => {
-  const limited = await startFakeGateway({ ENFORCE_OUTPUT_LIMITS: "true" });
+test("e2e: truncated replies are not remembered; history_resume off (default and explicit false) never resumes", { timeout: 30_000 }, async () => {
+  const limited = await startFakeGateway({ ENFORCE_OUTPUT_LIMITS: "true", HISTORY_RESUME: "true" });
   try {
     const cut = await chat(limited, [user("ECHO_AGENT")], { max_tokens: 1 });
     assert.equal(cut.finish_reason, "length");
@@ -92,17 +92,20 @@ test("e2e: truncated replies are not remembered; history_resume=false disables t
     await limited.stop();
   }
 
-  const off = await startFakeGateway({ HISTORY_RESUME: "false" });
-  try {
-    const first = (await chat(off, [user("ECHO_AGENT")])).message.content;
-    assert.notEqual((await chat(off, [user("ECHO_AGENT"), assistant(first), user("ECHO_AGENT")])).message.content, first);
-  } finally {
-    await off.stop();
+  for (const env of [{}, { HISTORY_RESUME: "false" }]) {
+    const off = await startFakeGateway(env);
+    try {
+      const first = (await chat(off, [user("ECHO_AGENT")])).message.content;
+      assert.notEqual((await chat(off, [user("ECHO_AGENT"), assistant(first), user("ECHO_AGENT")])).message.content, first, JSON.stringify(env));
+      assert.doesNotMatch(off.output(), /history matched a previous agent/);
+    } finally {
+      await off.stop();
+    }
   }
 });
 
 test("e2e: a failed resume falls back to the full transcript", { timeout: 20_000 }, async () => {
-  const gateway = await startFakeGateway({ FAKE_SDK_FAIL_RESUME: "1" });
+  const gateway = await startFakeGateway({ FAKE_SDK_FAIL_RESUME: "1", HISTORY_RESUME: "true" });
   try {
     const first = (await chat(gateway, [user("ECHO_AGENT")])).message.content;
     const reply = (await chat(gateway, [user("ECHO_AGENT"), assistant(first), user("ECHO_PROMPT_TAIL")])).message.content;
@@ -115,7 +118,7 @@ test("e2e: a failed resume falls back to the full transcript", { timeout: 20_000
 });
 
 test("e2e: stateless Responses / Messages clients resume by history too", { timeout: 20_000 }, async () => {
-  const gateway = await startFakeGateway();
+  const gateway = await startFakeGateway({ HISTORY_RESUME: "true" });
   try {
     let res = await fetch(`${gateway.baseUrl}/v1/responses`, { method: "POST", headers, body: JSON.stringify({ model: "fake-model", input: "ECHO_AGENT", store: false }) });
     const first = (await res.json()).output.find((item) => item.type === "message").content[0].text;
