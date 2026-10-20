@@ -31,7 +31,7 @@ import {
   upstreamTimeout,
   upstreamUnavailable,
 } from "./errors.js";
-import { logError, scrubSecrets } from "./log.js";
+import { logError, logInfo, logWarn, scrubSecrets } from "./log.js";
 
 const CATALOG_TTL_MS = 60_000;
 const ACCOUNT_TTL_MS = 10 * 60 * 1000;
@@ -104,6 +104,11 @@ let gatewayAllowMaxMode = true;
 /** Gateway-wide `allow_max_mode` (default true = keep SDK behaviour). */
 export function configureMaxMode(options: { allowMaxMode: boolean }): void {
   gatewayAllowMaxMode = options.allowMaxMode;
+  if (process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON?.trim()) {
+    logWarn("CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON is set: the SDK resolves models from it, not from the gateway catalog", {
+      allow_max_mode: options.allowMaxMode,
+    });
+  }
 }
 
 export async function validateChatRequestModel(
@@ -137,12 +142,15 @@ export async function createLocalChatAgent(options: {
   workspaceDir: string;
   model: ModelSelection;
   customTools?: Record<string, SDKCustomTool>;
+  /** Effective max-mode permission (see `maxModeAllowedFor`); default = gateway flag. */
+  allowMaxMode?: boolean;
 }): Promise<SDKAgent> {
   await mkdir(options.workspaceDir, { recursive: true });
   const hasCustomTools =
     options.customTools !== undefined && Object.keys(options.customTools).length > 0;
+  let agent: SDKAgent;
   try {
-    return await Agent.create({
+    agent = await Agent.create({
       apiKey: options.apiKey,
       model: options.model,
       tools: localChatAgentTools(hasCustomTools),
@@ -155,6 +163,8 @@ export async function createLocalChatAgent(options: {
   } catch (error) {
     throw mapCursorError(error);
   }
+  await guardResolvedMaxMode(agent, options.model, options.allowMaxMode ?? gatewayAllowMaxMode);
+  return agent;
 }
 
 export async function resumeLocalChatAgent(options: {
@@ -163,12 +173,15 @@ export async function resumeLocalChatAgent(options: {
   workspaceDir: string;
   model: ModelSelection;
   customTools?: Record<string, SDKCustomTool>;
+  /** Effective max-mode permission (see `maxModeAllowedFor`); default = gateway flag. */
+  allowMaxMode?: boolean;
 }): Promise<SDKAgent> {
   await mkdir(options.workspaceDir, { recursive: true });
   const hasCustomTools =
     options.customTools !== undefined && Object.keys(options.customTools).length > 0;
+  let agent: SDKAgent;
   try {
-    return await Agent.resume(options.agentId, {
+    agent = await Agent.resume(options.agentId, {
       apiKey: options.apiKey,
       model: options.model,
       tools: localChatAgentTools(hasCustomTools),
@@ -181,6 +194,8 @@ export async function resumeLocalChatAgent(options: {
   } catch (error) {
     throw mapCursorError(error);
   }
+  await guardResolvedMaxMode(agent, options.model, options.allowMaxMode ?? gatewayAllowMaxMode);
+  return agent;
 }
 
 export async function billedUsageOf(agent: SDKAgent): Promise<AgentUsage | undefined> {
@@ -255,14 +270,67 @@ export function resolveCatalogModelSelection(
   // Anthropic `output_config.effort` / thinking budgets are soft hints: drop them before rejecting.
   const candidates =
     request.reasoning_effort_hint !== undefined ? [request, { ...request, reasoning_effort_hint: undefined }] : [request];
-  for (const candidate of candidates) {
+  for (const [index, candidate] of candidates.entries()) {
     const fallback = nonMaxParams(item, candidate);
-    if (fallback && !sdkWouldUseMaxMode(item, fallback)) {
+    if (fallback && !sdkWouldUseMaxMode(item, fallback) && maxOnlyParamValues(item, fallback).length === 0) {
+      logInfo("max mode disallowed: using non-max variant", {
+        model: item.id,
+        requested_params: params ?? [],
+        params: fallback,
+        ...(index > 0 ? { softened_hint: request.reasoning_effort_hint } : {}),
+      });
+      if (index > 0) softenedHints.add(request);
       return { id: item.id, params: fallback };
     }
   }
-  if (!autoMax) return { id: item.id, params };
+  // No non-max fallback. Even when the SDK rule would not fire (the mix matches no variant),
+  // never forward a param value that only max variants carry (e.g. context=1m + effort=low).
+  if (!autoMax && maxOnlyParamValues(item, params).length === 0) return { id: item.id, params };
   throw maxModeNotAllowed(item.id);
+}
+
+/**
+ * Requests whose soft effort hint (Responses `reasoning.effort`, Anthropic effort / thinking
+ * budget) was dropped to stay off max mode. Read with `wasHintSoftened`.
+ */
+const softenedHints = new WeakSet<ParsedChatRequest>();
+
+export function wasHintSoftened(request: ParsedChatRequest): boolean {
+  return softenedHints.has(request);
+}
+
+/** True when max mode may be sent for this request (gateway flag AND per-request policy). */
+export function maxModeAllowedFor(options?: ModelSelectionOptions): boolean {
+  return gatewayAllowMaxMode && options?.allowMaxMode !== false;
+}
+
+/** `(id, value)` pairs from `params` that appear in at least one variant and only in max variants. */
+export function maxOnlyParamValues(model: ModelListItem, params: ModelParameterValue[] | undefined): ModelParameterValue[] {
+  const variants = model.variants ?? [];
+  return (params ?? []).filter((param) => {
+    const carrying = variants.filter((variant) => variantContains(variant, [param]));
+    return carrying.length > 0 && carrying.every((variant) => variant.isMaxMode === true);
+  });
+}
+
+/**
+ * Called after `Agent.create` / `Agent.resume` / `send`: the SDK resolves the model against its
+ * own in-process catalog (which can differ from the gateway's: cache age,
+ * CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON, alias collisions). Returns the ACTUAL max-mode flag.
+ */
+export function actualMaxMode(selection: { maxMode?: boolean } | undefined, predicted: boolean): boolean {
+  return selection === undefined ? predicted : selection.maxMode === true;
+}
+
+async function guardResolvedMaxMode(agent: SDKAgent, model: ModelSelection, allowMaxMode: boolean): Promise<void> {
+  if (allowMaxMode || agent.model?.maxMode !== true) return;
+  logWarn("sdk resolved max mode although the gateway selected a non-max variant", {
+    model: model.id,
+    params: model.params ?? [],
+    sdk_model: agent.model.id,
+  });
+  await disposeAgent(agent).catch(() => undefined);
+  throw maxModeNotAllowed(model.id);
 }
 
 function matchesNonMaxVariant(model: ModelListItem, params: ModelParameterValue[] | undefined): boolean {
@@ -306,12 +374,22 @@ function nonMaxParams(model: ModelListItem, request: ParsedChatRequest): ModelPa
     const score = variant.params.filter((param) =>
       defaults.some((own) => own.id.trim() === param.id.trim() && own.value.trim() === param.value.trim()),
     ).length;
-    if (!best || score > best.score) best = { variant, score };
+    // Ties: deterministic, independent of catalog order (lexicographic params signature).
+    if (!best || score > best.score || (score === best.score && variantSignature(variant) < variantSignature(best.variant))) {
+      best = { variant, score };
+    }
   }
   if (!best) return undefined;
   const merged = new Map(best.variant.params.map((param) => [param.id, param.value]));
   for (const param of explicit) merged.set(param.id, param.value);
   return [...merged.entries()].map(([id, value]) => ({ id, value }));
+}
+
+function variantSignature(variant: ModelVariant): string {
+  return variant.params
+    .map((param) => `${param.id.trim()}=${param.value.trim()}`)
+    .sort()
+    .join("&");
 }
 
 /** Map OpenAI `variant` / `reasoning_effort` / `fast` onto Cursor catalog params. */

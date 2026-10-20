@@ -19,14 +19,16 @@ import {
   createLocalChatAgent,
   disposeAgent,
   mapCursorError,
+  actualMaxMode,
+  maxModeAllowedFor,
   resolveChatModel,
   resumeLocalChatAgent,
   runFailureError,
   toChatUsage,
 } from "./cursor.js";
 import { getConversationMapping, pruneConversations, upsertConversation, type ConversationMapping } from "./db.js";
-import { conversationBusyError, GatewayError, invalidRequest } from "./errors.js";
-import { logError, logInfo } from "./log.js";
+import { conversationBusyError, GatewayError, invalidRequest, maxModeNotAllowed } from "./errors.js";
+import { logError, logInfo, logWarn } from "./log.js";
 import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
 
@@ -71,7 +73,12 @@ interface LiveSession {
   indexKeys: string[];
   modelParams: CursorChatResult["params"];
   /** The selection resolved to a Cursor max-mode variant (billed at max rates). */
+  /** ACTUAL max-mode flag: the SDK-resolved `agent.model` / `run.model`, else the gateway prediction. */
   maxMode: boolean;
+  /** Whether max mode may be sent for this session (gateway flag and request policy). */
+  allowMaxMode: boolean;
+  /** Deltas held back until the run's SDK-resolved model passed the max-mode check. */
+  heldDeltas?: InteractionUpdate[];
   text: string;
   thinking: string;
   sink: ChatTurnSink | undefined;
@@ -557,7 +564,6 @@ async function resumeUserTurnWithKey(
   storedAgentId: string,
 ): Promise<CursorChatResult> {
   const model = await resolveChatModel(options.apiKey, options.request);
-  await options.claimOutput?.();
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
   const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
@@ -568,17 +574,21 @@ async function resumeUserTurnWithKey(
       workspaceDir: options.workspaceDir,
       model,
       customTools,
+      allowMaxMode: session.allowMaxMode,
     });
   } catch (error) {
     releaseCapacity();
     throw error;
   }
+  session.maxMode = actualMaxMode(session.agent.model, session.maxMode);
   logInfo("resumed stored conversation", {
     api_key_id: options.apiKeyId,
     conversation_id: options.request.conversation_id ?? null,
     agent_id: storedAgentId,
   });
   try {
+    // Claim (stream headers) only after the SDK-resolved max-mode check, so a 403 is still JSON.
+    await options.claimOutput?.();
     rememberConversation(session, options);
   } catch (error) {
     await dropSession(session);
@@ -618,7 +628,6 @@ async function startAgentSession(prompt: string, options: TurnOptions): Promise<
 
 async function startAgentSessionWithKey(prompt: string, options: TurnOptions): Promise<CursorChatResult> {
   const model = await resolveChatModel(options.apiKey, options.request);
-  await options.claimOutput?.();
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
   const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
@@ -628,12 +637,16 @@ async function startAgentSessionWithKey(prompt: string, options: TurnOptions): P
       workspaceDir: options.workspaceDir,
       model,
       customTools,
+      allowMaxMode: session.allowMaxMode,
     });
   } catch (error) {
     releaseCapacity();
     throw mapCursorError(error);
   }
+  session.maxMode = actualMaxMode(session.agent.model, session.maxMode);
   try {
+    // Claim (stream headers) only after the SDK-resolved max-mode check, so a 403 is still JSON.
+    await options.claimOutput?.();
     rememberConversation(session, options);
   } catch (error) {
     await dropSession(session);
@@ -671,6 +684,7 @@ function emptySession(
     indexKeys: [],
     modelParams,
     maxMode,
+    allowMaxMode: maxModeAllowedFor(undefined),
     text: "",
     thinking: "",
     sink: options.sink,
@@ -749,6 +763,9 @@ async function sendOnSession(
   const images = imagesOfLastUser(options.request.messages);
 
   let run: Run;
+  // Max mode disallowed: hold deltas while `send` resolves so nothing streams before the
+  // run.model max-mode check. (Allowed: nothing to check, stream directly.)
+  session.heldDeltas = session.allowMaxMode ? undefined : [];
   try {
     run = await session.agent.send(images && images.length > 0 ? { text: prompt, images } : prompt, {
       local: { ...(customTools ? { customTools } : {}), force: true },
@@ -757,9 +774,26 @@ async function sendOnSession(
       },
     });
   } catch (error) {
+    session.heldDeltas = undefined;
     await dropSession(session);
     throw mapCursorError(error);
   }
+  if (run.model?.maxMode === true) {
+    session.maxMode = true;
+    if (!session.allowMaxMode) {
+      // The SDK re-resolves the model on every send; never let a disallowed max run continue.
+      logWarn("sdk sent a max-mode run although max mode is disallowed; cancelling", {
+        api_key_id: session.apiKeyId,
+        model: run.model.id,
+      });
+      // Keep holding (and discarding) deltas: the cancelled run may still emit some.
+      session.heldDeltas = [];
+      if (run.supports("cancel")) await run.cancel().catch(() => undefined);
+      await dropSession(session);
+      throw maxModeNotAllowed(run.model.id);
+    }
+  }
+  await releaseHeldDeltas(session);
   session.run = run;
   session.waitPromise = settleRun(session, options.abortSignal);
   bindAbort(session, options.abortSignal);
@@ -929,6 +963,25 @@ function flushBatch(session: LiveSession): void {
 }
 
 async function emitDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
+  if (session.heldDeltas) {
+    session.heldDeltas.push(update);
+    return;
+  }
+  await deliverDelta(session, update);
+}
+
+/** Replays held deltas in order (new ones keep queueing meanwhile), then streams directly. */
+async function releaseHeldDeltas(session: LiveSession): Promise<void> {
+  const held = session.heldDeltas;
+  if (!held) return;
+  while (held.length > 0) {
+    const update = held.shift() as InteractionUpdate;
+    await deliverDelta(session, update);
+  }
+  session.heldDeltas = undefined;
+}
+
+async function deliverDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
   if (update.type === "thinking-delta") {
     if (update.text === "") return;
     session.thinking += update.text;
