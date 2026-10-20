@@ -308,7 +308,11 @@ export function maxModeAllowedFor(options?: ModelSelectionOptions): boolean {
 export function maxOnlyParamValues(model: ModelListItem, params: ModelParameterValue[] | undefined): ModelParameterValue[] {
   const variants = model.variants ?? [];
   return (params ?? []).filter((param) => {
-    const carrying = variants.filter((variant) => variantContains(variant, [param]));
+    // Case-insensitive on purpose (second line of defence behind canonical values, C1).
+    const folded = (value: string): string => value.trim().toLowerCase();
+    const carrying = variants.filter((variant) =>
+      variant.params.some((own) => own.id.trim() === param.id.trim() && folded(own.value) === folded(param.value)),
+    );
     return carrying.length > 0 && carrying.every((variant) => variant.isMaxMode === true);
   });
 }
@@ -413,8 +417,9 @@ export function resolveChatParams(
   }
   if (request.params) {
     for (const param of request.params) {
-      if (model) assertAllowedParam(model, param);
-      merged.set(param.id, param.value);
+      // Forward the catalog's canonical value only (C1): `1M` / a display name like "1m context"
+      // must not slip past the case-sensitive max-only checks and the SDK rule.
+      merged.set(param.id, model ? assertAllowedParam(model, param) : param.value);
     }
   }
 
@@ -607,13 +612,14 @@ function findParameter(
   );
 }
 
-function assertAllowedParam(model: ModelListItem, param: ModelParam): void {
+/** Validates `param` against the catalog and returns its canonical value. */
+function assertAllowedParam(model: ModelListItem, param: ModelParam): string {
   const parameter = model.parameters?.find((item) => item.id === param.id);
   if (!parameter) {
     const allowed = (model.parameters ?? []).map((item) => item.id).join(", ") || "(none)";
     throw invalidRequest(`Unknown param '${param.id}' for model '${model.id}'. Allowed: ${allowed}`);
   }
-  matchParamValue(parameter, param.value);
+  return matchParamValue(parameter, param.value);
 }
 
 function matchParamValue(parameter: ModelParameterDefinition, raw: string): string {
