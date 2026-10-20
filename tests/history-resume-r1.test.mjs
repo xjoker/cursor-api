@@ -2,6 +2,9 @@
 // per-agent lock (#1), reused turns are estimated like the full transcript (#2), records are
 // scoped by the client's `user` and purged with the key. Offline (fake SDK).
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { test } from "node:test";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
 
@@ -47,24 +50,31 @@ test("#1: a previous_response_id continuation invalidates the history record of 
   }
 });
 
-test("#1: concurrent previous_response_id + history reuse never run on the same agent", { timeout: 30_000 }, async () => {
-  const gateway = await startFakeGateway({ HISTORY_RESUME: "true", FAKE_SDK_DELAY_MS: "400" });
+test("#1: concurrent previous_response_id + history reuse never run on the same agent", { timeout: 30_000 }, async (context) => {
+  const gate = join(makeTempDir(context, "history-resume-gate-"), "release");
+  const gateway = await startFakeGateway({ HISTORY_RESUME: "true", FAKE_SDK_SEND_GATE: gate });
+  let hashPending;
   try {
     const first = await responses(gateway, { input: "ECHO_AGENT" });
     const agent = first.text;
-    // History reuse claims the agent first (send is slow); the previous_response_id request then
-    // finds the agent busy instead of sending on it concurrently.
-    const hashPending = responses(gateway, { store: false, input: fullHistory(agent) });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    const history = fullHistory(agent);
+    history[history.length - 1].content = "ECHO_AGENT WAIT_FOR_SEND_GATE";
+    hashPending = responses(gateway, { store: false, input: history });
+    const deadline = Date.now() + 5_000;
+    while (!gateway.output().includes('"message":"resumed stored conversation"')) {
+      assert.ok(Date.now() < deadline, "history reuse must claim the agent before the competing request");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const byPrev = await responses(gateway, { input: "ECHO_AGENT", previous_response_id: first.body.id });
-    const byHash = await hashPending;
-    assert.equal(byHash.text, agent, "history reuse got the agent");
     assert.equal(byPrev.status, 409, `previous_response_id on a busy agent: ${String(byPrev.status)}`);
     assert.match(String(byPrev.body), /conversation_busy/);
-    const onAgent = [byPrev, byHash].filter((reply) => reply.status === 200 && reply.text === agent);
-    assert.ok(onAgent.length <= 1, `both requests ran on ${agent}: ${JSON.stringify([byPrev.status, byHash.status])}`);
-    assert.equal(byHash.status, 200, "history reuse falls back to a new agent, never fails");
+    writeFileSync(gate, "release");
+    const byHash = await hashPending;
+    assert.equal(byHash.status, 200);
+    assert.equal(byHash.text, agent, "history reuse got the agent");
   } finally {
+    writeFileSync(gate, "release");
+    await hashPending?.catch(() => undefined);
     await gateway.stop();
   }
 });

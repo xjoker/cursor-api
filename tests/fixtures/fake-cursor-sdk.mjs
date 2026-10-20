@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 // In-process stand-in for @cursor/sdk used by the HTTP integration tests.
 // Behavior is driven by markers in the prompt text so tests need no Cursor credentials.
 
@@ -152,6 +152,12 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
       const prompt = typeof message === "string" ? message : message.text;
       calls.send.push({ apiKey, agentId, prompt });
       if (process.env.FAKE_SDK_DEBUG) process.stderr.write(`fake-sdk send: tools=${Object.keys(options.local?.customTools ?? {}).join(",")} tail=${JSON.stringify(prompt.slice(-300))}\n`);
+      // A test-controlled gate keeps the agent claimed until the competing request has completed.
+      if (prompt.includes("WAIT_FOR_SEND_GATE") && process.env.FAKE_SDK_SEND_GATE) {
+        while (!existsSync(process.env.FAKE_SDK_SEND_GATE)) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
       if (process.env.FAKE_SDK_DELAY_MS) {
         await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SDK_DELAY_MS)));
       }
