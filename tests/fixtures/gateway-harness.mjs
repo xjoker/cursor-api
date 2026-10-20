@@ -35,7 +35,7 @@ export async function startFakeGateway(extraEnv = {}, options = {}) {
     ["--import", join(import.meta.dirname, "register-fake-sdk.mjs"), "dist/index.js"],
     {
       cwd: root,
-      env: {
+      env: guardedEnv({
         ...process.env,
         NODE_ENV: "production",
         DATA_DIR: dataDir,
@@ -46,7 +46,7 @@ export async function startFakeGateway(extraEnv = {}, options = {}) {
         GATEWAY_HOST: "127.0.0.1",
         GATEWAY_PORT: String(port),
         ...extraEnv,
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -75,6 +75,15 @@ export async function startFakeGateway(extraEnv = {}, options = {}) {
       await exited;
     },
   };
+}
+
+/** The gateway child must inherit the no-network guard whenever this process runs under it (SAF-102). */
+function guardedEnv(env) {
+  if (process.env.CURSOR_API_NETGUARD_LOG) {
+    assert.match(env.NODE_OPTIONS ?? "", /no-network\.mjs/, "gateway child would run without the network guard");
+    assert.equal(env.CURSOR_API_NETGUARD_LOG, process.env.CURSOR_API_NETGUARD_LOG);
+  }
+  return env;
 }
 
 /** Parses an SSE body into [{event, data}] frames. */
