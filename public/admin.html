@@ -652,7 +652,11 @@
     /* ─── Layout helpers ──────────────────────────────────────────── */
     .toolbar, .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
     .policy-editor .stack { display: grid; gap: 8px; max-width: 640px; }
+    .policy-editor .stack form { display: grid; gap: 8px; }
     .policy-editor textarea { width: 100%; font-family: inherit; }
+    .policy-summary { display: grid; gap: 3px; min-width: 18rem; line-height: 1.45; }
+    .policy-summary-line { display: block; overflow-wrap: anywhere; }
+    .policy-error { margin: 0; }
     .filters {
       display: flex;
       flex-wrap: nowrap;
@@ -948,7 +952,7 @@
       border-radius: var(--radius-sm);
       box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 5%, transparent);
     }
-    .modal-meta .k { font-size: 11px; color: var(--meta); text-transform: uppercase; letter-spacing: 0.04em; }
+    .modal-meta .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
     .modal-meta .v { margin-top: 4px; font-size: 13px; color: var(--fg-2); word-break: break-word; }
     .detail-block-head {
       display: flex;
@@ -994,6 +998,7 @@
       color: var(--muted);
       font-size: 13px;
     }
+    .cost-note { margin: -6px 0 0; font-size: var(--text-xs); }
   </style>
 </head>
 <body>
@@ -1387,9 +1392,21 @@
       "keys.quotaTz": "时区（IANA）",
       "keys.maxConcurrent": "并发上限（留空=不限）",
       "keys.cacheWeight": "缓存读 Token 计入权重 0–1（留空=继承全局）",
+      "keys.remainingRequests": "剩余请求",
+      "keys.remainingTokens": "剩余 Token",
+      "keys.resetsAt": "重置时间",
+      "keys.noReset": "不重置",
+      "keys.unlimited": "不限",
+      "keys.invalidQuota": "请求和 Token 配额必须是非负整数或留空。",
+      "keys.invalidMaxConcurrent": "并发上限必须是大于等于 1 的整数或留空。",
+      "keys.invalidWeight": "缓存读权重必须是 0 到 1 之间的数字或留空。",
+      "keys.invalidTimezone": "请输入有效的 IANA 时区，例如 UTC 或 Asia/Singapore。",
+      "keys.invalidPolicy": "请检查策略输入。",
       "keys.save": "保存",
       "keys.cancel": "取消",
       "keys.resetUsage": "重置本期用量",
+      "keys.saved": "策略已保存",
+      "keys.usageReset": "本期用量已重置",
       "keys.usageNow": "本期 {period}：请求 {req}，Token {tok}",
       "keys.disabled": "已停用",
       "keys.enabled": "可用",
@@ -1473,6 +1490,12 @@
       "modal.cacheR": "缓存读",
       "modal.cacheW": "缓存写",
       "modal.reason": "推理 Token",
+      "modal.cost": "上游 Agent 累计费用快照",
+      "modal.costRaw": "原始费用",
+      "modal.costCharged": "计费费用",
+      "modal.costUnit": "分",
+      "modal.costUnknown": "未知",
+      "modal.costNote": "这是上游 Agent 累计费用快照，可能延迟或尚未完整，不能相加作为请求费用。",
       "modal.req": "请求",
       "modal.res": "响应",
       "modal.copyId": "复制 ID",
@@ -1659,9 +1682,21 @@
       "keys.quotaTz": "Time zone (IANA)",
       "keys.maxConcurrent": "Max concurrent (empty = unlimited)",
       "keys.cacheWeight": "Cache-read token weight 0–1 (empty = inherit global)",
+      "keys.remainingRequests": "Remaining requests",
+      "keys.remainingTokens": "Remaining tokens",
+      "keys.resetsAt": "Resets at",
+      "keys.noReset": "No reset",
+      "keys.unlimited": "Unlimited",
+      "keys.invalidQuota": "Request and token quotas must be non-negative integers or empty.",
+      "keys.invalidMaxConcurrent": "Max concurrent must be an integer of at least 1 or empty.",
+      "keys.invalidWeight": "Cache-read weight must be a number from 0 to 1 or empty.",
+      "keys.invalidTimezone": "Enter a valid IANA time zone, such as UTC or Asia/Singapore.",
+      "keys.invalidPolicy": "Check the policy inputs.",
       "keys.save": "Save",
       "keys.cancel": "Cancel",
       "keys.resetUsage": "Reset current usage",
+      "keys.saved": "Policy saved",
+      "keys.usageReset": "Current usage reset",
       "keys.usageNow": "Period {period}: {req} requests, {tok} tokens",
       "keys.disabled": "Disabled",
       "keys.enabled": "Enabled",
@@ -1745,6 +1780,12 @@
       "modal.cacheR": "Cache read",
       "modal.cacheW": "Cache write",
       "modal.reason": "Reasoning tokens",
+      "modal.cost": "Upstream Agent cumulative cost snapshot",
+      "modal.costRaw": "Raw cost",
+      "modal.costCharged": "Charged cost",
+      "modal.costUnit": "cents",
+      "modal.costUnknown": "Unknown",
+      "modal.costNote": "This is an upstream Agent cumulative cost snapshot; it may be delayed or incomplete and must not be added up as request cost.",
       "modal.req": "Request",
       "modal.res": "Response",
       "modal.copyId": "Copy ID",
@@ -2352,21 +2393,108 @@
 
     let keyCache = new Map();
 
+    function formatRemaining(value) {
+      if (value === null) return t("keys.unlimited");
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return t("overview.unknown");
+      return fmtNum(value);
+    }
+
+    function formatReset(value) {
+      if (value === null || value === undefined || value === "") return t("keys.noReset");
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? t("overview.unknown") : formatTime(value);
+    }
+
     function policySummary(row) {
-      const parts = [];
-      if (Array.isArray(row.allowed_models)) parts.push(`models: ${row.allowed_models.length ? row.allowed_models.join(", ") : "∅"}`);
-      if (row.allow_max_mode === true || row.allow_max_mode === false) parts.push(`max: ${row.allow_max_mode ? "on" : "off"}`);
-      const u = row.usage_current || {};
-      if (row.quota_requests !== null && row.quota_requests !== undefined) parts.push(`req ${fmtNum(u.requests ?? 0)}/${fmtNum(row.quota_requests)}`);
-      if (row.quota_tokens !== null && row.quota_tokens !== undefined) parts.push(`tok ${fmtNum(u.tokens ?? 0)}/${fmtNum(row.quota_tokens)}`);
-      if ((row.quota_requests ?? null) !== null || (row.quota_tokens ?? null) !== null) parts.push(String(row.quota_period ?? "total"));
-      if (row.max_concurrent !== null && row.max_concurrent !== undefined) parts.push(`conc ${fmtNum(u.in_flight ?? 0)}/${fmtNum(row.max_concurrent)}`);
-      return parts.length ? escapeHtml(parts.join(" · ")) : t("keys.unrestricted");
+      const lines = [];
+      const policy = [];
+      if (Array.isArray(row.allowed_models)) policy.push(`models: ${row.allowed_models.length ? row.allowed_models.join(", ") : "∅"}`);
+      if (row.allow_max_mode === true || row.allow_max_mode === false) policy.push(`max: ${row.allow_max_mode ? "on" : "off"}`);
+      const u = row.usage_current && typeof row.usage_current === "object" ? row.usage_current : null;
+      if (row.quota_requests !== null && row.quota_requests !== undefined) policy.push(`req ${fmtNum(u?.requests ?? 0)}/${fmtNum(row.quota_requests)}`);
+      if (row.quota_tokens !== null && row.quota_tokens !== undefined) policy.push(`tok ${fmtNum(u?.tokens ?? 0)}/${fmtNum(row.quota_tokens)}`);
+      if ((row.quota_requests ?? null) !== null || (row.quota_tokens ?? null) !== null) policy.push(String(row.quota_period ?? "total"));
+      if (row.max_concurrent !== null && row.max_concurrent !== undefined) policy.push(`conc ${fmtNum(u?.in_flight ?? 0)}/${fmtNum(row.max_concurrent)}`);
+      if (policy.length) lines.push(policy.join(" · "));
+
+      if (u) {
+        const remaining = [];
+        if (Object.prototype.hasOwnProperty.call(u, "remaining_requests")) {
+          remaining.push(`${t("keys.remainingRequests")}: ${formatRemaining(u.remaining_requests)}`);
+        }
+        if (Object.prototype.hasOwnProperty.call(u, "remaining_tokens")) {
+          remaining.push(`${t("keys.remainingTokens")}: ${formatRemaining(u.remaining_tokens)}`);
+        }
+        if (remaining.length) lines.push(remaining.join(" · "));
+        if (Object.prototype.hasOwnProperty.call(u, "resets_at")) {
+          const zone = typeof row.quota_tz === "string" && row.quota_tz.trim()
+            ? row.quota_tz.trim()
+            : t("overview.unknown");
+          lines.push(`${t("keys.resetsAt")}: ${formatReset(u.resets_at)} · ${t("keys.quotaTz")}: ${zone}`);
+        }
+      }
+
+      if (!lines.length) return t("keys.unrestricted");
+      return `<span class="policy-summary">${lines.map((line) => `<span class="policy-summary-line">${escapeHtml(line)}</span>`).join("")}</span>`;
     }
 
     function numOrNull(value) {
       const v = String(value ?? "").trim();
       return v === "" ? null : Number(v);
+    }
+
+    function isIanaTimeZone(value) {
+      const zone = String(value ?? "").trim();
+      if (!/^[A-Za-z][A-Za-z0-9_+\-]*(\/[A-Za-z0-9_+\-]+)*$/.test(zone)) return false;
+      try {
+        const resolved = new Intl.DateTimeFormat("en-US", { timeZone: zone }).resolvedOptions().timeZone;
+        return Boolean(resolved) && !/^[+-]/.test(resolved);
+      } catch {
+        return false;
+      }
+    }
+
+    function policyFieldError(field) {
+      switch (field?.getAttribute("data-f")) {
+        case "quota_requests":
+        case "quota_tokens":
+          return t("keys.invalidQuota");
+        case "max_concurrent":
+          return t("keys.invalidMaxConcurrent");
+        case "quota_cache_read_weight":
+          return t("keys.invalidWeight");
+        case "quota_tz":
+          return t("keys.invalidTimezone");
+        default:
+          return t("keys.invalidPolicy");
+      }
+    }
+
+    function validatePolicyForm(ed, errorId) {
+      const form = ed.querySelector('[data-pe="form"]');
+      if (!form) return false;
+      const fields = [...form.querySelectorAll("[data-f]")];
+      fields.forEach((field) => {
+        field.setCustomValidity("");
+        field.removeAttribute("aria-invalid");
+        field.removeAttribute("aria-describedby");
+      });
+      const tz = form.querySelector('[data-f="quota_tz"]');
+      if (tz && !isIanaTimeZone(tz.value)) tz.setCustomValidity(t("keys.invalidTimezone"));
+      const valid = form.reportValidity();
+      if (valid) {
+        hide(errorId);
+        return true;
+      }
+      const invalid = fields.find((field) => !field.validity.valid);
+      if (invalid) {
+        invalid.setAttribute("aria-invalid", "true");
+        invalid.setAttribute("aria-describedby", errorId);
+        showError(errorId, policyFieldError(invalid));
+      } else {
+        showError(errorId, t("keys.invalidPolicy"));
+      }
+      return false;
     }
 
     function openPolicyEditor(id) {
@@ -2378,9 +2506,11 @@
       const max = row.allow_max_mode === true ? "true" : row.allow_max_mode === false ? "false" : "inherit";
       const period = String(row.quota_period ?? "total");
       const u = row.usage_current || {};
+      const safeId = String(id).replace(/[^A-Za-z0-9_-]/g, "_") || "key";
+      const errorId = `policy-error-${safeId}`;
       const ed = document.createElement("tr");
       ed.className = "policy-editor";
-      ed.innerHTML = `<td colspan="9"><div class="stack">
+      ed.innerHTML = `<td colspan="9"><div class="stack"><form data-pe="form" novalidate aria-describedby="${errorId}">
         <strong>${t("keys.policyTitle")}</strong>
         <label>${t("keys.allowedModels")}<textarea data-f="allowed_models" rows="3">${escapeHtml(Array.isArray(row.allowed_models) ? row.allowed_models.join("\n") : "")}</textarea></label>
         <label>${t("keys.allowMax")} <select data-f="allow_max_mode">
@@ -2388,29 +2518,54 @@
           <option value="true"${max === "true" ? " selected" : ""}>${t("keys.allowMaxYes")}</option>
           <option value="false"${max === "false" ? " selected" : ""}>${t("keys.allowMaxNo")}</option></select>
           <span class="muted" data-info="effective_max">${t("keys.allowMaxEffective")}: ${row.effective_allow_max_mode === false ? t("keys.allowMaxNo") : t("keys.allowMaxYes")}${row.allow_max_mode === true && row.effective_allow_max_mode === false ? ` (${t("keys.allowMaxCeiling")})` : ""}</span></label>
-        <label>${t("keys.quotaRequests")} <input data-f="quota_requests" type="number" min="0" value="${row.quota_requests ?? ""}"></label>
-        <label>${t("keys.quotaTokens")} <input data-f="quota_tokens" type="number" min="0" value="${row.quota_tokens ?? ""}"></label>
+        <label>${t("keys.quotaRequests")} <input data-f="quota_requests" type="number" min="0" step="1" inputmode="numeric" value="${escapeHtml(row.quota_requests ?? "")}"></label>
+        <label>${t("keys.quotaTokens")} <input data-f="quota_tokens" type="number" min="0" step="1" inputmode="numeric" value="${escapeHtml(row.quota_tokens ?? "")}"></label>
         <label>${t("keys.quotaPeriod")} <select data-f="quota_period">
           ${["total", "daily", "monthly"].map((p) => `<option value="${p}"${p === period ? " selected" : ""}>${t("keys.period" + p[0].toUpperCase() + p.slice(1))}</option>`).join("")}</select></label>
-        <label>${t("keys.quotaTz")} <input data-f="quota_tz" type="text" value="${escapeHtml(String(row.quota_tz ?? "UTC"))}"></label>
-        <label>${t("keys.cacheWeight")} <input data-f="quota_cache_read_weight" type="number" min="0" max="1" step="0.05" value="${row.quota_cache_read_weight ?? ""}"></label>
-        <label>${t("keys.maxConcurrent")} <input data-f="max_concurrent" type="number" min="1" value="${row.max_concurrent ?? ""}"></label>
+        <label>${t("keys.quotaTz")} <input data-f="quota_tz" type="text" required value="${escapeHtml(String(row.quota_tz ?? "UTC"))}"></label>
+        <label>${t("keys.cacheWeight")} <input data-f="quota_cache_read_weight" type="number" min="0" max="1" step="any" inputmode="decimal" value="${escapeHtml(row.quota_cache_read_weight ?? "")}"></label>
+        <label>${t("keys.maxConcurrent")} <input data-f="max_concurrent" type="number" min="1" step="1" inputmode="numeric" value="${escapeHtml(row.max_concurrent ?? "")}"></label>
         <span class="muted">${escapeHtml(t("keys.usageNow").replace("{period}", String(u.period_start ?? "total")).replace("{req}", fmtNum(u.requests ?? 0)).replace("{tok}", fmtNum(u.tokens ?? 0)))}</span>
         <div class="row">
-          <button class="btn btn-primary btn-small" type="button" data-pe="save">${t("keys.save")}</button>
+          <button class="btn btn-primary btn-small" type="submit" data-pe="save">${t("keys.save")}</button>
           <button class="btn btn-secondary btn-small" type="button" data-pe="reset">${t("keys.resetUsage")}</button>
           <button class="btn btn-secondary btn-small" type="button" data-pe="cancel">${t("keys.cancel")}</button>
-        </div></div></td>`;
+        </div>
+        <p id="${errorId}" class="error policy-error" hidden role="alert"></p>
+      </form></div></td>`;
       tr.after(ed);
       const f = (name) => ed.querySelector(`[data-f="${name}"]`);
-      ed.querySelector('[data-pe="cancel"]').addEventListener("click", () => ed.remove());
-      ed.querySelector('[data-pe="reset"]').addEventListener("click", async () => {
+      const form = ed.querySelector('[data-pe="form"]');
+      const reset = ed.querySelector('[data-pe="reset"]');
+      const cancel = ed.querySelector('[data-pe="cancel"]');
+      let pending = false;
+      const setBusy = (busy) => {
+        pending = busy;
+        form.setAttribute("aria-busy", String(busy));
+        ed.querySelectorAll("button, input, select, textarea").forEach((control) => { control.disabled = busy; });
+        tr.querySelectorAll("button").forEach((control) => { control.disabled = busy; });
+      };
+      cancel.addEventListener("click", () => { if (!pending) ed.remove(); });
+      reset.addEventListener("click", async () => {
+        if (pending) return;
         hide("keys-error");
-        await adminApi("POST", `/admin/api/keys/${encodeURIComponent(id)}/usage/reset`, {}, "keys-error");
-        await loadKeys();
+        hide(errorId);
+        setBusy(true);
+        try {
+          const ok = await adminApi("POST", `/admin/api/keys/${encodeURIComponent(id)}/usage/reset`, {}, errorId);
+          if (ok) {
+            toast(t("keys.usageReset"));
+            await loadKeys();
+          }
+        } finally {
+          setBusy(false);
+        }
       });
-      ed.querySelector('[data-pe="save"]').addEventListener("click", async () => {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (pending || !validatePolicyForm(ed, errorId)) return;
         hide("keys-error");
+        hide(errorId);
         const models = String(f("allowed_models").value).split(/\r?\n|,/).map((m) => m.trim()).filter(Boolean);
         const maxValue = f("allow_max_mode").value;
         const body = {
@@ -2419,12 +2574,20 @@
           quota_requests: numOrNull(f("quota_requests").value),
           quota_tokens: numOrNull(f("quota_tokens").value),
           quota_period: f("quota_period").value,
-          quota_tz: String(f("quota_tz").value).trim() || "UTC",
+          quota_tz: String(f("quota_tz").value).trim(),
           max_concurrent: numOrNull(f("max_concurrent").value),
           quota_cache_read_weight: numOrNull(f("quota_cache_read_weight").value),
         };
-        const ok = await adminApi("PATCH", `/admin/api/keys/${encodeURIComponent(id)}`, body, "keys-error");
-        if (ok) await loadKeys();
+        setBusy(true);
+        try {
+          const ok = await adminApi("PATCH", `/admin/api/keys/${encodeURIComponent(id)}`, body, errorId);
+          if (ok) {
+            toast(t("keys.saved"));
+            await loadKeys();
+          }
+        } finally {
+          setBusy(false);
+        }
       });
     }
 
@@ -2857,7 +3020,30 @@
       $("log-modal-close").focus();
     }
 
+    function trustedCostCents(value) {
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+    }
+
+    function formatCostCents(value) {
+      if (value === null) return t("modal.costUnknown");
+      // Keep the SDK double's complete decimal/scientific representation; fmtNum caps fractions at 3.
+      return `${String(value)} ${t("modal.costUnit")}`;
+    }
+
+    function costSnapshot(row) {
+      if (row.cost_scope !== "agent_total") {
+        return { value: t("modal.costUnknown"), note: "" };
+      }
+      const raw = trustedCostCents(row.raw_cost_cents);
+      const charged = trustedCostCents(row.charged_cents);
+      return {
+        value: `${t("modal.costRaw")}: ${formatCostCents(raw)} · ${t("modal.costCharged")}: ${formatCostCents(charged)}`,
+        note: t("modal.costNote"),
+      };
+    }
+
     function renderLogDetail(row) {
+      const cost = costSnapshot(row);
       const meta = [
         [t("modal.time"), formatTime(row.created_at)],
         [t("modal.model"), String(row.model ?? "")],
@@ -2874,17 +3060,19 @@
         [t("modal.cacheR"), row.cache_read_tokens == null ? "—" : fmtNum(row.cache_read_tokens)],
         [t("modal.cacheW"), row.cache_write_tokens == null ? "—" : fmtNum(row.cache_write_tokens)],
         [t("modal.reason"), row.reasoning_tokens == null ? "—" : fmtNum(row.reasoning_tokens)],
+        [t("modal.cost"), cost.value],
       ];
       const metaHtml = `<div class="modal-meta">${meta.map(([k, v]) =>
         `<div class="meta-item"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div></div>`,
       ).join("")}</div>`;
+      const costNote = cost.note ? `<p class="muted cost-note">${escapeHtml(cost.note)}</p>` : "";
       const requestBlock = row.request_detail
         ? copyableDetailBlock(t("modal.req"), formatDetailJson(row.request_detail))
         : `<div class="detail-empty">${t(logDetailedEnabled ? "modal.noReqOn" : "modal.noReq")}</div>`;
       const responseBlock = row.response_detail
         ? copyableDetailBlock(t("modal.res"), formatDetailJson(row.response_detail))
         : `<div class="detail-empty">${t(logDetailedEnabled ? "modal.noResOn" : "modal.noRes")}</div>`;
-      return metaHtml + requestBlock + responseBlock;
+      return metaHtml + costNote + requestBlock + responseBlock;
     }
 
     function copyableDetailBlock(title, text) {

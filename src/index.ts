@@ -548,6 +548,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       request_detail: requestDetail,
       response_detail: responseDetail,
       max_mode: maxModeOf(chatResult, maxDispatched),
+      ...costFields(chatResult),
     });
     logInfo("chat completed", {
       request_id: requestId,
@@ -782,6 +783,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       request_detail: requestDetail,
       response_detail: responseDetail,
       max_mode: maxModeOf(chatResult, maxDispatched),
+      ...costFields(chatResult),
     });
     logInfo("responses completed", {
       request_id: requestId,
@@ -901,6 +903,21 @@ function maxModeOf(result: CursorChatResult | null, dispatched = false): number 
   if (dispatched) return 1;
   if (!result) return null;
   return result.max_mode === true ? 1 : 0;
+}
+
+function costFields(result: CursorChatResult | null): {
+  raw_cost_cents: number | null;
+  charged_cents: number | null;
+  cost_scope: "agent_total" | null;
+} {
+  const raw = result?.cost?.raw_cost_cents;
+  const charged = result?.cost?.charged_cents;
+  const valid = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+  if (!valid(raw) || !valid(charged)) {
+    return { raw_cost_cents: null, charged_cents: null, cost_scope: null };
+  }
+  return { raw_cost_cents: raw, charged_cents: charged, cost_scope: "agent_total" };
 }
 
 /** Redact before truncating so a cut can't leave a partial secret that the patterns no longer match. */

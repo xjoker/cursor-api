@@ -238,6 +238,10 @@ Browser console at `/admin/`: overview (including a 7-day call chart), client ke
 
 The overview shows the running version, commit, database schema, and effective runtime settings (read-only). Request logs translate common failure codes while retaining the original code and display Max mode as Max, Standard, or Not recorded; an unrecorded mode does not establish whether an upstream request ran or incurred charges.
 
+The client key list shows remaining requests, remaining tokens, the reset time, and the quota time zone. Policy edits validate inputs, prevent duplicate save/reset operations while pending, and preserve inputs on failure.
+
+Request logs store upstream-reported `raw_cost_cents`, `charged_cents`, and `cost_scope` independently of detailed body logging. `cost_scope: "agent_total"` denotes an **Agent cumulative cost snapshot** in float cents. Upstream billing events may arrive late, so snapshots may be incomplete and must not be summed as individual request costs. Unknown costs and pre-upgrade records remain `null`; explicitly reported zero costs remain `0`. Cost metadata follows request log retention, is not a permanent billing ledger, and does not impose a hard monetary limit.
+
 Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`). `DELETE /admin/api/keys/{id}` removes a client key and keeps its request logs. `GET /admin/api/system-logs` lists gateway stdout/stderr events stored in SQLite. `GET /admin/api/cursor-keys` shows the upstream key pool (sha256 fingerprint, `healthy` / `cooling_down`, failure counters; keys are never returned). The overview includes `cursor_keys: {total, healthy}`.
 
 ### Per-key model policy and quotas

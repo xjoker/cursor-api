@@ -240,6 +240,10 @@ print(client.chat.completions.create(
 
 总览展示运行中的版本、提交、数据库 schema 和当前生效配置（只读）。请求日志为常见错误码提供中文说明并保留原始码，显示 Max 模式的 Max、普通、未记录三种状态；未记录不能用于判断是否请求过上游或产生费用。
 
+客户端 Key 列表显示剩余请求、剩余 Token、重置时间和配额时区；策略编辑会校验输入，保存或重置期间防止重复操作，失败保留输入。
+
+请求日志独立保存上游报告的 `raw_cost_cents`、`charged_cents` 和 `cost_scope`，无需开启详细正文日志。`cost_scope: "agent_total"` 表示 **Agent 累计费用快照**，单位为浮点分（cents）；上游账单事件可能延迟，快照可能不完整，不能相加作为各次请求的费用。未知费用及升级前的记录保留 `null`，显式报告的零值保留 `0`。费用元数据与请求日志遵循相同保留策略，不是永久账单账本，也不提供金额硬限额。
+
 管理 API：`/admin/api/*`，用同一把 `admin_access_key`（`Authorization: Bearer` 或 `X-Management-Key`）。`DELETE /admin/api/keys/{id}` 删除客户端 Key，历史请求日志保留。`GET /admin/api/system-logs` 列出写入 SQLite 的网关 stdout/stderr 事件。`GET /admin/api/cursor-keys` 查看上游 key 池状态（sha256 指纹、`healthy` / `cooling_down`、失败计数；不返回 key 本身）。概览接口包含 `cursor_keys: {total, healthy}`。
 
 ### 按 Key 的模型策略与配额

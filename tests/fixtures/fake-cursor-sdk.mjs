@@ -140,6 +140,20 @@ export const Cursor = {
 let agentSeq = 0;
 const agentOwners = new Map();
 
+function billedUsage() {
+  const rawText = process.env.FAKE_SDK_COST_RAW_CENTS;
+  const chargedText = process.env.FAKE_SDK_COST_CHARGED_CENTS;
+  if (rawText === undefined && chargedText === undefined) return undefined;
+  return {
+    usage: { inputTokens: 11, outputTokens: 2, totalTokens: 16, cacheReadTokens: 3, cacheWriteTokens: 0 },
+    cost: {
+      rawCostCents: rawText === undefined ? undefined : Number(rawText),
+      chargedCents: chargedText === undefined ? undefined : Number(chargedText),
+    },
+    runs: [],
+  };
+}
+
 function makeAgent(apiKey, agentId, model, resumed = false) {
   return {
     agentId,
@@ -294,7 +308,7 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
       };
     },
     async getUsage() {
-      return undefined;
+      return billedUsage();
     },
     close() { calls.disposed.push(agentId); ledger({ event: "dispose", agentId }); },
     async [Symbol.asyncDispose]() { calls.disposed.push(agentId); ledger({ event: "dispose", agentId }); },
