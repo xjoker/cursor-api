@@ -116,7 +116,7 @@ detailed = false
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
 | `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数而不返回 400（默认 **false**） |
-| `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params`/`reasoning_effort` 指向 max 变体）返回 `403 max_mode_not_allowed`。Anthropic 的 `output_config.effort` 属于软提示，会被丢弃而不是报错。每条请求日志都会记录 `max_mode` |
+| `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params`/`reasoning_effort` 指向 max 变体）返回 `403 max_mode_not_allowed`。软提示（Anthropic 的 `output_config.effort` / `thinking.budget_tokens`、Responses 的 `reasoning.effort`）会被丢弃而不是报错，并写日志（`max mode disallowed: using non-max variant`，字段 `softened_hint`）。只在 max 变体里出现的参数值（如 `context=1m`）即使和其他参数混用也不会被发出。`Agent.create` / `resume` / `send` 之后，网关还会检查 SDK 实际解析出的模型（`agent.model` / `run.model`，可能和网关目录不一致）；如果是 max mode，就释放 agent 或取消 run，返回 `403`（流式时是一条 SSE 错误帧，并且在检查通过前不会输出任何模型文本）。每条请求日志记录的是**实际**的 `max_mode` |
 | `quota_cache_read_weight` | 缓存读 Token 计入按 Key `quota_tokens` 的权重（0–1，环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 **1.0**）；Key 自己的 `quota_cache_read_weight` 优先 |
 | `sse_keepalive_ms` | 空闲流式响应发送 `: keepalive` 注释的间隔（默认 **15000**；`0` 关闭） |
 | `cors_allow_origins` | 浏览器跨域来源，默认 `"*"`；用逗号分隔精确来源（如 `"https://app.example.com,http://localhost:5173"`），空字符串关闭 CORS。环境变量 `CORS_ALLOW_ORIGINS` 可覆盖，包括空值 |
@@ -281,7 +281,7 @@ print(client.chat.completions.create(
 | 字段 | 含义 |
 | --- | --- |
 | `allowed_models` | `null` = 不限模型；否则是精确模型 id 或 `*` 通配（不区分大小写）的列表，例如 `["gemini-*", "composer-2.5"]`。在 `model_aliases` 映射之后检查，并对解析出的目录 id 再检查一次，所以别名无法绕过白名单。通配只匹配目录 id，目录别名必须精确列出。`GET /v1/models` 只列出允许的模型，`GET /v1/models/{id}` 对其余模型返回 404。不允许的模型返回 `403 model_not_allowed`（`param: "model"`）。 |
-| `allow_max_mode` | `null` = 继承网关的 `allow_max_mode`；`true` / `false` 为该 Key 双向覆盖全局设置，回退 / `403 max_mode_not_allowed` 行为与全局一致。 |
+| `allow_max_mode` | `null` = 继承网关的 `allow_max_mode`；`true` / `false` 为该 Key 双向覆盖全局设置，回退 / `403 max_mode_not_allowed` 行为与全局一致（包括对 SDK 实际解析模型的检查）。 |
 | `quota_requests` | 每周期最多请求数。在上游 run 之前原子预扣（并发请求不会超额），run 没有启动则退还。 |
 | `quota_tokens` | 每周期 Token 额度，属于**软上限**：已用 Token 低于额度就放行，请求结束后再累加，所以最后一个请求可能超出。 |
 | `quota_period` | `total`（默认，永不重置）、`daily`、`monthly`。 |

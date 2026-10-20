@@ -20,7 +20,8 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 ### Added
 
 - `allow_max_mode`（`ALLOW_MAX_MODE`，默认 `true`）：设为 `false` 时网关按 SDK 的同一规则检测 max mode，自动换成非 max 变体，无法换时返回 `403 max_mode_not_allowed`（覆盖 `params`、`variant`、`reasoning_effort`、Anthropic `output_config.effort`、模型别名、续会话和换 Key 重试）。
-- 请求日志新增 `max_mode` 列（1/0，未跑到 run 时为空），`GET /admin/api/logs` 返回该字段；系统日志 `chat/messages/responses completed` 带 `max_mode`。
+- `allow_max_mode=false` 加固（Elliot 第 2 轮审查）：只在 max 变体里出现的参数值（如 `context=1m` 混搭 `reasoning_effort=low`）一律 `403`，不再原样放行；`Agent.create`/`resume`/`send` 后检查 SDK 实际解析的 `agent.model` / `run.model`，是 max 就释放 agent / 取消 run 并 403（禁用时流式输出会等这一步检查完再开始）；回退变体同分时按参数字典序决定，不依赖目录顺序；软提示被丢弃时写日志；设置了 `CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON` 时启动告警。
+- 请求日志新增 `max_mode` 列（记录 SDK 实际解析值）（1/0，未跑到 run 时为空），`GET /admin/api/logs` 返回该字段；系统日志 `chat/messages/responses completed` 带 `max_mode`。
 - `/v1/models` 的 `variants[]` 对仅支持 max mode 的变体返回 `is_max_mode: true`。
 - **按 Key 的模型策略与配额**（SAF-95）：客户端 Key 新增 `allowed_models`（精确 / `*` 通配，别名无法绕过，`/v1/models` 按 Key 过滤，`403 model_not_allowed`）、`allow_max_mode`（`null` 继承全局，`true/false` 覆盖）、`quota_requests` / `quota_tokens`（`total` / `daily` / `monthly`，按 `quota_tz` 时区；请求数原子预扣、run 未启动则退还；Token 为软上限，结束后按单次 run 用量累加）、`max_concurrent`。超额返回 `429 insufficient_quota`（带 `Retry-After`），超并发返回 `429 concurrency_limit_exceeded`。
 - 管理 API：`PATCH /admin/api/keys/{id}`、`GET /admin/api/keys/{id}/usage`、`POST /admin/api/keys/{id}/usage/reset`；`POST /admin/api/keys` 与 `GET /admin/api/keys` 支持 / 返回策略字段与本周期用量。管理台「客户端 Key」新增策略编辑。
