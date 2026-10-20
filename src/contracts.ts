@@ -162,6 +162,11 @@ export interface RequestLogRow {
   gateway_ms: number | null;
   request_detail: string | null;
   response_detail: string | null;
+  /** Agent cumulative cost snapshot in float cents; absent on legacy callers. */
+  raw_cost_cents?: number | null;
+  charged_cents?: number | null;
+  /** Cost scope is currently only trusted for the cumulative Agent snapshot. */
+  cost_scope?: "agent_total" | null;
   /** 1 = run used Cursor max mode, 0 = not, null = unknown (no run / legacy row). */
   max_mode?: number | null;
   has_detail?: boolean;

@@ -27,8 +27,8 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
 /** Per-row cap for the client-controlled `model` column (UTF-8 bytes). */
 export const MAX_LOG_MODEL_BYTES = 256;
 
-/** 9: request_logs.max_mode. 10: per-key model / quota policy + api_key_usage. 11: api_keys.quota_cache_read_weight. */
-export const SCHEMA_VERSION = 11;
+/** 9: request_logs.max_mode. 10: per-key model / quota policy + api_key_usage. 11: api_keys.quota_cache_read_weight. 12: request_logs cost snapshots. */
+export const SCHEMA_VERSION = 12;
 const MAX_CONVERSATIONS_PER_KEY = 1_000;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS request_logs (
   upstream_ms INTEGER,
   gateway_ms INTEGER,
   request_detail TEXT,
-  response_detail TEXT
+  response_detail TEXT,
+  raw_cost_cents REAL,
+  charged_cents REAL,
+  cost_scope TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model);
@@ -416,15 +419,34 @@ function mapKeyUsage(row: Record<string, unknown>): KeyUsageRow {
  * Request logs are shown in the admin UI, so they get the same secret masking as stdout and
  * system_logs. Callers should redact before truncating (see index.ts); this is the last line.
  */
+function normalizeLogCost(row: RequestLogRow): {
+  raw_cost_cents: number | null;
+  charged_cents: number | null;
+  cost_scope: "agent_total" | null;
+} {
+  const valid = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+  if (!valid(row.raw_cost_cents) || !valid(row.charged_cents)) {
+    return { raw_cost_cents: null, charged_cents: null, cost_scope: null };
+  }
+  return {
+    raw_cost_cents: row.raw_cost_cents,
+    charged_cents: row.charged_cents,
+    cost_scope: row.cost_scope === "agent_total" ? "agent_total" : null,
+  };
+}
+
 export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
+  const cost = normalizeLogCost(row);
   db.prepare(
     `INSERT INTO request_logs (
       id, api_key_id, path, model, stream, http_status, duration_ms,
       input_tokens, output_tokens, total_tokens,
       cache_read_tokens, cache_write_tokens, reasoning_tokens,
       error_code, created_at,
-      upstream_ms, gateway_ms, request_detail, response_detail, max_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      upstream_ms, gateway_ms, request_detail, response_detail,
+      raw_cost_cents, charged_cents, cost_scope, max_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.api_key_id,
@@ -445,6 +467,9 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.gateway_ms,
     row.request_detail === null ? null : redactStoredText(row.request_detail),
     row.response_detail === null ? null : redactStoredText(row.response_detail),
+    cost.raw_cost_cents,
+    cost.charged_cents,
+    cost.cost_scope,
     row.max_mode ?? null,
   );
   pruneRequestLogs(db);
@@ -462,7 +487,8 @@ export function listRequestLogs(db: DatabaseSync, query: RequestLogQuery): {
               l.input_tokens, l.output_tokens, l.total_tokens,
               l.cache_read_tokens, l.cache_write_tokens, l.reasoning_tokens,
               l.error_code, l.created_at,
-              l.upstream_ms, l.gateway_ms, l.max_mode,
+              l.upstream_ms, l.gateway_ms,
+              l.raw_cost_cents, l.charged_cents, l.cost_scope, l.max_mode,
               CASE WHEN l.request_detail IS NOT NULL OR l.response_detail IS NOT NULL THEN 1 ELSE 0 END AS has_detail,
               k.name AS key_name, k.key_prefix AS key_prefix
        FROM request_logs l
@@ -755,6 +781,15 @@ function migrateRequestLogs(db: DatabaseSync): void {
   }
   if (!columns.has("max_mode")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN max_mode INTEGER");
+  }
+  if (!columns.has("raw_cost_cents")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN raw_cost_cents REAL");
+  }
+  if (!columns.has("charged_cents")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN charged_cents REAL");
+  }
+  if (!columns.has("cost_scope")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN cost_scope TEXT");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
@@ -1057,6 +1092,9 @@ function mapRequestLog(row: Record<string, unknown>): RequestLogRow {
     gateway_ms: asNullableNumber(row.gateway_ms),
     request_detail: asNullableString(row.request_detail),
     response_detail: asNullableString(row.response_detail),
+    raw_cost_cents: asNullableNumber(row.raw_cost_cents),
+    charged_cents: asNullableNumber(row.charged_cents),
+    cost_scope: row.cost_scope === "agent_total" ? "agent_total" : null,
     max_mode: asNullableNumber(row.max_mode),
     has_detail:
       asNullableString(row.request_detail) !== null || asNullableString(row.response_detail) !== null,
