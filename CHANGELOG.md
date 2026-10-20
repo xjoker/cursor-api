@@ -26,6 +26,16 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 - **按 Key 的模型策略与配额**（SAF-95）：客户端 Key 新增 `allowed_models`（精确 / `*` 通配，别名无法绕过，`/v1/models` 按 Key 过滤，`403 model_not_allowed`）、`allow_max_mode`（`null` 继承全局，`true/false` 覆盖）、`quota_requests` / `quota_tokens`（`total` / `daily` / `monthly`，按 `quota_tz` 时区；请求数原子预扣、run 未启动则退还；Token 为软上限，结束后按单次 run 用量累加）、`max_concurrent`。超额返回 `429 insufficient_quota`（带 `Retry-After`），超并发返回 `429 concurrency_limit_exceeded`。
 - 管理 API：`PATCH /admin/api/keys/{id}`、`GET /admin/api/keys/{id}/usage`、`POST /admin/api/keys/{id}/usage/reset`；`POST /admin/api/keys` 与 `GET /admin/api/keys` 支持 / 返回策略字段与本周期用量。管理台「客户端 Key」新增策略编辑。
 - 数据库：`api_keys` 新增策略列、新表 `api_key_usage`，schema 版本 10（与 max_mode 的 9 合并升级）。旧 Key 迁移后不受限制。
+- SAF-95 审查第 1 轮返工（Elliot）：
+  - 客户端中断：run 启动后中断按 run 用量计 Token，拿不到用量时按估算计。
+  - `quota_tokens` 准入时预留估算值，结束后多退少补，并发不再能成倍超额。
+  - 挂起的工具轮在挂起时按估算计费，并占用 `max_concurrent` 槽直到续轮或超时。
+  - 午夜夏令时时区的 `resets_at` 不再早 1 小时。
+  - 删 Key 后在途请求不再写回孤儿 usage 行。
+  - `quota_tz` 存规范 IANA 名，拒绝 UTC 偏移，读时回退 UTC。
+  - 准入预检不再计入上游 Key 统计，也不推进轮转。
+  - `PRAGMA user_version` 写入 schema 版本，迁移容忍并发的 duplicate column。
+  - **全局 `ALLOW_MAX_MODE=false` 是硬上限**，按 Key 的 `allow_max_mode` 只能进一步收紧（实际生效 = 全局 AND Key）。
 - 已知限制：以客户端工具调用结束的轮次可能少计 Token；暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。
 
 ---

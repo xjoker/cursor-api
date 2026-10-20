@@ -32,7 +32,7 @@ import { listCursorModels, peekCursorAccount } from "./cursor.js";
 import { sessionStats } from "./session.js";
 import {
   inFlightRequests,
-  isValidTimeZone,
+  canonicalTimeZone,
   parseAllowedModelsInput,
   periodKey,
   periodResetsAt,
@@ -310,10 +310,12 @@ function parsePolicyFields(body: unknown): Partial<ApiKeyPolicyFields> {
     out.quota_period = body.quota_period as QuotaPeriod;
   }
   if (body.quota_tz !== undefined) {
-    if (typeof body.quota_tz !== "string" || body.quota_tz.trim() === "" || !isValidTimeZone(body.quota_tz.trim())) {
-      throw invalidRequest("quota_tz must be an IANA time zone such as 'UTC' or 'Asia/Singapore'");
+    const canonical = typeof body.quota_tz === "string" ? canonicalTimeZone(body.quota_tz) : undefined;
+    if (canonical === undefined) {
+      throw invalidRequest("quota_tz must be an IANA time zone such as 'UTC' or 'Asia/Singapore' (no UTC offsets)");
     }
-    out.quota_tz = body.quota_tz.trim();
+    // Stored canonical (e.g. `asia/singapore` → `Asia/Singapore`).
+    out.quota_tz = canonical;
   }
   return out;
 }

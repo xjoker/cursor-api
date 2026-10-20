@@ -9,6 +9,7 @@ import {
   isListedModelAllowed,
   keyModelPolicy,
   needsModelPrecheck,
+  reservationFor,
   type KeyTicket,
 } from "./key-policy.js";
 import { configureAuthThrottle } from "./auth-throttle.js";
@@ -65,6 +66,7 @@ import {
 import {
   aliasLiveConversation,
   configureSessionLimits,
+  resumesParkedTurn,
   runChatTurn,
   startSessionSweeper,
   validateChatTurnRequest,
@@ -1080,9 +1082,14 @@ function modelOptionsFor(key: ApiKeyRow): ModelSelectionOptions {
  */
 async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<KeyTicket> {
   if (needsModelPrecheck(key)) {
-    await keyPool.run((apiKey) => validateChatRequestModel(apiKey, request, modelOptionsFor(key)));
+    await keyPool.run((apiKey) => validateChatRequestModel(apiKey, request, modelOptionsFor(key)), undefined, {
+      record: false,
+    });
   }
-  return admitKeyRequest(db, key);
+  return admitKeyRequest(db, key, Date.now(), {
+    reserveTokens: reservationFor(request),
+    resumesParked: resumesParkedTurn(key.id, request),
+  });
 }
 
 /** 1 / 0 when a run happened, null when the request never reached a run. */

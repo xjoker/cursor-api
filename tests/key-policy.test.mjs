@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { configureMaxMode, resolveCatalogModelSelection } from "../dist/cursor.js";
+import { configureMaxMode, maxModeAllowedFor, resolveCatalogModelSelection } from "../dist/cursor.js";
 import {
   addKeyTokens,
   getApiKeyById,
@@ -108,7 +108,7 @@ test("parseAllowedModelsInput validates and dedupes", () => {
 
 // --- Per-key max mode override ------------------------------------------------------------------
 
-test("per-key allow_max_mode: null inherits the gateway, true/false override it", () => {
+test("per-key allow_max_mode: global is a hard ceiling, the key can only restrict (global AND key)", () => {
   const catalog = [
     {
       id: "fake-maxonly",
@@ -123,7 +123,14 @@ test("per-key allow_max_mode: null inherits the gateway, true/false override it"
     assert.throws(() => resolveCatalogModelSelection(catalog, request, { allowMaxMode: false }), /max mode/);
     configureMaxMode({ allowMaxMode: false });
     assert.throws(() => resolveCatalogModelSelection(catalog, request, { allowMaxMode: null }), /max mode/);
-    assert.equal(resolveCatalogModelSelection(catalog, request, { allowMaxMode: true }).maxMode, true, "key can opt in");
+    assert.throws(() => resolveCatalogModelSelection(catalog, request, { allowMaxMode: true }), /max mode/, "key cannot lift the global ceiling");
+    assert.equal(maxModeAllowedFor({ allowMaxMode: true }), false);
+    assert.equal(maxModeAllowedFor({ allowMaxMode: null }), false);
+    configureMaxMode({ allowMaxMode: true });
+    assert.equal(maxModeAllowedFor({ allowMaxMode: true }), true);
+    assert.equal(maxModeAllowedFor({ allowMaxMode: null }), true);
+    assert.equal(maxModeAllowedFor({ allowMaxMode: false }), false);
+    assert.equal(maxModeAllowedFor(undefined), true);
   } finally {
     configureMaxMode({ allowMaxMode: true });
   }
@@ -349,12 +356,15 @@ test("e2e: token quota and concurrency cap", { timeout: 30_000 }, async () => {
   }
 });
 
-test("e2e: per-key allow_max_mode overrides ALLOW_MAX_MODE both ways", { timeout: 30_000 }, async () => {
+test("e2e: per-key allow_max_mode restricts but never lifts ALLOW_MAX_MODE=false", { timeout: 30_000 }, async () => {
   let gateway = await startFakeGateway({ ALLOW_MAX_MODE: "false" }, { keyPolicy: { allow_max_mode: true } });
   try {
-    const res = await api(gateway).chat({ model: "fake-maxonly", messages: [{ role: "user", content: "ECHO_MAX" }] });
-    assert.equal(res.status, 200, await res.clone().text());
-    assert.equal(JSON.parse((await res.json()).choices[0].message.content).sdk_max_mode, true);
+    const c = api(gateway);
+    let res = await c.chat({ model: "fake-maxonly", messages: [{ role: "user", content: "ECHO_MAX" }] });
+    assert.equal(res.status, 403, "global false is a hard ceiling even for allow_max_mode=true");
+    assert.equal((await res.json()).error.code, "max_mode_not_allowed");
+    res = await c.chat({ model: "fake-max", messages: [{ role: "user", content: "ECHO_MAX" }] });
+    assert.equal(JSON.parse((await res.json()).choices[0].message.content).sdk_max_mode, false, "non-max variant instead");
   } finally {
     await gateway.stop();
   }
@@ -434,10 +444,11 @@ test("e2e admin API: auth, validation, create with policy, PATCH, usage, reset",
   }
 });
 
-test("e2e: per-key allow_max_mode also governs the SDK-resolved max-mode check", { timeout: 30_000 }, async () => {
+test("e2e: the SDK-resolved max-mode check uses global AND key", { timeout: 30_000 }, async () => {
   let gateway = await startFakeGateway({ ALLOW_MAX_MODE: "false", FAKE_SDK_FORCE_MAX: "agent" }, { keyPolicy: { allow_max_mode: true } });
   try {
-    assert.equal((await api(gateway).chat({ model: "fake-model" })).status, 200, "key opts in: SDK max allowed");
+    const res = await api(gateway).chat({ model: "fake-model" });
+    assert.equal(res.status, 403, "key true cannot allow SDK max under ALLOW_MAX_MODE=false");
   } finally {
     await gateway.stop();
   }

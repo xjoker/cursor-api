@@ -200,6 +200,16 @@ function makeAgent(apiKey, agentId, model) {
           await emit({ type: "text-delta", text });
           return;
         }
+        // Slow stream (40 x 50 ms) that stops once cancelled: lets tests abort mid-run.
+        if (prompt.includes("SLOW_STREAM")) {
+          for (let index = 0; index < 40; index += 1) {
+            if (status === "cancelled") return;
+            text += "chunk ";
+            await emit({ type: "text-delta", text: "chunk " });
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return;
+        }
         if (prompt.includes("UPSTREAM_ERROR")) {
           status = "error";
           runError = { message: "model backend unavailable", code: "unavailable" };
@@ -228,7 +238,10 @@ function makeAgent(apiKey, agentId, model) {
             status,
             result: status === "finished" ? text : undefined,
             ...(runError ? { error: runError } : {}),
-            usage: { inputTokens: 11, outputTokens: 2, totalTokens: 13, cacheReadTokens: 3, cacheWriteTokens: 0 },
+            // FAKE_SDK_NO_USAGE_ON_CANCEL=1: a cancelled run reports no usage (forces the estimate path).
+            ...(status === "cancelled" && process.env.FAKE_SDK_NO_USAGE_ON_CANCEL === "1"
+              ? {}
+              : { usage: { inputTokens: 11, outputTokens: 2, totalTokens: 13, cacheReadTokens: 3, cacheWriteTokens: 0 } }),
           };
         },
       };

@@ -98,6 +98,9 @@ export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY):
   migrateSystemLogs(db);
   migrateConversations(db);
   migrateApiKeyPolicy(db);
+  // Informational only: migrations probe columns. Rolling back to a build older than v10 ignores
+  // the policy columns, i.e. every client key becomes unrestricted again.
+  db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)}`);
   logPolicies.set(db, policy);
   pruneRequestLogs(db);
   pruneSystemLogs(db);
@@ -263,14 +266,16 @@ export type QuotaReservation =
 /**
  * Atomically pre-charges one request for `period`. A single conditional UPDATE inside
  * BEGIN IMMEDIATE, so concurrent callers (even other processes on the same file) cannot overspend
- * `quotaRequests`. `quotaTokens` is a soft cap: a request is admitted while used tokens are below it.
+ * `quotaRequests`. `quotaTokens` is a soft cap: a request is admitted while used tokens (including
+ * reservations of in-flight requests) are below it; `reserveTokens` is added in the same UPDATE.
  */
 export function reserveKeyRequest(
   db: DatabaseSync,
   apiKeyId: string,
   period: string,
-  limits: { quotaRequests: number | null; quotaTokens: number | null },
+  limits: { quotaRequests: number | null; quotaTokens: number | null; reserveTokens?: number },
 ): QuotaReservation {
+  const reserve = Math.max(0, Math.trunc(limits.reserveTokens ?? 0));
   const now = new Date().toISOString();
   return immediate(db, () => {
     db.prepare(
@@ -279,13 +284,13 @@ export function reserveKeyRequest(
     ).run(apiKeyId, period, now);
     const updated = db
       .prepare(
-        `UPDATE api_key_usage SET requests = requests + 1, updated_at = ?
+        `UPDATE api_key_usage SET requests = requests + 1, tokens = tokens + ?, updated_at = ?
          WHERE api_key_id = ? AND period_start = ?
            AND (? IS NULL OR requests < ?)
            AND (? IS NULL OR tokens < ?)
          RETURNING requests, tokens`,
       )
-      .get(now, apiKeyId, period, limits.quotaRequests, limits.quotaRequests, limits.quotaTokens, limits.quotaTokens);
+      .get(reserve, now, apiKeyId, period, limits.quotaRequests, limits.quotaRequests, limits.quotaTokens, limits.quotaTokens);
     if (updated) {
       return { ok: true as const, requests: asNumber(updated.requests), tokens: asNumber(updated.tokens) };
     }
@@ -298,15 +303,27 @@ export function reserveKeyRequest(
   });
 }
 
-/** Gives back a pre-charged request whose upstream call never started. */
-export function refundKeyRequest(db: DatabaseSync, apiKeyId: string, period: string): void {
+/** Gives back a pre-charged request (and its token reservation) whose upstream call never started. */
+export function refundKeyRequest(db: DatabaseSync, apiKeyId: string, period: string, reservedTokens = 0): void {
   db.prepare(
-    `UPDATE api_key_usage SET requests = MAX(requests - 1, 0), updated_at = ?
+    `UPDATE api_key_usage SET requests = MAX(requests - 1, 0), tokens = MAX(tokens - ?, 0), updated_at = ?
      WHERE api_key_id = ? AND period_start = ?`,
-  ).run(new Date().toISOString(), apiKeyId, period);
+  ).run(Math.max(0, Math.trunc(reservedTokens)), new Date().toISOString(), apiKeyId, period);
 }
 
-/** Post-charges tokens reported for one run. */
+/**
+ * Settles tokens for one request: `delta` = charged − reserved (may be negative). UPDATE only:
+ * the row exists from admission, and a key deleted meanwhile must not get an orphan row back (F5).
+ */
+export function adjustKeyTokens(db: DatabaseSync, apiKeyId: string, period: string, delta: number): void {
+  if (!Number.isFinite(delta) || Math.trunc(delta) === 0) return;
+  db.prepare(
+    `UPDATE api_key_usage SET tokens = MAX(tokens + ?, 0), updated_at = ?
+     WHERE api_key_id = ? AND period_start = ?`,
+  ).run(Math.trunc(delta), new Date().toISOString(), apiKeyId, period);
+}
+
+/** Adds tokens to a period, creating the row if needed (admin / tests; settlement uses adjustKeyTokens). */
 export function addKeyTokens(db: DatabaseSync, apiKeyId: string, period: string, tokens: number): void {
   if (!Number.isFinite(tokens) || tokens <= 0) return;
   const now = new Date().toISOString();
@@ -708,6 +725,15 @@ function migrateRequestLogs(db: DatabaseSync): void {
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
 }
 
+/** Two processes opening a fresh v9 file at once may race on ALTER; the loser just continues. */
+function addColumnIfMissing(db: DatabaseSync, statement: string): void {
+  try {
+    db.exec(statement);
+  } catch (error) {
+    if (!(error instanceof Error && /duplicate column/i.test(error.message))) throw error;
+  }
+}
+
 function migrateApiKeyPolicy(db: DatabaseSync): void {
   const columns = new Set(
     db.prepare("PRAGMA table_info(api_keys)").all().map((row) => asString(row.name)),
@@ -723,7 +749,7 @@ function migrateApiKeyPolicy(db: DatabaseSync): void {
     ["max_concurrent", "INTEGER"],
   ];
   for (const [name, type] of added) {
-    if (!columns.has(name)) db.exec(`ALTER TABLE api_keys ADD COLUMN ${name} ${type}`);
+    if (!columns.has(name)) addColumnIfMissing(db, `ALTER TABLE api_keys ADD COLUMN ${name} ${type}`);
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS api_key_usage (
