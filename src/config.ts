@@ -43,6 +43,7 @@ api_key_pepper = ""
 # enforce_output_limits = false  # true: enforce max_tokens / stop at the gateway (cut + cancel the run)
 # allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
 # quota_cache_read_weight = 1.0  # 0..1: how much a cache-read token counts toward per-key token quotas
+# quota_reserve_recent_runs = 20 # quota_tokens reservation >= average of the key's last N runs; 0 = input estimate only
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
 # auth_failure_limit = 20        # failed auth attempts per address per minute; 0 = off
 # cors_allow_origins = "*"       # comma-separated HTTP origins; empty disables CORS
@@ -180,6 +181,11 @@ export function loadConfig(
     quotaCacheReadWeight: parseWeight(
       pickConfigured(env, "QUOTA_CACHE_READ_WEIGHT", tomlWeight(toml, "quota_cache_read_weight"), "quota_cache_read_weight"),
       1,
+    ),
+    quotaReserveRecentRuns: parseOptionalInterval(
+      pickConfigured(env, "QUOTA_RESERVE_RECENT_RUNS", intToString(tomlInt(toml, "quota_reserve_recent_runs")), "quota_reserve_recent_runs"),
+      20,
+      { min: 1, max: 1000 },
     ),
     sseKeepaliveMs: parseOptionalInterval(
       pickConfigured(env, "SSE_KEEPALIVE_MS", intToString(tomlInt(toml, "sse_keepalive_ms")), "sse_keepalive_ms"),

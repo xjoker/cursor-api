@@ -42,6 +42,8 @@ export interface AppConfig {
   allowMaxMode: boolean;
   /** Weight (0..1) of cache-read tokens in per-key token quotas; per-key value overrides. */
   quotaCacheReadWeight: number;
+  /** Per-key token reservation also covers the average of the key's last N runs (0 = off). */
+  quotaReserveRecentRuns: number;
   /** SSE comment heartbeat interval while a stream is open; 0 disables it. */
   sseKeepaliveMs: number;
   /** Failed authentication attempts allowed per address each minute; 0 disables throttling. */
