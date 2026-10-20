@@ -580,37 +580,47 @@ export function pruneRequestLogs(db: DatabaseSync): number {
         .prepare(
           `DELETE FROM request_logs
            WHERE id IN (
-             SELECT id FROM request_logs ORDER BY created_at ASC LIMIT ?
+             SELECT id FROM request_logs ORDER BY created_at ASC, rowid ASC LIMIT ?
            )`,
         )
         .run(excess).changes,
     );
   }
-  // Drop oldest rows until model + detail payload fits under maxDetailBytes.
-  for (;;) {
-    const sizeRow = db
-      .prepare(
-        `SELECT COALESCE(SUM(
-           COALESCE(length(cast(model AS BLOB)), 0)
-           + COALESCE(length(cast(request_detail AS BLOB)), 0)
-           + COALESCE(length(cast(response_detail AS BLOB)), 0)
-         ), 0) AS bytes FROM request_logs`,
-      )
-      .get();
-    const bytes = sizeRow ? asNumber(sizeRow.bytes) : 0;
-    if (bytes <= policy.maxDetailBytes) break;
-    const deleted = asNumber(
+  // Compute the payload size once, then delete the oldest prefix that crosses the byte cap.
+  const sizeRow = db
+    .prepare(
+      `SELECT COALESCE(SUM(
+         COALESCE(length(cast(model AS BLOB)), 0)
+         + COALESCE(length(cast(request_detail AS BLOB)), 0)
+         + COALESCE(length(cast(response_detail AS BLOB)), 0)
+       ), 0) AS bytes FROM request_logs`,
+    )
+    .get();
+  const bytes = sizeRow ? asNumber(sizeRow.bytes) : 0;
+  if (bytes > policy.maxDetailBytes) {
+    const excess = bytes - policy.maxDetailBytes;
+    removed += asNumber(
       db
         .prepare(
-          `DELETE FROM request_logs
-           WHERE id IN (
-             SELECT id FROM request_logs ORDER BY created_at ASC LIMIT 1
-           )`,
+          `WITH sizes AS (
+             SELECT rowid, created_at,
+                    COALESCE(length(cast(model AS BLOB)), 0)
+                    + COALESCE(length(cast(request_detail AS BLOB)), 0)
+                    + COALESCE(length(cast(response_detail AS BLOB)), 0) AS bytes
+               FROM request_logs
+           ), ranked AS (
+             SELECT rowid,
+                    COALESCE(SUM(bytes) OVER (
+                      ORDER BY created_at ASC, rowid ASC
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    ), 0) AS prior_bytes
+               FROM sizes
+           )
+           DELETE FROM request_logs
+            WHERE rowid IN (SELECT rowid FROM ranked WHERE prior_bytes < ?)`,
         )
-        .run().changes,
+        .run(excess).changes,
     );
-    if (deleted < 1) break;
-    removed += deleted;
   }
   return removed;
 }
