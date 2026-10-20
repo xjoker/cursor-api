@@ -117,13 +117,14 @@ detailed = false
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
 | `quota_reserve_recent_runs` | 按 Key 的 `quota_tokens` 预留同时覆盖该 Key 最近 N 次 run 的平均实际用量（环境变量 `QUOTA_RESERVE_RECENT_RUNS`，默认 **20**，`0` = 只用输入估算） |
 | `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数（`temperature`、`top_p`、`top_k`、各类 penalty、`seed`、OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`、`parallel_tool_calls: false`）而不返回 400（默认 **false**）。影响输出形态的字段（`stop`、`logit_bias`、`top_logprobs`）仍然 400 |
-| `history_resume` | 客户端没有传 `conversation_id` 时（Chat Completions、Messages、没有 `previous_response_id` 的 Responses），如果请求里最后一条 user 之前的历史与某个已完成的回合一致，就续用上一个 Cursor agent，只发送新的 user 消息（环境变量 `HISTORY_RESUME`，默认 **false**，需主动开启）。默认关闭的原因：实测（gemini-2.5-flash）续用回合的未缓存输入并没有比重发完整 transcript 少（9527 对 9471），agent 自己的上下文反而变成额外的缓存读（8160），计费 Token 不降反升。如果更看重更短的上游 prompt 或 agent 连续性、而不是最少计费 Token，可以开启。匹配方式是对全部消息做 hash（assistant 文本去首尾空白）。每条记录最多用一次，而且只在 agent 的上下文恰好等于这段历史时有效：取用时即删除；该 agent 被其他方式使用（`previous_response_id` / `conversation_id` 续用、工具结果续轮、更新的回合）时也会删除，所以重新生成或分叉的回合会拿到新 agent 和完整 transcript。同一个 agent 同时只处理一个请求：hash 命中但 agent 正忙时改用新 agent；`conversation_id` / `previous_response_id` 请求遇到忙碌的 agent 返回 `409 conversation_busy`。隔离范围：客户端 Key，请求带 `user` 字段时再按 `user` 区分（一个 Key 服务多个终端用户的客户端应传 `user`）。禁用或删除 Key 时清除它的记录。内存保存 1 小时，每个客户端 Key 最多 10000 条（过期条目会被清理）。续用回合的配额估算按完整 transcript 计。被截断（`length` / stop 序列）或 JSON 模式的回复不记录。续用失败时，在输出任何内容之前回退到完整 transcript。`false`（默认）= 每轮都新建 agent 并发送完整 transcript。**回滚：** 设 `HISTORY_RESUME=false`（或换回旧版本）并重启即可；记录只在内存里（没有 schema 或数据变更），功能关闭时即清空 |
-| `enforce_output_limits` | 由**网关**执行 `max_tokens` / `max_completion_tokens`（Chat）、`max_output_tokens`（Responses）、`max_tokens`（Messages）以及 `stop` / `stop_sequences`（环境变量 `ENFORCE_OUTPUT_LIMITS`，默认 **false** = 行为不变：Token 上限照收不管，`stop` / 非空 `stop_sequences` 返回 400）。设为 `true`：网关截断可见文本并取消 Cursor run；结束原因为 `length`（Responses 为 `status: "incomplete"`，Messages 为 `stop_reason: "max_tokens"`）或 `stop`（Messages 为 `stop_reason: "stop_sequence"` 并带 `stop_sequence`）。Token 按每 4 个字符 1 个**估算**；截断时思考文本不计入；Chat 最多 4 个 stop、Messages 最多 16 个，每个最长 256 字符。上限、流式和 JSON 格式按每个 HTTP 请求生效（工具结果续轮用续轮自己的设置）。流式时 stop 序列本身不会发给客户端（末尾几个字符会暂缓，直到确定不会组成 stop）。usage 仍是 Cursor 实际计费的用量 |
-| `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params` 指向 max 变体）返回 `403 max_mode_not_allowed`。各条路由的 effort 一律按软提示处理，包括 Chat `reasoning_effort`、Responses `reasoning.effort` / 顶层 `reasoning_effort`、Anthropic `output_config.effort` / `thinking.budget_tokens`。所要求的档位需要 max 变体时，降到最高的非 max 档位（没有则用默认变体），不返回 403，并写日志（`max mode disallowed: using non-max variant`，字段 `softened_effort`、`effort`）。只在 max 变体里出现的参数值（如 `context=1m`）即使和其他参数混用也不会被发出。`Agent.create` / `resume` / `send` 之后，网关还会检查 SDK 实际解析出的模型（`agent.model` / `run.model`，可能和网关目录不一致）；如果是 max mode，就释放 agent 或取消 run，返回 `403`（流式时是一条 SSE 错误帧，并且在检查通过前不会输出任何模型文本）。受 SDK 限制，`send` 阶段的检查只能在 SDK 已经发出 run 之后进行：网关会取消它，但请求可能已经到达 Cursor 并按已用量计费；这类请求在日志里记 `max_mode = 1`，也不会重放。`params` 的取值不区分大小写（也可以用取值的显示名）匹配，并且总是按目录里的规范值转发，所以 `1M`、`1m context` 都按 `1m` 处理。每条请求日志记录的是**实际**的 `max_mode` |
+| `history_resume` | 客户端没有传 `conversation_id` 时（Chat Completions、没有 `previous_response_id` 的 Responses），如果请求里最后一条 user 之前的历史与某个已完成的回合一致，就续用上一个 Cursor agent，只发送新的 user 消息（环境变量 `HISTORY_RESUME`，默认 **false**，需主动开启）。默认关闭的原因：实测（gemini-2.5-flash）续用回合的未缓存输入并没有比重发完整 transcript 少（9527 对 9471），agent 自己的上下文反而变成额外的缓存读（8160），计费 Token 不降反升。如果更看重更短的上游 prompt 或 agent 连续性、而不是最少计费 Token，可以开启。匹配方式是对全部消息做 hash（assistant 文本去首尾空白）。每条记录最多用一次，而且只在 agent 的上下文恰好等于这段历史时有效：取用时即删除；该 agent 被其他方式使用（`previous_response_id` / `conversation_id` 续用、工具结果续轮、更新的回合）时也会删除，所以重新生成或分叉的回合会拿到新 agent 和完整 transcript。同一个 agent 同时只处理一个请求：hash 命中但 agent 正忙时改用新 agent；`conversation_id` / `previous_response_id` 请求遇到忙碌的 agent 返回 `409 conversation_busy`。隔离范围：客户端 Key，请求带 `user` 字段时再按 `user` 区分（一个 Key 服务多个终端用户的客户端应传 `user`）。禁用或删除 Key 时清除它的记录。内存保存 1 小时，每个客户端 Key 最多 10000 条（过期条目会被清理）。续用回合的配额估算按完整 transcript 计。被截断（`length` / stop 序列）或 JSON 模式的回复不记录。续用失败时，在输出任何内容之前回退到完整 transcript。`false`（默认）= 每轮都新建 agent 并发送完整 transcript。**回滚：** 设 `HISTORY_RESUME=false`（或换回旧版本）并重启即可；记录只在内存里（没有 schema 或数据变更），功能关闭时即清空 |
+| `enforce_output_limits` | 由**网关**执行 `max_tokens` / `max_completion_tokens`（Chat）、`max_output_tokens`（Responses）以及 `stop`（环境变量 `ENFORCE_OUTPUT_LIMITS`，默认 **false** = 行为不变：Token 上限照收不管，`stop` 返回 400）。设为 `true`：网关截断可见文本并取消 Cursor run；结束原因为 `length`（Responses 为 `status: "incomplete"`）或 `stop`。Token 按每 4 个字符 1 个**估算**；截断时思考文本不计入；最多 4 个 stop，每个最长 256 字符。上限、流式和 JSON 格式按每个 HTTP 请求生效（工具结果续轮用续轮自己的设置）。流式时 stop 序列本身不会发给客户端（末尾几个字符会暂缓，直到确定不会组成 stop）。usage 仍是 Cursor 实际计费的用量 |
+| `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params` 指向 max 变体）返回 `403 max_mode_not_allowed`。各条路由的 effort 一律按软提示处理，包括 Chat `reasoning_effort`、Responses `reasoning.effort` / 顶层 `reasoning_effort`。所要求的档位需要 max 变体时，降到最高的非 max 档位（没有则用默认变体），不返回 403，并写日志（`max mode disallowed: using non-max variant`，字段 `softened_effort`、`effort`）。只在 max 变体里出现的参数值（如 `context=1m`）即使和其他参数混用也不会被发出。`Agent.create` / `resume` / `send` 之后，网关还会检查 SDK 实际解析出的模型（`agent.model` / `run.model`，可能和网关目录不一致）；如果是 max mode，就释放 agent 或取消 run，返回 `403`（流式时是一条 SSE 错误帧，并且在检查通过前不会输出任何模型文本）。受 SDK 限制，`send` 阶段的检查只能在 SDK 已经发出 run 之后进行：网关会取消它，但请求可能已经到达 Cursor 并按已用量计费；这类请求在日志里记 `max_mode = 1`，也不会重放。`params` 的取值不区分大小写（也可以用取值的显示名）匹配，并且总是按目录里的规范值转发，所以 `1M`、`1m context` 都按 `1m` 处理。每条请求日志记录的是**实际**的 `max_mode` |
 | `quota_cache_read_weight` | 缓存读 Token 计入按 Key `quota_tokens` 的权重（0–1，环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 **1.0**）；Key 自己的 `quota_cache_read_weight` 优先 |
 | `sse_keepalive_ms` | 空闲流式响应发送 `: keepalive` 注释的间隔（默认 **15000**；`0` 关闭） |
 | `cors_allow_origins` | 浏览器跨域来源，默认 `"*"`；用逗号分隔精确来源（如 `"https://app.example.com,http://localhost:5173"`），空字符串关闭 CORS。环境变量 `CORS_ALLOW_ORIGINS` 可覆盖，包括空值 |
 | `auth_failure_limit` | 每个客户端地址在任意 60 秒滑动窗口内允许的认证失败次数（默认 **20**，最大 1000；`0` 关闭）。管理密钥和客户端 Key 分开计数。**管理端：**达到上限后，该地址的所有管理请求（包括正确密钥）都返回 `429` 和 `Retry-After`，直到窗口内的失败数回落。**客户端 Key：**正确的 Key 永远不会被限流，只有继续使用错误 Key 的请求会返回 `429` + `Retry-After`（代替 `401`）。不带任何 Key 的请求不计数。IPv6 按 /64 合并计数 |
+| `rate_limit_per_key` | 每个客户端 Key 在 60 秒滚动窗口内允许的 Chat Completions 和 Responses 生成请求数（环境变量 `RATE_LIMIT_PER_KEY`，默认 **0**，非负整数；`0` 关闭）。模型读取、Response 查询、health 和管理接口不消耗额度。解析/认证失败、模型预检失败及 quota/concurrency 准入拒绝也不消耗额度；请求一旦准入即占用一次，之后上游或模型解析失败也不退回；流式请求只计一次，每次工具结果续轮按新请求计数 |
 | `trusted_proxies` | 反向代理的 IP 或 CIDR，逗号分隔，例如 `"127.0.0.1, 172.18.0.0/16"`（环境变量 `TRUSTED_PROXIES`）。默认为空：TCP 对端地址即客户端地址，忽略 `X-Forwarded-For`。对端在列表中时，取 `X-Forwarded-For` 从右往左第一个不在列表中的地址。在反代后面却不配置此项时，所有客户端在 `auth_failure_limit` 中共用代理地址。只填写会覆盖或追加 `X-Forwarded-For` 的代理（nginx `proxy_add_x_forwarded_for`、Caddy 默认行为） |
 
 会话在重启后仍绑定创建它的 Cursor Key，SQLite 仅保存指纹。移除所属 Key 后，增量续接会明确报错；发送完整历史可重放。旧映射没有归属信息时，多 Key 模式需要完整历史。
@@ -181,7 +182,6 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 |------|------|------------|
 | `POST` | `/v1/chat/completions` | OpenAI SDK、OpenCode `"npm": "@ai-sdk/openai-compatible"` |
 | `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
-| `POST` | `/v1/messages` | Anthropic SDK、兼容 Claude 的客户端 |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
 | `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，每个 Key 最多最近 100 条、总共 1000 条，总量满时淘汰条目最多的 Key 的最旧条目；`store: false` 不保存；重启丢失） |
 
@@ -192,46 +192,6 @@ Chat Completions 接受 OpenRouter 风格的 `reasoning: { effort, max_tokens, e
 Usage 按 OpenAI 语义：`prompt_tokens` 包含缓存 Token（`prompt_tokens_details.cached_tokens` = 缓存读；缓存写另外以 `cache_write_tokens` 返回），模型上报时带 `completion_tokens_details.reasoning_tokens`，`total_tokens = prompt_tokens + completion_tokens`。请求日志的 `input_tokens` 也按此口径。升级时会把旧行一次性改写为「input + 缓存读 + 缓存写」（以 `PRAGMA user_version` < 11 为条件），所以管理台的 Token 汇总不会混用两种口径。对自行把 `cached_tokens` 加到 `prompt_tokens` 上、或按 `prompt_tokens` 对账的客户端来说，这是**破坏性变更**。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent；ID 最多 512 个 UTF-8 字节，每个客户端 Key 保留最近 1000 条映射。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
 
 Cursor SDK 每轮接收的是单个 prompt，并不原生接收 OpenAI 角色消息。本项目会把 `system` / `developer` / `user` 角色序列化进 transcript 文本；因此应用传入的 `system` 或 `developer` 消息只能作为上下文，不能充当抵御恶意用户内容的硬安全边界。
-
-### Anthropic Messages（`POST /v1/messages`）
-
-Anthropic SDK / 兼容 Claude 的工具把 base URL 指向网关根地址（SDK 会自己拼 `/v1/messages`）：
-
-```text
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-ANTHROPIC_API_KEY=<你的 cgk_ 客户端 key>      # 以 x-api-key 发送
-```
-
-- 支持 `system`（字符串或 text 块）、`text` / `image`（base64 或 URL）块、`stream: true`（`message_start` → `content_block_*` → `message_delta` → `message_stop`），思考内容以 `thinking` 块输出。
-- 客户端工具：`tools[].input_schema` → `tool_use` 块 + `stop_reason: "tool_use"`；下一轮 user 消息里回传 `tool_result`（`is_error: true` 会作为错误结果交给模型）。与 `tool_result` 同时出现的额外文本会附加到最后一个结果上。没有 `input_schema` 的服务端工具（`web_search_…`、`bash_…`）会被忽略。
-- `tool_choice`：`auto`、`tool`、`none`；`any` 退化为 `auto`（Cursor 无法强制调用工具）。
-- 忽略：`temperature`、`top_p`、`top_k`、`thinking`、`output_config`、`context_management`、`service_tier`。未知顶层字段也会忽略。拒绝：非空 `stop_sequences`（开启 `enforce_output_limits` 后接受并执行）、`document` 块。
-- Cursor 参数（`params`、`variant`、`reasoning_effort`、`verbosity`、`fast`、`optimize_for`）以及 `conversation_id` / `metadata.conversation_id` 与 Chat Completions 一致。
-- 错误为 Anthropic 格式：`{"type":"error","error":{"type":"invalid_request_error","message":"…"}}`。
-- `usage` 的 `input_tokens`（不含缓存，Anthropic 语义）/ `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` 来自 Cursor token 用量；非流式响应附带 `cursor.cost`。
-- `POST /v1/messages/count_tokens` 返回粗略估算（见下方 Claude Code）。
-
-### Claude Code
-
-Claude Code CLI 2.x 可以直接连 `/v1/messages`（已用 `claude -p` 验证，包括 Bash 工具往返、`/context` 和流式）：
-
-```bash
-# gateway.toml（或环境变量 MODEL_ALIASES）：把 Claude 模型名映射到 Cursor 模型
-#   model_aliases = "claude-haiku-*=composer-2.5, claude-*=composer-2.5"
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_API_KEY=cgk_你的key          # 以 x-api-key 发送
-claude -p "Reply with PONG"
-```
-
-网关对 Claude Code 请求的处理：
-
-- 带 `anthropic-beta` 的 `POST /v1/messages?beta=true`：所有 beta 标志和未知顶层字段（`context_management`、`safeguards`、`output_config` 等）都会接受并忽略。
-- Claude 模型名（`claude-opus-*`、`claude-sonnet-*`，以及后台任务用的 `claude-haiku-*`）经过 `model_aliases` 映射：先匹配先生效，`*` 是通配符，对所有接口生效；没有匹配时原样查 Cursor 模型目录，查不到会返回 `not_found_error`。
-- `messages` 里的 `system` 消息会作为 `[system]` 上下文并入前一条 user / tool 消息，这样工具轮次能继续命中停车的 Cursor 会话，不必重放整个 transcript。
-- `thinking` / `output_config.effort` 映射为尽力而为的推理档位（effort `low`–`max`；`budget_tokens` <4k → low，<16k → medium，否则 high；`disabled` → 最低档）。没有 effort 参数的模型忽略。
-- 历史里的服务端工具块（`server_tool_use`、`web_search_tool_result` 等）会跳过，`cache_control` 会忽略。
-- `POST /v1/messages/count_tokens` **默认返回 404**，因为 SDK 没有精确 tokenizer。设置 `anthropic_count_tokens = "estimate"`（环境变量 `ANTHROPIC_COUNT_TOKENS`）可启用粗略本地估算（响应头 `x-token-count-estimated: true`；约 4 个 ASCII 字符或 1 个非 ASCII 字符算 1 个 token）。估算有误差，可能影响客户端上下文压缩判断，不能视为真实用量。
-- `HEAD /api/hello`（Claude Code 的连通性探测）返回 404，Claude Code 能容忍。
 
 ### Codex（`POST /v1/responses`）
 
@@ -363,6 +323,8 @@ npm ci && npm run dev
 快速单元测试用 `npm run test:unit`；`npm test` 还会运行回环 HTTP 鉴权冒烟测试。测试不会访问网络：测试启动的网关都用假 Cursor SDK（`tests/fixtures/fake-cursor-sdk.mjs`）；`scripts/run-tests.mjs` 通过 `NODE_OPTIONS` 预加载守卫 `tests/fixtures/no-network.mjs`（子进程同样生效），拦截并记录非回环的 TCP/TLS 连接（`net`、`tls`、`http`、`https`、`http2`、`fetch`）、DNS 解析和查询以及 UDP 发送；`localhost` 只有解析结果是回环地址时才放行。只要记录到一次尝试，即使代码吞掉了错误，整个测试也判失败。测试创建的临时目录都在本次运行专用的 `TMPDIR` 里，跑完删除。`CURSOR_API_TEST_ALLOW_NETWORK=1` 可关闭守卫（目前没有测试需要）。JS 守卫看不到未继承其 `NODE_OPTIONS` 的子进程、worker 线程和原生二进制，所以 Linux 上 `npm run test:offline` 会在空网络命名空间（`unshare -rn`）里、去掉 `CURSOR_*` 及名字像 key/token/secret 的变量后运行；CI 跑的就是 `test:offline`。
 
 `npm run test:tmpdirs` 检查是否残留 `cursor-api-*` 临时目录。
+
+测试还使用官方 OpenAI Node SDK 验证网关的 Chat/Responses、流式、工具往返、Response 读取与错误解析；测试套件中的 Cursor 上游为模拟实现。
 
 需 Node **22.13+** 与 `data/config/gateway.toml`。本地编译镜像见 [`docker-compose.yml`](./docker-compose.yml)。构建时传入 git SHA，`/health` 的 `git_commit` 才不是 `unknown`：
 

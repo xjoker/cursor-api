@@ -16,6 +16,7 @@ const DEFAULT_LOG_MAX_DETAIL_BYTES = 268_435_456; // 256 MiB across all detail c
 const DEFAULT_PARK_TIMEOUT_MS = 300_000;
 const DEFAULT_SSE_KEEPALIVE_MS = 15_000;
 const DEFAULT_AUTH_FAILURE_LIMIT = 20;
+const DEFAULT_RATE_LIMIT_PER_KEY = 0;
 const DEFAULT_MAX_LIVE_SESSIONS = 256;
 const DEFAULT_CONVERSATION_TTL_DAYS = 30;
 const DEFAULT_CURSOR_KEY_COOLDOWN_MS = 60_000;
@@ -47,12 +48,11 @@ api_key_pepper = ""
 # quota_reserve_recent_runs = 20 # quota_tokens reservation >= average of the key's last N runs; 0 = input estimate only
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
 # auth_failure_limit = 20        # failed auth attempts per address per minute; 0 = off
+# rate_limit_per_key = 0         # Chat/Responses generation requests per client key per rolling minute; 0 = off
 # cors_allow_origins = "*"       # comma-separated HTTP origins; empty disables CORS
 # trusted_proxies = ""     # reverse proxy IPs/CIDRs whose X-Forwarded-For is trusted
-# POST /v1/messages/count_tokens: "estimate" (rough local count) or "off" (404)
-# anthropic_count_tokens = "off"
 # Map client model names onto Cursor models (first match wins, * is a wildcard):
-# model_aliases = "claude-opus-*=composer-2.5, claude-sonnet-*=composer-2.5, claude-haiku-*=composer-2.5"
+# model_aliases = "client-fast-*=composer-2.5"
 
 [logs]
 retention_days = 7
@@ -107,9 +107,6 @@ export function loadConfig(
       tomlString(toml, "api_key_pepper"),
       configFile,
       "api_key_pepper",
-    ),
-    anthropicCountTokens: parseCountTokensMode(
-      pickConfigured(env, "ANTHROPIC_COUNT_TOKENS", tomlString(toml, "anthropic_count_tokens"), "anthropic_count_tokens"),
     ),
     modelAliases: parseModelAliases(
       pickString(env.MODEL_ALIASES, tomlString(toml, "model_aliases")),
@@ -243,6 +240,16 @@ export function loadConfig(
         "auth_failure_limit",
       ),
     ),
+    rateLimitPerKey: parseOptionalInterval(
+      pickConfigured(
+        env,
+        "RATE_LIMIT_PER_KEY",
+        tomlIntegerString(toml, "rate_limit_per_key"),
+        "rate_limit_per_key",
+      ),
+      DEFAULT_RATE_LIMIT_PER_KEY,
+      { min: 0, max: Number.MAX_SAFE_INTEGER },
+    ),
     trustedProxies: parseTrustedProxies(
       pickConfigured(env, "TRUSTED_PROXIES", tomlString(toml, "trusted_proxies"), "trusted_proxies"),
     ),
@@ -275,13 +282,6 @@ function ensureConfigFile(configFile: string, production: boolean): void {
   } catch {
     // 部分文件系统/挂载不支持 chmod
   }
-}
-
-function parseCountTokensMode(configured: { value: string | undefined; source: string }): "estimate" | "off" {
-  const value = optionalTrimmed(configured.value)?.toLowerCase();
-  if (value === undefined || value === "off") return "off";
-  if (value === "estimate") return "estimate";
-  throw new Error(`${configured.source} must be "estimate" or "off" (got ${JSON.stringify(configured.value)})`);
 }
 
 /**
@@ -483,6 +483,16 @@ function tomlInt(table: TomlTable, key: string): number | undefined {
       const nested = scalarToNumber(value[key] as string | number | TomlTable | undefined, key);
       if (nested !== undefined) return nested;
     }
+  }
+  return undefined;
+}
+
+/** Integer-like TOML scalar text for settings that need to validate zero and decimal forms. */
+function tomlIntegerString(table: TomlTable, key: string): string | undefined {
+  const values = [table[key], ...Object.values(table).map((value) => (value && typeof value === "object" ? value[key] : undefined))];
+  for (const value of values) {
+    if (typeof value === "boolean") throw new Error(`${key} must be a non-negative integer`);
+    if (typeof value === "number" || typeof value === "string") return String(value);
   }
   return undefined;
 }

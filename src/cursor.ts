@@ -247,7 +247,7 @@ async function resolveModelSelection(
  *   2. replace the default-variant base with the closest non-max variant consistent with them,
  *   3. reject with 403 `max_mode_not_allowed` when no such variant exists (max-only models, or the
  *      client explicitly asked for a max-only variant via `variant` / `params`). Effort (chat
- *      `reasoning_effort` and Responses / Anthropic hints) is soft: it degrades to the highest
+ *      `reasoning_effort` and Responses hints) is soft: it degrades to the highest
  *      non-max level, then to the default variant, instead of rejecting.
  * When the rule fires and max mode is allowed, the selection carries `maxMode: true` explicitly
  * (same as what the SDK would send) so logs and responses can report it.
@@ -276,8 +276,7 @@ export function resolveCatalogModelSelection(
   }
   // Max-only combination, or a mix (e.g. max-only context + low effort) that matches no variant:
   // rebuild from the closest non-max variant instead of guessing how upstream bills it.
-  // Anthropic `output_config.effort` / thinking budgets are soft hints: drop them before rejecting.
-  // Effort (chat `reasoning_effort` and Responses / Anthropic hints alike) is soft here (N2):
+  // Effort (Chat `reasoning_effort` and Responses hints alike) is soft here (N2):
   // degrade to the highest non-max effort level, then drop it, before rejecting.
   const hasEffort = request.reasoning_effort !== undefined || request.reasoning_effort_hint !== undefined;
   const top = hasEffort ? highestNonMaxEffort(item) : undefined;
@@ -306,8 +305,8 @@ export function resolveCatalogModelSelection(
 }
 
 /**
- * Requests whose soft effort hint (Responses `reasoning.effort`, Anthropic effort / thinking
- * budget) was dropped to stay off max mode. Read with `wasHintSoftened`.
+ * Requests whose soft Responses effort hint was dropped to stay off max mode. Read with
+ * `wasHintSoftened`.
  */
 const softenedHints = new WeakSet<ParsedChatRequest>();
 
@@ -597,7 +596,7 @@ const EFFORT_RANK = ["none", "off", "minimal", "low", "medium", "high", "xhigh",
 const EFFORT_OFF = new Set(["none", "off", "minimal"]);
 
 /**
- * OpenAI `reasoning_effort` (Chat Completions, Responses top level, Messages extension).
+ * OpenAI `reasoning_effort` (Chat Completions and Responses top level).
  * A value the model lists is used as is (explicit choice, so max-mode rules still apply);
  * a standard level the model lacks maps to the nearest one; a model without an effort
  * control ignores it. Only values that are neither listed nor a standard level are 400.
@@ -770,7 +769,7 @@ function toUsage(usage: TokenUsage | undefined): Usage {
   }
   // SDK `inputTokens` excludes cache reads/writes (its totalTokens = input + output + cacheRead +
   // cacheWrite). OpenAI's `prompt_tokens` includes cached tokens, so fold them in and keep
-  // total = prompt + completion. Anthropic encoders subtract the cache parts again.
+  // total = prompt + completion.
   const cacheRead = nonNegative(usage.cacheReadTokens);
   const cacheWrite = nonNegative(usage.cacheWriteTokens);
   const prompt = nonNegative(usage.inputTokens) + cacheRead + cacheWrite;

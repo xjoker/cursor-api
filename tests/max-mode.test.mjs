@@ -5,9 +5,9 @@ import { after, test } from "node:test";
 import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { configureMaxMode, resolveCatalogModelSelection, sdkWouldUseMaxMode } from "../dist/cursor.js";
 import { parseChatCompletionsRequest } from "../dist/openai.js";
-import { parseAnthropicMessagesRequest } from "../dist/anthropic.js";
 import { loadConfig } from "../dist/config.js";
 import { openDb } from "../dist/db.js";
+import { parseResponsesRequest } from "../dist/responses.js";
 import { CLIENT_KEY, parseSse, startFakeGateway } from "./fixtures/gateway-harness.mjs";
 
 const fakeMax = {
@@ -98,17 +98,16 @@ test("allow_max_mode=false rejects every explicit route to a max-only variant", 
   }
 });
 
-test("per-request allowMaxMode=false overrides the gateway default; Anthropic effort=max hint is softened", () => {
+test("per-request allowMaxMode=false overrides the gateway default; Responses effort=max hint is softened", () => {
   configureMaxMode({ allowMaxMode: true });
   assert.throws(() => select(chat({ model: "fake-maxonly" }), { allowMaxMode: false }), /max mode/);
-  const anthropic = parseAnthropicMessagesRequest({
+  const responses = parseResponsesRequest({
     model: "fake-max",
-    max_tokens: 16,
-    messages: [{ role: "user", content: "hi" }],
-    output_config: { effort: "max" },
+    input: "hi",
+    reasoning: { effort: "max" },
   });
-  assert.equal(select(anthropic).maxMode, true, "allowed: hint reaches the max variant");
-  const softened = select(anthropic, { allowMaxMode: false });
+  assert.equal(select(responses).maxMode, true, "allowed: hint reaches the max variant");
+  const softened = select(responses, { allowMaxMode: false });
   assert.equal(sdkWouldUseMaxMode(fakeMax, softened.params), false);
   assert.equal(paramsOf(softened).context, "200k");
 });
@@ -136,12 +135,6 @@ function client(gateway) {
   return {
     chat: (body) => fetch(`${gateway.baseUrl}/v1/chat/completions`, { method: "POST", headers, body: JSON.stringify(body) }),
     responses: (body) => fetch(`${gateway.baseUrl}/v1/responses`, { method: "POST", headers, body: JSON.stringify(body) }),
-    messages: (body) =>
-      fetch(`${gateway.baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: { ...headers, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify(body),
-      }),
   };
 }
 
@@ -154,12 +147,11 @@ const echoOfChatStream = async (res) =>
   );
 const echoOfResponses = async (res) =>
   JSON.parse((await res.json()).output.find((item) => item.type === "message").content[0].text);
-const echoOfMessages = async (res) => JSON.parse((await res.json()).content.find((block) => block.type === "text").text);
 
 test("ALLOW_MAX_MODE=false: no route sends max mode to the SDK", { timeout: 30_000 }, async () => {
   const gateway = await startFakeGateway({
     ALLOW_MAX_MODE: "false",
-    MODEL_ALIASES: "claude-opus-*=fake-max",
+    MODEL_ALIASES: "client-*=fake-max",
     CURSOR_API_KEY: "limited-first",
     CURSOR_API_KEYS: "good-key",
   });
@@ -172,14 +164,11 @@ test("ALLOW_MAX_MODE=false: no route sends max mode to the SDK", { timeout: 30_0
     res = await api.chat({ model: "fake-max", stream: true, messages: [{ role: "user", content: "ECHO_MAX" }] });
     assert.equal(res.status, 200);
     seen.chat_stream = await echoOfChatStream(res);
-    res = await api.chat({ model: "claude-opus-4", messages: [{ role: "user", content: "ECHO_MAX" }] });
+    res = await api.chat({ model: "client-opus-4", messages: [{ role: "user", content: "ECHO_MAX" }] });
     seen.alias = await echoOfChat(res);
     res = await api.responses({ model: "fake-max", input: "ECHO_MAX" });
     assert.equal(res.status, 200);
     seen.responses = await echoOfResponses(res);
-    res = await api.messages({ model: "fake-max", max_tokens: 32, output_config: { effort: "max" }, messages: [{ role: "user", content: "ECHO_MAX" }] });
-    assert.equal(res.status, 200, await res.clone().text());
-    seen.anthropic_effort_max = await echoOfMessages(res);
     // New session then continued session (conversation_id → Agent.resume on the same key).
     res = await api.chat({ model: "fake-max", conversation_id: "conv-max", messages: [{ role: "user", content: "hello" }] });
     assert.equal(res.status, 200);
@@ -196,7 +185,7 @@ test("ALLOW_MAX_MODE=false: no route sends max mode to the SDK", { timeout: 30_0
       );
     }
 
-    // Explicit max requests are rejected before any SDK call, OpenAI and Anthropic shapes.
+    // Explicit max requests are rejected before any SDK call, with OpenAI error shapes.
     // (reasoning_effort=max is soft and degrades; an explicit max variant is a hard 403.)
     res = await api.chat({ model: "fake-max", variant: "Max", messages: [{ role: "user", content: "hi" }] });
     assert.equal(res.status, 403);
@@ -207,9 +196,6 @@ test("ALLOW_MAX_MODE=false: no route sends max mode to the SDK", { timeout: 30_0
     res = await api.chat({ model: "fake-maxonly", stream: true, messages: [{ role: "user", content: "hi" }] });
     assert.equal(res.status, 403, "stream rejected with a JSON error, not mid-SSE");
     assert.match(res.headers.get("content-type") ?? "", /json/);
-    res = await api.messages({ model: "fake-maxonly", max_tokens: 8, messages: [{ role: "user", content: "hi" }] });
-    assert.equal(res.status, 403);
-    assert.equal((await res.json()).error.type, "permission_error");
     res = await api.responses({ model: "fake-max", input: "hi", params: [{ id: "context", value: "1m" }] });
     assert.equal(res.status, 403);
   } finally {

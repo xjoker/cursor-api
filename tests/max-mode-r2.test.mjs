@@ -100,7 +100,7 @@ test("N6: fallback choice on score ties does not depend on catalog order", () =>
   });
 });
 
-test("N5: dropped soft hints are recorded (Responses reasoning.effort, Anthropic budget)", () => {
+test("N5: dropped soft hints are recorded (Responses reasoning.effort)", () => {
   withMaxMode(false, () => {
     const responses = parseResponsesRequest({ model: "fake-max", input: "hi", reasoning: { effort: "max" } });
     const selection = resolveCatalogModelSelection([fakeMax], responses);
@@ -161,7 +161,6 @@ function client(gateway) {
   return {
     chat: (body) => post("/v1/chat/completions", { messages: [{ role: "user", content: "hi" }], ...body }),
     responses: (body) => post("/v1/responses", body),
-    messages: (body) => post("/v1/messages", { max_tokens: 16, messages: [{ role: "user", content: "hi" }], ...body }, { "anthropic-version": "2023-06-01" }),
     logs: async () =>
       (await (await fetch(`${gateway.baseUrl}/admin/api/logs`, { headers: { authorization: "Bearer it-admin-key" } })).json()).logs,
   };
@@ -205,7 +204,7 @@ test("N1/N3: SDK-resolved max mode is blocked when disallowed and logged as the 
   }
 });
 
-test("N2 e2e: context=1m + reasoning_effort=low is 403 on every route when disallowed", { timeout: 30_000 }, async () => {
+test("N2 e2e: context=1m + reasoning_effort=low is 403 on Chat and Responses when disallowed", { timeout: 30_000 }, async () => {
   const gateway = await startFakeGateway({ ALLOW_MAX_MODE: "false" });
   const api = client(gateway);
   const params = [{ id: "context", value: "1m" }];
@@ -215,7 +214,6 @@ test("N2 e2e: context=1m + reasoning_effort=low is 403 on every route when disal
       chat_stream: () => api.chat({ model: "fake-max", params, reasoning_effort: "low", stream: true }),
       responses: () => api.responses({ model: "fake-max", input: "hi", params, reasoning_effort: "low" }),
       responses_stream: () => api.responses({ model: "fake-max", input: "hi", params, reasoning_effort: "low", stream: true }),
-      messages_stream: () => api.messages({ model: "fake-maxonly", stream: true }),
     })) {
       const res = await send();
       assert.equal(res.status, 403, name);

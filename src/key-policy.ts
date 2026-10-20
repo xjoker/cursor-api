@@ -295,7 +295,7 @@ export function setQuotaUsageSource(source: QuotaUsageSource | undefined): void 
   usageSource = source ?? runScopedUsageSource;
 }
 
-/** ~4 characters per token, at least 1: the same rough rule as the local count_tokens estimate. */
+/** ~4 characters per token, at least 1: the same rough rule used for quota estimates. */
 export function estimateTokens(chars: number): number {
   return Math.max(1, Math.ceil(Math.max(0, chars) / 4));
 }

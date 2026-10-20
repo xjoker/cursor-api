@@ -9,6 +9,17 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20261020.3] — 2026-10-20
+
+### Changed
+
+- **BREAKING：支持范围收敛为 OpenAI 兼容接口**：保留 Chat Completions、Responses 和模型查询，移除 Anthropic Messages、count_tokens、专属配置及 Claude Code 接入说明；旧路由返回 404。
+
+### Added
+
+- `rate_limit_per_key` / `RATE_LIMIT_PER_KEY`：每个客户端 Key 的滚动 60 秒生成请求上限，默认 0 关闭；Chat 与 Responses 共用额度，流式请求计一次，工具续轮按新请求计数。超限返回 OpenAI 格式 429 和 `Retry-After`。状态仅在当前进程内保存，重启清空，多实例应配合反向代理限流。
+- 使用官方 `openai@7.39.0` 开发依赖验收 Chat/Responses 非流式、流式 usage、工具往返、Response 读取及 SDK 错误解析；默认测试使用假 Cursor 上游与出网守卫。
+
 ## [20261020.2] — 2026-10-20
 
 ### Added

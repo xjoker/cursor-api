@@ -41,9 +41,8 @@ test("old conversation databases gain a nullable Cursor key fingerprint without 
   reopened.close();
 });
 
-test("model validation and execution use one pooled key for Chat, Responses, and Messages", { timeout: 20_000 }, async () => {
+test("model validation and execution use one pooled key for Chat and Responses", { timeout: 20_000 }, async () => {
   const gateway = await startFakeGateway({ CURSOR_API_KEY: "model-a-key", CURSOR_API_KEYS: "model-b-key" });
-  const anthropicHeaders = { "x-api-key": CLIENT_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" };
   try {
     const chat = await post(gateway, "/v1/chat/completions", {
       model: "fake-model-a", messages: [{ role: "user", content: "hi" }],
@@ -53,22 +52,16 @@ test("model validation and execution use one pooled key for Chat, Responses, and
     const responses = await post(gateway, "/v1/responses", { model: "fake-model-a", input: "hi" });
     assert.equal(responses.status, 200, await responses.clone().text());
 
-    const messages = await post(gateway, "/v1/messages", {
-      model: "fake-model-b", max_tokens: 64, messages: [{ role: "user", content: "hi" }],
-    }, anthropicHeaders);
-    assert.equal(messages.status, 200, await messages.clone().text());
   } finally {
     await gateway.stop();
   }
 });
 
-test("streaming requests reject an unknown model before starting SSE for all protocols", { timeout: 20_000 }, async () => {
+test("streaming requests reject an unknown model before starting SSE for OpenAI routes", { timeout: 20_000 }, async () => {
   const gateway = await startFakeGateway({});
   const cases = [
     ["/v1/chat/completions", { model: "missing-model", stream: true, messages: [{ role: "user", content: "hi" }] }, auth],
     ["/v1/responses", { model: "missing-model", stream: true, input: "hi" }, auth],
-    ["/v1/messages", { model: "missing-model", stream: true, max_tokens: 64, messages: [{ role: "user", content: "hi" }] },
-      { "x-api-key": CLIENT_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" }],
   ];
   try {
     for (const [path, body, headers] of cases) {

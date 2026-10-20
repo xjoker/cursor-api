@@ -69,7 +69,6 @@ async function waitFor(check, label, timeoutMs = 5000) {
 const routes = {
   chat: (stream) => ["/v1/chat/completions", { model: "fake-model", stream, messages: [{ role: "user", content: "SLOW_STREAM" }] }],
   responses: (stream) => ["/v1/responses", { model: "fake-model", stream, input: "SLOW_STREAM" }],
-  messages: (stream) => ["/v1/messages", { model: "fake-model", stream, max_tokens: 64, messages: [{ role: "user", content: "SLOW_STREAM" }] }],
 };
 
 /** Starts a slow request, aborts it once output has started (stream) or after 200 ms. */
@@ -77,7 +76,7 @@ async function abortMidRun(gateway, path, body) {
   const controller = new AbortController();
   const res = fetch(`${gateway.baseUrl}${path}`, {
     method: "POST",
-    headers: { ...HEADERS, "anthropic-version": "2023-06-01" },
+    headers: HEADERS,
     body: JSON.stringify(body),
     signal: controller.signal,
   });

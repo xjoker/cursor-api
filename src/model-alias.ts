@@ -11,7 +11,7 @@ export interface ModelAlias {
  * newlines. `*` in a pattern matches any run of characters; matching is
  * case-insensitive and the first matching rule wins.
  *
- *   model_aliases = "claude-opus-*=composer-2.5, claude-haiku-*=composer-2.5"
+ *   model_aliases = "client-fast-*=composer-2.5"
  */
 export function parseModelAliases(raw: string | undefined, source = "model_aliases"): ModelAlias[] {
   if (raw === undefined || raw.trim() === "") return [];

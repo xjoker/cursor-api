@@ -2,7 +2,6 @@
 // max_tokens / stop, JSON modes, GET /v1/responses/{id}. All offline (fake SDK).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { anthropicStopReason, parseAnthropicMessagesRequest } from "../dist/anthropic.js";
 import { encodeNonStreamCompletion, encodeStreamChunk, effortForBudget, parseChatCompletionsRequest, parseReasoningObject } from "../dist/openai.js";
 import { CHARS_PER_TOKEN, clientFinishReason, normalizeJsonReply, OutputLimiter, outputFormatInstruction } from "../dist/output-limits.js";
 import { clearStoredResponses, getStoredResponse, MAX_STORED_RESPONSES, RESPONSE_TTL_MS, storeResponse } from "../dist/response-store.js";
@@ -56,7 +55,6 @@ test("without enforce_output_limits: max_tokens accepted and ignored, stop still
   assert.throws(() => parseChatCompletionsRequest({ ...base, stop: "x" }), /stop.*enforce_output_limits/);
   assert.throws(() => parseChatCompletionsRequest({ ...base, stop: "x" }, { ignoreSamplingParams: true }), /stop/);
   assert.equal(parseResponsesRequest({ model: "m", input: "hi", max_output_tokens: 3 }).max_output_tokens, undefined);
-  assert.throws(() => parseAnthropicMessagesRequest({ model: "m", max_tokens: 9, stop_sequences: ["x"], messages: [{ role: "user", content: "hi" }] }), /stop_sequences/);
 });
 
 test("with enforce_output_limits: stop / max_tokens are parsed and validated", () => {
@@ -71,9 +69,6 @@ test("with enforce_output_limits: stop / max_tokens are parsed and validated", (
   assert.equal(parseChatCompletionsRequest({ ...base, max_tokens: 7, max_completion_tokens: 3 }, on).max_output_tokens, 3);
   assert.throws(() => parseChatCompletionsRequest({ ...base, max_tokens: 0 }, on), /max_tokens/);
   assert.equal(parseResponsesRequest({ model: "m", input: "hi", max_output_tokens: 3 }, on).max_output_tokens, 3);
-  const anthropic = parseAnthropicMessagesRequest({ model: "m", max_tokens: 9, stop_sequences: ["x"], messages: [{ role: "user", content: "hi" }] }, on);
-  assert.equal(anthropic.max_output_tokens, 9);
-  assert.deepEqual(anthropic.stop, ["x"]);
 });
 
 test("OutputLimiter: stop sequence split across deltas never leaks; earliest stop wins", () => {
@@ -109,9 +104,6 @@ test("finish reasons map per API", () => {
   assert.equal(clientFinishReason({ finish_reason: "stop" }), "stop");
   assert.equal(responseStatusOf("length"), "incomplete");
   assert.equal(responseStatusOf("stop"), "completed");
-  assert.equal(anthropicStopReason("length"), "max_tokens");
-  assert.equal(anthropicStopReason("stop", "X"), "stop_sequence");
-  assert.equal(anthropicStopReason("stop"), "end_turn");
 });
 
 // --- JSON modes ---------------------------------------------------------------------------------
@@ -188,7 +180,7 @@ test("e2e: dual reasoning fields, reasoning.exclude, default limits behaviour", 
   }
 });
 
-test("e2e: enforce_output_limits cuts at stop / max_tokens on chat, responses and messages", { timeout: 30_000 }, async () => {
+test("e2e: enforce_output_limits cuts at stop / max_tokens on chat and responses", { timeout: 30_000 }, async () => {
   const gateway = await startFakeGateway({ ENFORCE_OUTPUT_LIMITS: "true" });
   const say = "SAY<<hello STOP world and more>>";
   try {
@@ -221,16 +213,6 @@ test("e2e: enforce_output_limits cuts at stop / max_tokens on chat, responses an
     assert.deepEqual(body.incomplete_details, { reason: "max_output_tokens" });
     assert.equal(body.output.find((item) => item.type === "message").content[0].text, "hell");
 
-    res = await post(gateway, "/v1/messages", { model: "fake-model", max_tokens: 100, stop_sequences: ["STOP"], messages: [{ role: "user", content: say }] });
-    body = await res.json();
-    assert.equal(body.stop_reason, "stop_sequence");
-    assert.equal(body.stop_sequence, "STOP");
-    assert.equal(body.content.find((block) => block.type === "text").text, "hello ");
-
-    res = await post(gateway, "/v1/messages", { model: "fake-model", max_tokens: 1, stream: true, messages: [{ role: "user", content: say }] });
-    const events = parseSse(await res.text());
-    const delta = events.find((frame) => frame.event === "message_delta");
-    assert.equal(delta.data.delta.stop_reason, "max_tokens");
   } finally {
     await gateway.stop();
   }

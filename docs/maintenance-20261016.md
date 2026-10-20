@@ -1,6 +1,8 @@
 # 维护评估：2026-10-20
 
-版本 `20261020.2` 在前一版基础上整合 PR #38、#40–#46；原作者提交历史随整合保留。
+版本 `20261020.3` 只支持 OpenAI 兼容接口：Chat Completions、Responses 和模型查询。上一版整合的 PR #38、#40–#46 保留原作者提交历史。
+
+本版增加按客户端 Key 的滚动 60 秒请求限流，`RATE_LIMIT_PER_KEY=0` 默认关闭；Chat 与 Responses 共用额度，超限返回 429 和 `Retry-After`。计数仅在当前进程内保存，重启清空，多实例需要反向代理协调。
 
 ## 新功能与接手范围
 
@@ -21,7 +23,7 @@
 
 | PR | 当前行为 |
 | --- | --- |
-| [#15](https://github.com/xjoker/cursor-api/pull/15)、[#23](https://github.com/xjoker/cursor-api/pull/23) | Anthropic Messages、Claude Code 工具往返、模型别名；`count_tokens` 默认关闭，显式配置 `estimate` 可返回带估算标志的本地计数 |
+| [#15](https://github.com/xjoker/cursor-api/pull/15)、[#23](https://github.com/xjoker/cursor-api/pull/23) | 模型别名仍保留；Anthropic Messages、Claude Code 工具往返及 `count_tokens` 已从当前公开接口移除 |
 | [#16](https://github.com/xjoker/cursor-api/pull/16) | PR CI、Node 22.13 / 22 / 24 测试矩阵、amd64 容器健康检查 |
 | [#17](https://github.com/xjoker/cursor-api/pull/17)、[#25](https://github.com/xjoker/cursor-api/pull/25)、[#26](https://github.com/xjoker/cursor-api/pull/26) | Cursor Key 池、故障冷却、轮询及 least_active、管理台指纹和请求计数 |
 | [#18](https://github.com/xjoker/cursor-api/pull/18) | SSE 立即发送响应头、15 秒心跳、断连清理 |
@@ -36,8 +38,8 @@
 
 ## Issue 核对结果
 
-- [#29](https://github.com/xjoker/cursor-api/issues/29)：SDK 无精确 tokenizer。默认 404，估算需显式开启；误差可能影响客户端压缩时机，不能作为真实用量。
-- [#30](https://github.com/xjoker/cursor-api/issues/30)：认证失败限制和会话上限已实现；已增加按客户端 Key 的请求/Token 周期配额及并发上限；每秒/分钟请求速率仍由反向代理控制。可使用以下 nginx 配置，阈值按实际负载调整：
+- [#29](https://github.com/xjoker/cursor-api/issues/29)：SDK 无精确 tokenizer；随 Anthropic Messages 能力移除，`count_tokens` 不再属于当前公开接口。
+- [#30](https://github.com/xjoker/cursor-api/issues/30)：认证失败限制和会话上限已实现；已增加按客户端 Key 的请求/Token 周期配额及并发上限；已增加可选的每 Key 分钟级滚动请求限制；每秒限流及多实例总量仍由反向代理控制。可使用以下 nginx 配置，阈值按实际负载调整：
 
   ```nginx
   # http context
@@ -65,11 +67,11 @@ Node 最低版本 22.13；官方 Docker 镜像使用 Node 22、`linux/amd64`，�
 
 ## 本次验证边界
 
-- `npm run typecheck`、`git diff --check` 通过；依赖安装审计报告 0 个已知漏洞。
-- 整合后的全量测试：311 项通过、0 失败；首次目录检查发现 23 个残留。修复后仅复跑受影响的 87 项测试，全部通过，受检目录无残留。
-- 会话策略回归先复现跨会话借用并发槽（200 而非 429）、拒绝后恢复旧 agent（403 而非新会话 200）；修复后两项及直接受影响路径共 53 项通过。
-- 目录检查继承出网守卫的回归先失败（守卫未加载），修复后通过；同时验证真实残留仍导致检查失败。
-- 实际启动编译产物：`/health` 为版本 `20261020.2`、schema 11；未授权模型请求 401，管理页 200 且脚本语法有效，防嵌入头生效；Chat 长度截断、Responses 生成/读取与 Messages 请求通过。
-- 模型测试和运行验证均使用假 Cursor SDK，数据库测试使用真实临时 SQLite；本轮没有发出真实 Cursor 请求。
+- 从干净编译产物运行官方 `openai@7.39.0` 验收，Chat/Responses 非流式、流式、工具往返、Response 读取及 SDK 401/404 错误解析通过。
+- 分钟限流先复现同 Key 第二次请求返回 200 而非 429；接线后通过。接口收敛回归在原主线快照上复现 400 而非 404，当前版本通过。
+- 全量 `npm run test:tmpdirs`：317 项通过、0 失败，受检临时目录无残留。数据库测试使用真实临时 SQLite。
+- `npm run typecheck`、`git diff --check` 通过；生产依赖审计为 0 个已知漏洞。
+- 真实上游使用临时测试凭据，限定非 max 的 `gemini-2.5-flash`，共发送 3 次短生成请求：Chat 非流式、Chat 流式、Responses 非流式，均返回 200、可见文本及 usage。使用独立临时数据目录，结束后已清理；凭据未写入仓库、配置或本报告。
+- 真实费用未核算；真实工具往返、多账号故障切换、反向代理长流与生产部署未验证，#32 保留这些待验项目。
 
-最终 Node 矩阵和 Docker 构建结果以整合 PR 的 CI 为准。真实 Cursor 上游、实际计费、多账号权限及生产部署状态未由本轮验证。
+最终 Node 22.13 / 22 / 24 矩阵和 amd64 容器健康检查以本版 PR 的 CI 为准。

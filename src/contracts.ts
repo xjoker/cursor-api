@@ -5,8 +5,6 @@
 
 export interface AppConfig {
   corsAllowOrigins: string[];
-  /** `POST /v1/messages/count_tokens`: rough local estimate, or 404 when off. */
-  anthropicCountTokens: "estimate" | "off";
   /** `model_aliases` rules applied to every request's `model` before catalog lookup. */
   modelAliases: Array<{ pattern: string; target: string; matcher: RegExp }>;
   cursorApiKey: string;
@@ -50,6 +48,8 @@ export interface AppConfig {
   sseKeepaliveMs: number;
   /** Failed authentication attempts allowed per address each minute; 0 disables throttling. */
   authFailureLimit: number;
+  /** Chat Completions and Responses generation requests allowed per client key per rolling minute; 0 disables throttling. */
+  rateLimitPerKey: number;
   /** Upper bound on in-memory Cursor sessions (running or parked for tool results). */
   maxLiveSessions: number;
   /** Days a conversation_id → agent mapping survives without use. */
@@ -241,7 +241,7 @@ export interface ParsedChatRequest {
   reasoning_effort?: string;
   /**
    * Best-effort reasoning level from clients that always send one (Responses
-   * `reasoning.effort`, Anthropic `thinking` / `output_config.effort`). Applied
+   * `reasoning.effort`). Applied
    * only when the model has an effort parameter; never causes a 400.
    */
   reasoning_effort_hint?: string;
