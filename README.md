@@ -284,12 +284,12 @@ Each client key can carry its own policy. Every field is optional; existing keys
 | Field | Meaning |
 | --- | --- |
 | `allowed_models` | `null` = any model. Otherwise a list of exact model ids or `*` wildcards (case-insensitive), e.g. `["gemini-*", "composer-2.5"]`. Checked after `model_aliases` and again on the catalog id the model resolves to, so an alias cannot unlock a model the list does not allow. Wildcards match catalog ids only; a catalog alias must be listed exactly. `GET /v1/models` only lists allowed models and `GET /v1/models/{id}` returns 404 for the rest. A disallowed model returns `403 model_not_allowed` (`param: "model"`). |
-| `allow_max_mode` | `null` = inherit the gateway `allow_max_mode`. `true` / `false` overrides it for this key in either direction, with the same fallback / `403 max_mode_not_allowed` behaviour, including the check of the SDK-resolved model. |
+| `allow_max_mode` | `null` = inherit the gateway `allow_max_mode`. `false` turns max mode off for this key. The gateway setting is a **hard ceiling**: effective = gateway **AND** key, so `true` cannot enable max mode when the gateway has `allow_max_mode = false`. Same fallback / `403 max_mode_not_allowed` behaviour, including the check of the SDK-resolved model. |
 | `quota_requests` | Maximum requests per period. Pre-charged atomically before the upstream run (concurrent requests cannot overspend) and refunded if the run never starts. |
-| `quota_tokens` | Token budget per period, a **soft cap**: a request is admitted while used tokens are below the limit; its tokens are added after it finishes, so the last request can go over. |
+| `quota_tokens` | Token budget per period, a **soft cap**. At admission each request **reserves** an estimate (input ≈ characters / 4, plus 1,024 output tokens) atomically, and is admitted only while used + reserved tokens are below the limit; on finish the reservation is replaced by the actual charge (see *Token accounting*). Concurrent requests therefore cannot all pass a nearly used quota; the overrun is bounded by what the admitted requests use beyond their reservations (typically one long reply). |
 | `quota_period` | `total` (default, never resets), `daily` or `monthly`. |
-| `quota_tz` | IANA time zone for period boundaries (default `UTC`), e.g. `Asia/Singapore`. |
-| `max_concurrent` | Maximum in-flight requests for the key (per gateway process). |
+| `quota_tz` | IANA time zone for period boundaries (default `UTC`), e.g. `Asia/Singapore`. Stored canonical (`asia/singapore` → `Asia/Singapore`); UTC offsets such as `+08:00` are rejected. A stored zone the runtime no longer knows falls back to UTC (logged). Midnight-DST zones (Havana, Azores, …): the day starts at its first existing local instant. |
+| `max_concurrent` | Maximum in-flight requests for the key (per gateway process; multiply by the number of instances). Agents suspended on client tool calls also hold a slot until their tool results arrive (the continuing request reuses it) or the park times out. |
 | `quota_cache_read_weight` | `null` = gateway `quota_cache_read_weight` (env `QUOTA_CACHE_READ_WEIGHT`, default `1.0`). A number from 0 to 1: how much each cache-read token counts toward `quota_tokens` (e.g. `0.1` ≈ cache-read pricing). |
 
 Over quota: `429 insufficient_quota` with `Retry-After` (seconds until the period resets; omitted for `total`). Over the concurrency cap: `429 concurrency_limit_exceeded` with `Retry-After: 1`. Model checks run first, so a disallowed model gets 403/404, not 429, and is not charged.
@@ -297,8 +297,10 @@ Over quota: `429 insufficient_quota` with `Retry-After` (seconds until the perio
 Admin API: `POST /admin/api/keys` accepts the fields above; `PATCH /admin/api/keys/{id}` updates any of them (plus `name`; omitted fields are unchanged, `null` clears a limit); `GET /admin/api/keys/{id}/usage` returns the current period (`requests`, `tokens`, `remaining_*`, `in_flight`, `resets_at`) and recent periods; `POST /admin/api/keys/{id}/usage/reset` zeroes the current period. `GET /admin/api/keys` includes each key's policy and `usage_current`. The admin UI edits these under **Client keys → Policy**.
 
 Token accounting limits:
-- Tokens come from the SDK's per-run usage (`run.wait().usage`). Cumulative agent totals are never charged, because they would double count continued conversations. The source is pluggable for a future per-run usage API.
-- Turns that end in client tool calls (parked runs) may report no usage at the point the response is sent; those turns count against `quota_requests` but may add fewer tokens than were actually used.
+- Charge per request, in order: (1) the SDK's per-run usage (`run.wait().usage`), also when the client aborted after the run started; (2) otherwise a conservative estimate: input sent upstream plus streamed text, thinking and tool-call arguments, at ~4 characters per token (client abort without usage, cumulative-only usage); (3) if nothing at all is known (the run failed after starting), the admission reservation stays as the charge. Cumulative agent totals are never charged, because they would double count continued conversations. The source is pluggable for a future per-run usage API.
+- Turns that end in client tool calls (suspended runs) are charged the estimate when the response is sent, so an abandoned tool round is never free. When the tool results come back and the run finishes, the run's actual usage minus what was already charged is added (never negative).
+- A request whose run never started (validation errors, failed send) is refunded: request count and reservation.
+- Database: `PRAGMA user_version` records the schema version (10). Rolling back to a build older than v10 ignores the policy columns, i.e. **every client key becomes unrestricted**; upgrading again restores the policies.
 - Cost (USD) quotas are not available yet: local SDK agents do not expose per-request cost.
 
 ---

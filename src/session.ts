@@ -28,6 +28,7 @@ import {
   toChatUsage,
 } from "./cursor.js";
 import { getConversationMapping, pruneConversations, upsertConversation, type ConversationMapping } from "./db.js";
+import { estimateTokens, holdParkedSlot } from "./key-policy.js";
 import { conversationBusyError, GatewayError, invalidRequest, maxModeNotAllowed } from "./errors.js";
 import { logError, logInfo, logWarn } from "./log.js";
 import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
@@ -90,6 +91,10 @@ interface LiveSession {
     format?: ParsedChatRequest["output_format"];
     stream: boolean;
   };
+  /** Quota bookkeeping for the current run: input chars of this HTTP turn, estimates already charged. */
+  quota: { inputChars: number; precharged: number };
+  /** Release of the `max_concurrent` slot held while suspended on client tool calls (F3). */
+  releaseParkedSlot?: () => void;
   text: string;
   thinking: string;
   sink: ChatTurnSink | undefined;
@@ -389,6 +394,25 @@ export function validateChatTurnRequest(request: ParsedChatRequest): ChatTurnKin
   const turn = classifyChatTurn(request.messages);
   filterToolsForChoice(request.tools, request.tool_choice);
   return turn;
+}
+
+/**
+ * True when `request` carries tool results for an agent this client key has suspended (so the
+ * request continues a run that already holds a `max_concurrent` slot). Never throws.
+ */
+export function resumesParkedTurn(apiKeyId: string, request: ParsedChatRequest): boolean {
+  let turn: ChatTurnKind;
+  try {
+    turn = classifyChatTurn(request.messages);
+  } catch {
+    return false;
+  }
+  if (turn.kind !== "tool_results") return false;
+  const candidates = [
+    sessions.get(sessionKey(apiKeyId, hashMessages(turn.stem))),
+    request.conversation_id ? sessions.get(conversationKey(apiKeyId, request.conversation_id)) : undefined,
+  ];
+  return candidates.some((session) => session !== undefined && session.parks.size > 0 && session.releaseParkedSlot !== undefined);
 }
 
 export function conversationKey(apiKeyId: string, conversationId: string): string {
@@ -733,6 +757,7 @@ function emptySession(
     modelParams,
     maxMode,
     allowMaxMode: maxModeAllowedFor(options.modelPolicy),
+    quota: { inputChars: 0, precharged: 0 },
     text: "",
     thinking: "",
     sink: options.sink,
@@ -808,6 +833,7 @@ async function sendOnSession(
   session.lastRequestMessages = options.request.messages;
   session.lastActiveAt = Date.now();
   session.output = outputShapingFor(options.request);
+  session.quota = { inputChars: prompt.length, precharged: 0 };
   liveSessions.add(session);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   const images = imagesOfLastUser(options.request.messages);
@@ -869,6 +895,9 @@ export async function continueRun(
   session.lastActiveAt = Date.now();
   // Limits count per HTTP turn: restart them for the continued run.
   if (session.output?.limits) session.output.limiter = new OutputLimiter(session.output.limits.stop, session.output.limits.maxTokens);
+  // No longer suspended: the continuing HTTP request holds its own slot.
+  session.releaseParkedSlot?.();
+  session.releaseParkedSlot = undefined;
   clearParkTimer(session);
   bindAbort(session, abortSignal);
   if (session.batch.length > 0) {
@@ -897,6 +926,10 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
   }
   if (outcome.kind === "tools") {
     session.lastActiveAt = Date.now();
+    // Charge this round now (the client may never resume) and hold a concurrency slot while parked.
+    const estimate = segmentEstimate(session, outcome.calls);
+    session.quota = { inputChars: 0, precharged: (session.quota?.precharged ?? 0) + estimate };
+    session.releaseParkedSlot ??= holdParkedSlot(session.apiKeyId);
     armParkTimeout(session);
     indexSession(
       session,
@@ -920,6 +953,7 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
       status: "finished",
       finish_reason: "tool_calls",
       tool_calls: outcome.calls,
+      quota_estimate_tokens: estimate,
     });
   }
   await dropSession(session);
@@ -951,6 +985,7 @@ export function applyToolResults(
       throw invalidRequest(`Unknown tool_call_id '${result.toolCallId}'`);
     }
   }
+  if (session.quota) for (const result of results) session.quota.inputChars += result.content.length;
   for (const result of results) {
     const parked = session.parks.get(result.toolCallId);
     if (!parked) {
@@ -1120,6 +1155,20 @@ async function finishOutput(
   };
 }
 
+/** Estimated tokens of the current HTTP turn (input + everything streamed), ~4 chars per token. */
+function segmentEstimate(session: LiveSession, calls: OpenAiToolCall[] = []): number {
+  let chars = (session.quota?.inputChars ?? 0) + session.text.length + session.thinking.length;
+  for (const call of calls) chars += (call.name?.length ?? 0) + (call.arguments?.length ?? 0);
+  return estimateTokens(chars);
+}
+
+function quotaFields(session: LiveSession): Pick<CursorChatResult, "quota_estimate_tokens" | "quota_precharged_tokens"> {
+  return {
+    quota_estimate_tokens: segmentEstimate(session),
+    ...((session.quota?.precharged ?? 0) > 0 ? { quota_precharged_tokens: session.quota.precharged } : {}),
+  };
+}
+
 function withThinking(session: LiveSession, result: CursorChatResult): CursorChatResult {
   if (session.thinking.length === 0) return result;
   return { ...result, reasoning: session.thinking };
@@ -1154,17 +1203,21 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         ...(session.maxMode ? { max_mode: true } : {}),
         status: "finished",
         ...(await finishOutput(session, undefined)),
+        ...quotaFields(session),
       };
     }
     if (result.status === "cancelled") {
+      // F1: a client abort still pays for what the run used (run usage if reported, else estimate).
       return {
         text: session.text,
-        usage: toChatUsage(undefined),
-        usageKnown: false,
+        usage: toChatUsage(rawUsage),
+        usageKnown: rawUsage !== undefined,
+        ...(usageScope ? { usageScope } : {}),
         status: "cancelled",
         finish_reason: "cancelled",
         params: session.modelParams,
         ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
       };
     }
     if (result.status === "error") {
@@ -1178,6 +1231,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         finish_reason: "error",
         params: session.modelParams,
         ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
       };
     }
     return {
@@ -1191,6 +1245,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
       ...(session.maxMode ? { max_mode: true } : {}),
       status: "finished",
       ...(await finishOutput(session, result.result)),
+      ...quotaFields(session),
     };
   } catch (error) {
     if (session.output?.limiter?.cut && !abortSignal.aborted) {
@@ -1201,6 +1256,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         ...(session.maxMode ? { max_mode: true } : {}),
         status: "finished",
         ...(await finishOutput(session, undefined)),
+        ...quotaFields(session),
       };
     }
     if (abortSignal.aborted) {
@@ -1212,6 +1268,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         finish_reason: "cancelled",
         params: session.modelParams,
         ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
       };
     }
     throw mapCursorError(error);
@@ -1267,6 +1324,8 @@ function indexSession(session: LiveSession, apiKeyId: string, hash: string): voi
 
 async function dropSession(session: LiveSession): Promise<void> {
   liveSessions.delete(session);
+  session.releaseParkedSlot?.();
+  session.releaseParkedSlot = undefined;
   clearParkTimer(session);
   if (session.flushTimer) clearTimeout(session.flushTimer);
   for (const key of session.indexKeys) {

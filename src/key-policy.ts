@@ -1,8 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { ApiKeyRow, CursorChatResult, KeyModelPolicy, QuotaPeriod } from "./contracts.js";
-import { addKeyTokens, refundKeyRequest, reserveKeyRequest } from "./db.js";
+import type { ApiKeyRow, CursorChatResult, KeyModelPolicy, ParsedChatRequest, QuotaPeriod } from "./contracts.js";
+import { adjustKeyTokens, refundKeyRequest, reserveKeyRequest } from "./db.js";
 import { concurrencyLimitExceeded, invalidRequest, quotaExceeded } from "./errors.js";
-import { logInfo } from "./log.js";
+import { logInfo, logWarn } from "./log.js";
 
 export const MAX_ALLOWED_MODEL_PATTERNS = 200;
 export const MAX_ALLOWED_MODEL_PATTERN_LENGTH = 256;
@@ -131,25 +131,61 @@ export function parseAllowedModelsInput(value: unknown): string[] | null {
 // ---------------------------------------------------------------------------
 
 export function isValidTimeZone(tz: string): boolean {
+  return canonicalTimeZone(tz) !== undefined;
+}
+
+/**
+ * Canonical IANA name for `tz` (e.g. `asia/singapore` → `Asia/Singapore`), or undefined.
+ * UTC offsets (`+08:00`, `-0500`) and other non-IANA forms are rejected even when the local ICU
+ * accepts them, so a stored value stays valid across Node / ICU upgrades.
+ */
+export function canonicalTimeZone(tz: string): string | undefined {
+  if (typeof tz !== "string" || tz.trim() === "" || tz.length > 64) return undefined;
+  const value = tz.trim();
+  if (!/^[A-Za-z][A-Za-z0-9_+\-]*(\/[A-Za-z0-9_+\-]+)*$/.test(value)) return undefined;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-    return true;
+    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone;
+    return /^[+-]/.test(resolved) ? undefined : resolved;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
+const warnedTimeZones = new Set<string>();
+
+/** Read-time guard: a stored zone the runtime no longer knows falls back to UTC (logged once). */
+function usableTimeZone(tz: string): string {
+  if (canonicalTimeZone(tz) !== undefined) return tz;
+  if (!warnedTimeZones.has(tz)) {
+    warnedTimeZones.add(tz);
+    logWarn("invalid quota_tz; using UTC", { quota_tz: tz });
+  }
+  return "UTC";
+}
+
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function formatterFor(tz: string): Intl.DateTimeFormat {
+  let formatter = formatters.get(tz);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    if (formatters.size > 500) formatters.clear();
+    formatters.set(tz, formatter);
+  }
+  return formatter;
+}
+
 function localParts(ms: number, tz: string): { y: number; m: number; d: number; h: number; mi: number; s: number } {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(ms));
+  const parts = formatterFor(tz).formatToParts(new Date(ms));
   const get = (type: string): number => Number(parts.find((part) => part.type === type)?.value ?? "0");
   return { y: get("year"), m: get("month"), d: get("day"), h: get("hour"), mi: get("minute"), s: get("second") };
 }
@@ -161,12 +197,34 @@ function tzOffset(ms: number, tz: string): number {
   return asUtc - Math.floor(ms / 1000) * 1000;
 }
 
-/** UTC instant of local wall-clock midnight y-m-d in `tz` (two passes handle DST shifts). */
+/**
+ * UTC instant where local day y-m-d starts in `tz`. Usually local 00:00 (two passes handle DST
+ * shifts). In zones that skip midnight for DST (Havana, Azores, Santiago, …) 00:00 does not exist;
+ * then the first existing local instant of that day is returned (F4: was 1 h early).
+ */
 function localMidnightUtc(y: number, m: number, d: number, tz: string): number {
   const wall = Date.UTC(y, m - 1, d);
   let guess = wall - tzOffset(wall, tz);
   guess = wall - tzOffset(guess, tz);
-  return guess;
+  const onDay = (ms: number): boolean => {
+    const p = localParts(ms, tz);
+    return p.y === y && p.m === m && p.d === d;
+  };
+  if (onDay(guess)) {
+    // Step back while still on the day (an offset change can leave the guess past 00:00).
+    while (onDay(guess - 60_000)) guess -= 60_000;
+    return guess;
+  }
+  // Landed on the previous day: the skipped hour. Find the first minute on the target day.
+  let low = guess;
+  let high = guess + 6 * 3_600_000;
+  if (!onDay(high)) return guess;
+  while (high - low > 1000) {
+    const mid = Math.floor((low + high) / 2 / 1000) * 1000;
+    if (onDay(mid)) high = mid;
+    else low = mid;
+  }
+  return high;
 }
 
 function pad(value: number, width = 2): string {
@@ -176,13 +234,14 @@ function pad(value: number, width = 2): string {
 /** Storage key for the period containing `now`: `total`, `d:YYYY-MM-DD` or `m:YYYY-MM` (local to `tz`). */
 export function periodKey(period: QuotaPeriod, tz: string, now = Date.now()): string {
   if (period === "total") return "total";
-  const p = localParts(now, tz);
+  const p = localParts(now, usableTimeZone(tz));
   return period === "daily" ? `d:${pad(p.y, 4)}-${pad(p.m)}-${pad(p.d)}` : `m:${pad(p.y, 4)}-${pad(p.m)}`;
 }
 
 /** When the current period ends, or `null` for `total`. */
-export function periodResetsAt(period: QuotaPeriod, tz: string, now = Date.now()): Date | null {
+export function periodResetsAt(period: QuotaPeriod, zone: string, now = Date.now()): Date | null {
   if (period === "total") return null;
+  const tz = usableTimeZone(zone);
   const p = localParts(now, tz);
   if (period === "daily") {
     const next = new Date(Date.UTC(p.y, p.m - 1, p.d + 1));
@@ -197,18 +256,26 @@ export function periodResetsAt(period: QuotaPeriod, tz: string, now = Date.now()
 // ---------------------------------------------------------------------------
 
 /**
- * Picks the tokens to charge for one finished turn. The default only trusts run-scoped usage
- * (`run.wait().usage`); cumulative agent totals would double count resumed conversations.
+ * Tokens charged for one HTTP turn:
+ * 1. run-scoped usage (`run.wait().usage`, also after a client abort) minus what earlier tool
+ *    rounds of the same run were already charged (`quota_precharged_tokens`);
+ * 2. otherwise the gateway's conservative estimate `quota_estimate_tokens` (input + streamed text,
+ *    thinking and tool-call arguments, ~4 chars per token): client aborts without usage, tool-call
+ *    suspensions, cumulative-only (`agent_total`) usage;
+ * 3. `null` when nothing is known (the admission reservation is then kept as the charge).
  * Swap it with `setQuotaUsageSource` (e.g. for a future official per-run usage API).
  */
 export type QuotaUsageSource = (result: CursorChatResult, options: { cacheReadWeight: number }) => number | null;
 
 /** Run-scoped total, with cache-read tokens counted at `cacheReadWeight` (1 = full weight). */
 export const runScopedUsageSource: QuotaUsageSource = (result, options) => {
-  if (!result.usageKnown) return null;
-  if (result.usageScope !== undefined && result.usageScope !== "run") return null;
-  const cacheRead = Math.min(result.usage.cache_read_tokens ?? 0, result.usage.total_tokens);
-  return Math.ceil(result.usage.total_tokens - cacheRead + cacheRead * options.cacheReadWeight);
+  if (result.usageKnown && (result.usageScope === undefined || result.usageScope === "run")) {
+    const cacheRead = Math.min(result.usage.cache_read_tokens ?? 0, result.usage.total_tokens);
+    const weighted = Math.ceil(result.usage.total_tokens - cacheRead + cacheRead * options.cacheReadWeight);
+    return Math.max(0, weighted - (result.quota_precharged_tokens ?? 0));
+  }
+  if (result.quota_estimate_tokens !== undefined) return result.quota_estimate_tokens;
+  return null;
 };
 
 let gatewayCacheReadWeight = 1;
@@ -223,44 +290,96 @@ export function setQuotaUsageSource(source: QuotaUsageSource | undefined): void 
   usageSource = source ?? runScopedUsageSource;
 }
 
+/** ~4 characters per token, at least 1: the same rough rule as the local count_tokens estimate. */
+export function estimateTokens(chars: number): number {
+  return Math.max(1, Math.ceil(Math.max(0, chars) / 4));
+}
+
+/** Output allowance reserved per in-flight request on top of the input estimate (F2). */
+export const QUOTA_RESERVE_OUTPUT_TOKENS = 1024;
+
+/** Token reservation for one request at admission: estimated input + a fixed output allowance. */
+export function reservationFor(request: Pick<ParsedChatRequest, "messages">): number {
+  let chars = 0;
+  for (const message of request.messages) {
+    chars += message.content?.length ?? 0;
+    for (const call of message.tool_calls ?? []) chars += (call.name?.length ?? 0) + (call.arguments?.length ?? 0);
+  }
+  return estimateTokens(chars) + QUOTA_RESERVE_OUTPUT_TOKENS;
+}
+
 const inFlight = new Map<string, number>();
+/** Live agents suspended on client tool calls; they occupy `max_concurrent` slots (F3). */
+const parkedSlots = new Map<string, number>();
 
 export function inFlightRequests(apiKeyId: string): number {
   return inFlight.get(apiKeyId) ?? 0;
 }
 
+export function parkedAgents(apiKeyId: string): number {
+  return parkedSlots.get(apiKeyId) ?? 0;
+}
+
+/** Marks one suspended agent for `apiKeyId`; the returned release is idempotent. */
+export function holdParkedSlot(apiKeyId: string): () => void {
+  parkedSlots.set(apiKeyId, parkedAgents(apiKeyId) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = parkedAgents(apiKeyId) - 1;
+    if (left > 0) parkedSlots.set(apiKeyId, left);
+    else parkedSlots.delete(apiKeyId);
+  };
+}
+
 export interface KeyTicket {
   readonly period: string;
+  /** Tokens reserved at admission (0 without `quota_tokens`). */
+  readonly reservedTokens: number;
   /** Call once the upstream run exists; before that, finishing refunds the request. */
   markStarted(): void;
-  /** Idempotent. Releases the concurrency slot, refunds or post-charges tokens. */
+  /** Idempotent. Releases the concurrency slot, refunds or settles tokens against the reservation. */
   finish(result: CursorChatResult | null): void;
 }
 
-const NOOP_TICKET: KeyTicket = { period: "total", markStarted() {}, finish() {} };
+const NOOP_TICKET: KeyTicket = { period: "total", reservedTokens: 0, markStarted() {}, finish() {} };
 
 function hasQuota(key: ApiKeyRow): boolean {
   return key.quota_requests !== null || key.quota_tokens !== null || key.max_concurrent !== null;
 }
 
+export interface AdmitOptions {
+  /** Tokens to reserve while the request runs (only with `quota_tokens`); see {@link reservationFor}. */
+  reserveTokens?: number;
+  /** Tool results for an agent suspended by this key: it already holds a slot. */
+  resumesParked?: boolean;
+}
+
 /**
  * Admits one request for `key` or throws:
- * - 429 `concurrency_limit_exceeded` (Retry-After: 1) when `max_concurrent` slots are taken;
+ * - 429 `concurrency_limit_exceeded` (Retry-After: 1) when `max_concurrent` slots are taken
+ *   (in-flight HTTP requests plus agents suspended on tool calls);
  * - 429 `insufficient_quota` (Retry-After = seconds to next period; none for `total`).
+ * With `quota_tokens`, `reserveTokens` is added to the period's tokens atomically at admission and
+ * trued up on finish, so concurrent requests cannot all pass a nearly used-up token quota (F2).
  * Keys without any quota / concurrency setting return a no-op ticket (zero DB writes).
  */
-export function admitKeyRequest(db: DatabaseSync, key: ApiKeyRow, now = Date.now()): KeyTicket {
+export function admitKeyRequest(db: DatabaseSync, key: ApiKeyRow, now = Date.now(), options: AdmitOptions = {}): KeyTicket {
   if (!hasQuota(key)) return NOOP_TICKET;
   const current = inFlightRequests(key.id);
-  if (key.max_concurrent !== null && current >= key.max_concurrent) {
+  const occupied = current + parkedAgents(key.id) - (options.resumesParked ? 1 : 0);
+  if (key.max_concurrent !== null && occupied >= key.max_concurrent) {
     throw concurrencyLimitExceeded(key.max_concurrent);
   }
   const period = periodKey(key.quota_period, key.quota_tz, now);
   const metered = key.quota_requests !== null || key.quota_tokens !== null;
+  const reserved = key.quota_tokens !== null ? Math.max(0, Math.trunc(options.reserveTokens ?? 0)) : 0;
   if (metered) {
     const reservation = reserveKeyRequest(db, key.id, period, {
       quotaRequests: key.quota_requests,
       quotaTokens: key.quota_tokens,
+      reserveTokens: reserved,
     });
     if (!reservation.ok) {
       const resetsAt = periodResetsAt(key.quota_period, key.quota_tz, now);
@@ -280,6 +399,7 @@ export function admitKeyRequest(db: DatabaseSync, key: ApiKeyRow, now = Date.now
   let done = false;
   return {
     period,
+    reservedTokens: reserved,
     markStarted() {
       started = true;
     },
@@ -291,16 +411,17 @@ export function admitKeyRequest(db: DatabaseSync, key: ApiKeyRow, now = Date.now
       else inFlight.delete(key.id);
       if (!metered) return;
       if (!started) {
-        refundKeyRequest(db, key.id, period);
+        refundKeyRequest(db, key.id, period, reserved);
         return;
       }
       const cacheReadWeight = key.quota_cache_read_weight ?? gatewayCacheReadWeight;
       const tokens = result ? usageSource(result, { cacheReadWeight }) : null;
-      if (tokens !== null && tokens > 0) {
-        addKeyTokens(db, key.id, period, tokens);
-      } else if (result && result.usageKnown && result.usageScope === "agent_total") {
-        logInfo("quota skipped cumulative usage", { api_key_id: key.id });
+      if (result && result.usageKnown && result.usageScope === "agent_total") {
+        logInfo("quota used an estimate instead of cumulative usage", { api_key_id: key.id });
       }
+      // Unknown usage keeps the reservation as the charge (conservative floor).
+      const charge = tokens === null ? reserved : Math.max(0, Math.trunc(tokens));
+      adjustKeyTokens(db, key.id, period, charge - reserved);
     },
   };
 }

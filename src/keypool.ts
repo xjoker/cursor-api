@@ -177,21 +177,28 @@ export class CursorKeyPool {
   async run<T>(
     fn: (key: string) => Promise<T>,
     canRetry: (error: unknown) => boolean = () => true,
+    options: { record?: boolean } = {},
   ): Promise<T> {
+    const record = options.record !== false;
     const tried = new Set<string>();
     let lastError: unknown;
     for (;;) {
+      // `record: false` (admission prechecks): no rotation step and no success stats, so a
+      // precheck does not double a key's request count or shift round-robin / least-used order.
+      const cursor = this.cursor;
       const key = this.pick(tried);
+      if (!record) this.cursor = cursor;
       if (key === undefined) throw lastError;
       tried.add(key);
-      const release = this.acquire(key);
+      const release = record ? this.acquire(key) : () => undefined;
       try {
         const value = await fn(key);
-        this.reportSuccess(key);
+        if (record) this.reportSuccess(key);
         return value;
       } catch (error) {
         lastError = error;
-        const keySpecific = this.reportFailure(key, error);
+        // Precheck failures are classified for failover but not recorded (the real run records them).
+        const keySpecific = record ? this.reportFailure(key, error) : classifyKeyFailure(error) !== null;
         const candidateSpecific = error instanceof GatewayError && error.code === "model_not_found";
         if ((!keySpecific && !candidateSpecific) || tried.size >= this.entries.length || !canRetry(error)) {
           throw error;

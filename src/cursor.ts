@@ -308,8 +308,12 @@ export function wasHintSoftened(request: ParsedChatRequest): boolean {
 }
 
 /** True when max mode may be sent: the per-key override when set, else the gateway flag. */
+/**
+ * Effective max-mode permission: the gateway `allow_max_mode` is a hard ceiling and a key's
+ * `allow_max_mode` can only restrict further (effective = global AND key; key `null` = inherit).
+ */
 export function maxModeAllowedFor(options?: ModelSelectionOptions): boolean {
-  return options?.allowMaxMode ?? gatewayAllowMaxMode;
+  return gatewayAllowMaxMode && options?.allowMaxMode !== false;
 }
 
 /** `(id, value)` pairs from `params` that appear in at least one variant and only in max variants. */
