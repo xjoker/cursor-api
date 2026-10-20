@@ -37,6 +37,7 @@ test("a dispatched max-mode rejection invalidates every conversation alias of th
   const ledger = join(makeTempDir(context, "session-policy-ledger-"), "events.jsonl");
   const gateway = await startFakeGateway({ ALLOW_MAX_MODE: "false", FAKE_SDK_FORCE_MAX: "run-resumed", FAKE_SDK_LEDGER: ledger });
   const db = new DatabaseSync(join(gateway.dataDir, "cursor-api.sqlite"), { timeout: 5000 });
+  db.exec("PRAGMA busy_timeout = 5000");
   const rows = () => db.prepare("SELECT * FROM conversations WHERE api_key_id = ?").all("it-key");
   try {
     const first = await chat(gateway, { conversation_id: "C", messages: [{ role: "user", content: "hello" }] });
