@@ -33,6 +33,7 @@ import { logError, logInfo, logWarn } from "./log.js";
 import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
 import { normalizeJsonReply, OutputLimiter, outputFormatInstruction } from "./output-limits.js";
+import { hashHistory, rememberHistory, takeHistory } from "./history-resume.js";
 
 const DEFAULT_PARK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -449,8 +450,27 @@ export async function runChatTurn(options: RunChatTurnOptions): Promise<CursorCh
           await options.onClaimed?.();
         }
       : undefined;
-    return await runClaimedChatTurn({ ...options, claimOutput }, turn);
+    const result = await runClaimedChatTurn({ ...options, claimOutput }, turn);
+    rememberHistoryTurn(options, result);
+    return result;
   });
+}
+
+/** Client manages no conversation of its own (no `conversation_id`, or a gateway-generated one). */
+function usesHistoryResume(request: ParsedChatRequest): boolean {
+  return !request.conversation_id || request.conversation_id_generated === true;
+}
+
+/**
+ * Remember `history + this reply → agent` after a normal, complete answer. Truncated (`length` /
+ * stop-sequence) and JSON-normalised replies differ from what the agent holds, so they are skipped.
+ */
+function rememberHistoryTurn(options: TurnOptions, result: CursorChatResult): void {
+  if (!usesHistoryResume(options.request) || !result.agent_ref) return;
+  if (result.status !== "finished" || result.finish_reason !== "stop") return;
+  if (result.stop_sequence !== undefined || options.request.output_format) return;
+  const history = [...options.request.messages, { role: "assistant" as const, content: result.text }];
+  rememberHistory(options.apiKeyId, hashHistory(history), result.agent_ref);
 }
 
 async function runClaimedChatTurn(
@@ -519,6 +539,18 @@ async function runClaimedChatTurn(
 
   if (turn.kind !== "user") {
     throw invalidRequest("Last message must be role 'user' or 'tool'");
+  }
+  if (usesHistoryResume(options.request) && turn.stem.length > 0) {
+    const previous = takeHistory(options.apiKeyId, hashHistory(turn.stem));
+    if (previous) {
+      logInfo("history matched a previous agent; sending only the new message", {
+        api_key_id: options.apiKeyId,
+        agent_id: previous.agentId,
+        history_messages: turn.stem.length,
+      });
+      // resumeUserTurn falls back to the full transcript if the resume fails before output.
+      return await resumeUserTurn(turn, options, previous);
+    }
   }
   return await startNewSession(turn, options);
 }
@@ -891,7 +923,11 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
     });
   }
   await dropSession(session);
-  return withThinking(session, outcome.result);
+  const agentId = session.agent?.agentId;
+  return withThinking(session, {
+    ...outcome.result,
+    ...(agentId ? { agent_ref: { agentId, cursorKeyId: session.cursorKeyId } } : {}),
+  });
 }
 
 export function applyToolResults(

@@ -41,6 +41,7 @@ api_key_pepper = ""
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
 # enforce_output_limits = false  # true: enforce max_tokens / stop at the gateway (cut + cancel the run)
+# history_resume = true  # no conversation_id: resume the previous agent when the history hash matches
 # allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
 # quota_cache_read_weight = 1.0  # 0..1: how much a cache-read token counts toward per-key token quotas
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
@@ -168,6 +169,10 @@ export function loadConfig(
     ignoreSamplingParams: parseBoolean(
       pickConfigured(env, "IGNORE_SAMPLING_PARAMS", boolToString(tomlBool(toml, "ignore_sampling_params")), "ignore_sampling_params"),
       false,
+    ),
+    historyResume: parseBoolean(
+      pickConfigured(env, "HISTORY_RESUME", boolToString(tomlBool(toml, "history_resume")), "history_resume"),
+      true,
     ),
     enforceOutputLimits: parseBoolean(
       pickConfigured(env, "ENFORCE_OUTPUT_LIMITS", boolToString(tomlBool(toml, "enforce_output_limits")), "enforce_output_limits"),

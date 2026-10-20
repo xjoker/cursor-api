@@ -39,6 +39,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
   - `ignore_sampling_params` 额外忽略 OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`；`stream_options.include_obfuscation` 接受并忽略。
   - `response_format` `json_object` / `json_schema` 与 Responses `text.format` 尽力而为：上游 prompt 附加 JSON 指令，非流式去掉外层代码块，非法 JSON 写日志。
   - `GET /v1/responses/{id}`：内存保存已完成的 Response（按 Key、1 小时、最多 1000 条，`store: false` 不保存）。
+- **按历史 hash 续用 agent**（SAF-95 PR C）：`history_resume`（`HISTORY_RESUME`，默认 `true`）。客户端没有 `conversation_id` 时，历史匹配上一个已完成回合就续用该 agent，只发送新消息；一次性匹配，按 Key 隔离，内存 1 小时；截断或 JSON 模式的回复不记录；续用失败回退完整 transcript。
 
 ## [20261020.1] — 2026-10-20
 

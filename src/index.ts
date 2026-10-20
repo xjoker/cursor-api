@@ -56,6 +56,7 @@ import {
 } from "./responses.js";
 import { getStoredResponse, storeResponse } from "./response-store.js";
 import { clientFinishReason } from "./output-limits.js";
+import { configureHistoryResume } from "./history-resume.js";
 import {
   configureMaxMode,
   getCursorModel,
@@ -111,6 +112,7 @@ const db = openDb(config.dataDir, {
   maxDetailBytes: config.logMaxDetailBytes,
 });
 configureSessionLimits({ maxLiveSessions: config.maxLiveSessions });
+configureHistoryResume({ enabled: config.historyResume });
 startSessionSweeper({ db, conversationTtlDays: config.conversationTtlDays });
 setSystemLogWriter((entry) => {
   insertSystemLog(db, entry);

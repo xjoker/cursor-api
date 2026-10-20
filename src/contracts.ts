@@ -35,6 +35,8 @@ export interface AppConfig {
   ignoreSamplingParams: boolean;
   /** Enforce `max_tokens` / `stop` at the gateway (cut + cancel); false = accept-and-ignore / 400. */
   enforceOutputLimits: boolean;
+  /** Without a client conversation_id, resume the previous agent when the history hash matches. */
+  historyResume: boolean;
   /**
    * Allow requests that resolve to a Cursor max-mode variant (SDK >= 1.0.38 turns max mode on
    * automatically for those). When false the gateway picks a non-max variant or rejects.
@@ -301,6 +303,8 @@ export interface CursorChatResult {
   json_valid?: boolean;
   /** The stop sequence that cut the output (`enforce_output_limits`). */
   stop_sequence?: string;
+  /** Internal: the Cursor agent that served the turn (history-hash resume); never sent to clients. */
+  agent_ref?: { agentId: string; cursorKeyId?: string };
   error?: { message: string; code?: string };
   tool_calls?: OpenAiToolCall[];
   /** Cursor `thinking-delta` text; OpenCode reads this as `reasoning_content`. */
