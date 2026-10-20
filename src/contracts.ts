@@ -255,6 +255,8 @@ export interface ParsedChatRequest {
   conversation_id?: string;
   /** The gateway assigned the conversation ID, so transcript matching remains valid. */
   conversation_id_generated?: boolean;
+  /** Client-supplied end-user id (`user`); scopes history-hash reuse within a client key. */
+  user?: string;
   /** OpenRouter `reasoning.exclude`: do not return thinking text (the model still reasons). */
   reasoning_exclude?: boolean;
   /** Gateway-enforced stop sequences (`enforce_output_limits`). */

@@ -2,7 +2,7 @@
 // sends only the new user message. Offline (fake SDK).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clearHistory, configureHistoryResume, hashHistory, HISTORY_TTL_MS, MAX_HISTORY_ENTRIES, historyEntryCount, rememberHistory, takeHistory } from "../dist/history-resume.js";
+import { clearHistory, configureHistoryResume, forgetAgent, forgetKey, hashHistory, HISTORY_TTL_MS, MAX_HISTORY_ENTRIES_PER_KEY, historyEntryCount, rememberHistory, sweepHistory, takeHistory } from "../dist/history-resume.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
 
 const headers = { authorization: `Bearer ${CLIENT_KEY}`, "content-type": "application/json" };
@@ -18,23 +18,59 @@ test("hashHistory: stable, trims assistant text only, sensitive to everything el
   assert.match(hashHistory(base), /^h1:[0-9a-f]{64}$/);
 });
 
-test("history store: single-use, per client key, expiring, bounded, switchable", () => {
+test("history store: single-use, per client key and user, expiring, bounded per key, switchable", () => {
   clearHistory();
   configureHistoryResume({ enabled: true });
-  rememberHistory("k1", "h", { agentId: "a1", cursorKeyId: "c1" }, 1000);
-  assert.equal(takeHistory("k2", "h", 1001), undefined);
-  assert.deepEqual(takeHistory("k1", "h", 1001), { agentId: "a1", cursorKeyId: "c1" });
-  assert.equal(takeHistory("k1", "h", 1002), undefined, "single use");
-  rememberHistory("k1", "h", { agentId: "a1" }, 1000);
-  assert.equal(takeHistory("k1", "h", 1000 + HISTORY_TTL_MS), undefined, "expired");
-  for (let index = 0; index <= MAX_HISTORY_ENTRIES; index += 1) rememberHistory("k1", `h${String(index)}`, { agentId: "a" }, 5000);
-  assert.equal(historyEntryCount(), MAX_HISTORY_ENTRIES);
-  assert.equal(takeHistory("k1", "h0", 5001), undefined, "oldest dropped");
-  configureHistoryResume({ enabled: false });
-  assert.equal(historyEntryCount(), 0);
-  rememberHistory("k1", "x", { agentId: "a" });
-  assert.equal(takeHistory("k1", "x"), undefined);
+  try {
+    rememberHistory("k1", undefined, "h", { agentId: "a1", cursorKeyId: "c1" }, 1000);
+    assert.equal(takeHistory("k2", undefined, "h", 1001), undefined);
+    assert.equal(takeHistory("k1", "alice", "h", 1001), undefined, "scoped by the client's user field");
+    assert.deepEqual(takeHistory("k1", undefined, "h", 1001), { agentId: "a1", cursorKeyId: "c1" });
+    assert.equal(takeHistory("k1", undefined, "h", 1002), undefined, "single use");
+    rememberHistory("k1", undefined, "h", { agentId: "a1" }, 1000);
+    assert.equal(takeHistory("k1", undefined, "h", 1000 + HISTORY_TTL_MS), undefined, "expired");
+    for (let index = 0; index <= MAX_HISTORY_ENTRIES_PER_KEY; index += 1) rememberHistory("k1", undefined, `h${String(index)}`, { agentId: `a${String(index)}` }, 5000);
+    assert.equal(historyEntryCount("k1"), MAX_HISTORY_ENTRIES_PER_KEY);
+    assert.equal(takeHistory("k1", undefined, "h0", 5001), undefined, "oldest dropped");
+    configureHistoryResume({ enabled: false });
+    assert.equal(historyEntryCount(), 0);
+    rememberHistory("k1", undefined, "x", { agentId: "a" });
+    assert.equal(historyEntryCount(), 0, "nothing stored while disabled");
+  } finally {
+    clearHistory();
+  }
+});
+
+test("history store: one record per agent state; forgetAgent / forgetKey; per-key cap; expired entries purged", () => {
   clearHistory();
+  configureHistoryResume({ enabled: true });
+  try {
+    rememberHistory("k1", undefined, "h1", { agentId: "A" }, 1000);
+    rememberHistory("k1", undefined, "h2", { agentId: "A" }, 1000);
+    assert.equal(takeHistory("k1", undefined, "h1", 1001), undefined, "a newer turn of the agent replaces its older record");
+    assert.equal(takeHistory("k1", undefined, "h2", 1001)?.agentId, "A");
+    rememberHistory("k1", undefined, "h3", { agentId: "B" }, 1000);
+    forgetAgent("B");
+    assert.equal(takeHistory("k1", undefined, "h3", 1001), undefined, "forgetAgent drops the record");
+
+    // Per key: one key filling its quota never evicts another key's records.
+    rememberHistory("victim", undefined, "keep", { agentId: "V" }, 2000);
+    for (let index = 0; index < MAX_HISTORY_ENTRIES_PER_KEY + 50; index += 1) rememberHistory("noisy", undefined, `n${String(index)}`, { agentId: `N${String(index)}` }, 2000);
+    assert.equal(historyEntryCount("noisy"), MAX_HISTORY_ENTRIES_PER_KEY);
+    assert.equal(historyEntryCount("victim"), 1);
+    forgetKey("noisy");
+    assert.equal(historyEntryCount("noisy"), 0);
+
+    // Expired entries are purged on a later write (sweep), not just when looked up.
+    rememberHistory("old", undefined, "o1", { agentId: "O1" }, 3000);
+    rememberHistory("old", undefined, "o2", { agentId: "O2" }, 3000);
+    sweepHistory(3000 + HISTORY_TTL_MS, true);
+    assert.equal(historyEntryCount("old"), 0);
+    assert.equal(historyEntryCount("victim"), 0, "victim expired too");
+  } finally {
+    configureHistoryResume({ enabled: false });
+    clearHistory();
+  }
 });
 
 async function chat(gateway, messages, extra = {}) {

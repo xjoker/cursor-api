@@ -29,6 +29,7 @@ import {
 import { GatewayError, invalidRequest } from "./errors.js";
 import { readJsonBody, sendJson, sendSimpleError } from "./http.js";
 import { listCursorModels, maxModeAllowedFor, peekCursorAccount } from "./cursor.js";
+import { forgetKey as forgetHistoryKey } from "./history-resume.js";
 import { sessionStats } from "./session.js";
 import {
   inFlightRequests,
@@ -165,6 +166,8 @@ async function dispatch(
 
   if (method === "POST" && disableMatch) {
     const updated = disableApiKey(ctx.db, decodeURIComponent(disableMatch[1] ?? ""));
+    // History-hash reuse records of this key must not outlive it (re-enabling starts clean).
+    if (updated) forgetHistoryKey(updated.id);
     if (!updated) {
       throw notFound("API key not found");
     }
@@ -227,6 +230,7 @@ async function dispatch(
     if (!deleted) {
       throw notFound("API key not found");
     }
+    forgetHistoryKey(deleted.id);
     sendJson(res, 200, publicKey(deleted));
     return;
   }

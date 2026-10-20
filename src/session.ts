@@ -34,7 +34,7 @@ import { logError, logInfo, logWarn } from "./log.js";
 import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
 import { normalizeJsonReply, OutputLimiter, outputFormatInstruction } from "./output-limits.js";
-import { hashHistory, rememberHistory, takeHistory } from "./history-resume.js";
+import { forgetAgent, hashHistory, historyResumeEnabled, rememberHistory, takeHistory } from "./history-resume.js";
 
 const DEFAULT_PARK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -263,7 +263,34 @@ interface RunChatTurnOptions {
 
 type TurnOptions = Omit<RunChatTurnOptions, "onClaimed"> & {
   claimOutput?: () => Promise<void>;
+  /**
+   * History-hash reuse: the full transcript a fresh agent would have been sent. The quota estimate
+   * counts it (not just the new message), so a reused turn is charged like HISTORY_RESUME=false.
+   */
+  quotaPrompt?: string;
 };
+
+/** Agents claimed by an in-flight resume (any path); see {@link claimAgent}. */
+const claimedAgents = new Set<string>();
+
+/** Busy: claimed by another resume, or held by a live (running or parked) session. */
+function agentBusy(agentId: string): boolean {
+  if (claimedAgents.has(agentId)) return true;
+  for (const session of liveSessions) if (session.agent?.agentId === agentId) return true;
+  return false;
+}
+
+/** Per-agent in-flight lock: undefined when the agent is busy, else an idempotent release. */
+function claimAgent(agentId: string): (() => void) | undefined {
+  if (agentBusy(agentId)) return undefined;
+  claimedAgents.add(agentId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    claimedAgents.delete(agentId);
+  };
+}
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -495,11 +522,11 @@ function usesHistoryResume(request: ParsedChatRequest): boolean {
  * stop-sequence) and JSON-normalised replies differ from what the agent holds, so they are skipped.
  */
 function rememberHistoryTurn(options: TurnOptions, result: CursorChatResult): void {
-  if (!usesHistoryResume(options.request) || !result.agent_ref) return;
+  if (!historyResumeEnabled() || !usesHistoryResume(options.request) || !result.agent_ref) return;
   if (result.status !== "finished" || result.finish_reason !== "stop") return;
   if (result.stop_sequence !== undefined || options.request.output_format) return;
   const history = [...options.request.messages, { role: "assistant" as const, content: result.text }];
-  rememberHistory(options.apiKeyId, hashHistory(history), result.agent_ref);
+  rememberHistory(options.apiKeyId, options.request.user, hashHistory(history), result.agent_ref);
 }
 
 async function runClaimedChatTurn(
@@ -534,6 +561,7 @@ async function runClaimedChatTurn(
   });
 
   if (action === "continue_park" && turn.kind === "tool_results" && parked) {
+    if (parked.agent) forgetAgent(parked.agent.agentId);
     rememberConversation(parked, options);
     parked.sink = options.sink;
     parked.parkTimeoutMs = options.parkTimeoutMs ?? parked.parkTimeoutMs;
@@ -569,16 +597,20 @@ async function runClaimedChatTurn(
   if (turn.kind !== "user") {
     throw invalidRequest("Last message must be role 'user' or 'tool'");
   }
-  if (usesHistoryResume(options.request) && turn.stem.length > 0) {
-    const previous = takeHistory(options.apiKeyId, hashHistory(turn.stem));
+  if (historyResumeEnabled() && usesHistoryResume(options.request) && turn.stem.length > 0) {
+    // Taken atomically (the record and every other record of that agent are gone from here on).
+    const previous = takeHistory(options.apiKeyId, options.request.user, hashHistory(turn.stem));
     if (previous) {
       logInfo("history matched a previous agent; sending only the new message", {
         api_key_id: options.apiKeyId,
         agent_id: previous.agentId,
         history_messages: turn.stem.length,
       });
-      // resumeUserTurn falls back to the full transcript if the resume fails before output.
-      return await resumeUserTurn(turn, options, previous);
+      // resumeUserTurn falls back to the full transcript if the resume fails before output, and
+      // uses a new agent if this one is busy on another path.
+      return await resumeUserTurn(turn, { ...options, quotaPrompt: renderTranscript([...turn.stem, turn.user]) }, previous, {
+        newAgentIfBusy: true,
+      });
     }
   }
   return await startNewSession(turn, options);
@@ -588,10 +620,36 @@ async function resumeUserTurn(
   turn: Extract<ChatTurnKind, { kind: "user" }>,
   options: TurnOptions,
   stored: ConversationMapping | undefined,
+  flags: { newAgentIfBusy?: boolean } = {},
 ): Promise<CursorChatResult> {
   if (!stored) {
     return await startNewSession(turn, options);
   }
+  // One request per agent at a time, whichever path (conversation_id, previous_response_id,
+  // history hash) found it.
+  const releaseAgent = claimAgent(stored.agentId);
+  if (!releaseAgent) {
+    if (!flags.newAgentIfBusy) throw conversationBusyError();
+    logInfo("history matched a busy agent; starting a new agent", {
+      api_key_id: options.apiKeyId,
+      agent_id: stored.agentId,
+    });
+    return await startNewSession(turn, options);
+  }
+  // This agent is about to move on: no history record may resume it afterwards.
+  forgetAgent(stored.agentId);
+  try {
+    return await resumeClaimedUserTurn(turn, options, stored);
+  } finally {
+    releaseAgent();
+  }
+}
+
+async function resumeClaimedUserTurn(
+  turn: Extract<ChatTurnKind, { kind: "user" }>,
+  options: TurnOptions,
+  stored: ConversationMapping,
+): Promise<CursorChatResult> {
   const pool = options.keyPool;
   if (!pool) {
     return await resumeUserTurnWithKey(turn, options, stored.agentId);
@@ -829,6 +887,7 @@ async function sendOnSession(
     abortSignal: AbortSignal;
     sink?: ChatTurnSink;
     onUpstreamStarted?: () => void;
+    quotaPrompt?: string;
   },
 ): Promise<CursorChatResult> {
   session.text = "";
@@ -843,8 +902,11 @@ async function sendOnSession(
   session.output = outputShapingFor(options.request);
   // JSON-mode instruction goes to the upstream prompt only (stored messages / hashes unchanged),
   // but it is sent, so it counts toward the quota estimate.
-  const text = prompt + outputFormatInstruction(options.request.output_format);
-  session.quota = { inputChars: text.length, precharged: 0 };
+  const instruction = outputFormatInstruction(options.request.output_format);
+  const text = prompt + instruction;
+  // A history-reused turn sends only the new message, but the agent replays the whole context:
+  // estimate it like the full transcript (same charge as HISTORY_RESUME=false).
+  session.quota = { inputChars: (options.quotaPrompt ?? prompt).length + instruction.length, precharged: 0 };
   liveSessions.add(session);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   const images = imagesOfLastUser(options.request.messages);

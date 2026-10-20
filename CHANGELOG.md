@@ -76,6 +76,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
   - 同时传 `max_completion_tokens` 和 `max_tokens` 时两者都校验。
   - Response 存储按 Key 限 100 条；总量满时淘汰条目最多的 Key 的最旧条目，一个 Key 不能挤掉其他 Key 的数据。
 - **按历史 hash 续用 agent**（SAF-95 PR C）：`history_resume`（`HISTORY_RESUME`，默认 `false`，需主动开启：实测续用回合的未缓存输入没有减少，反而多出缓存读，计费 Token 上升）。客户端没有 `conversation_id` 时，历史匹配上一个已完成回合就续用该 agent，只发送新消息；一次性匹配，按 Key 隔离，内存 1 小时；截断或 JSON 模式的回复不记录；续用失败回退完整 transcript。
+- #44 审查第 1 轮返工（Elliot）：
+  - 记录真正一次性：取用即删除；agent 被 `previous_response_id` / `conversation_id` 续用、工具续轮或更新回合使用时，指向它的记录全部作废。加入按 agent 的进行中锁：hash 命中忙碌 agent 时改用新 agent，显式续用遇忙返回 409。
+  - 续用回合在没有上游 usage 时按完整 transcript 估算配额，与 `HISTORY_RESUME=false` 一致（工具轮预扣同样）。
+  - 上限改为每个 Key 10000 条，过期条目主动清理；请求带 `user` 时按 `user` 区分；禁用或删除 Key 时立即清除其记录。
+  - 关闭时不再计算 hash；合入 Elliot 的 killer 测试。
+  - 回滚：设 `HISTORY_RESUME=false` 重启即可，只有内存状态，没有 schema 变更。
 
 ---
 

@@ -167,6 +167,7 @@ export function parseChatCompletionsRequest(input: unknown, options: ChatParseOp
     ...(tools !== undefined ? { tools } : {}),
     ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
     ...(conversationId ? { conversation_id: conversationId } : {}),
+    ...(typeof body.user === "string" && body.user !== "" ? { user: body.user } : {}),
     ...(reasoning.effort !== undefined ? { reasoning_effort_hint: reasoning.effort } : {}),
     ...(reasoning.exclude ? { reasoning_exclude: true } : {}),
     ...(stop !== undefined ? { stop } : {}),
