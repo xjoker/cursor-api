@@ -6,6 +6,8 @@ export class GatewayError extends Error {
   retryAfterSeconds?: number;
   /** OpenAI `error.param` (e.g. "model"); `null` when not tied to one field. */
   param?: string;
+  /** Set on a max-mode block raised after a max-mode run was already sent upstream (logged as max_mode=1). */
+  maxModeDispatched?: boolean;
 
   constructor(httpStatus: number, code: string, message: string, openaiType: string) {
     super(message);
@@ -36,7 +38,7 @@ export function modelNotFound(id: string): GatewayError {
   );
 }
 
-export function maxModeNotAllowed(id: string): GatewayError {
+export function maxModeNotAllowed(id: string, options?: { dispatched?: boolean }): GatewayError {
   const error = new GatewayError(
     403,
     "max_mode_not_allowed",
@@ -44,6 +46,7 @@ export function maxModeNotAllowed(id: string): GatewayError {
     "permission_error",
   );
   error.param = "model";
+  if (options?.dispatched) error.maxModeDispatched = true;
   return error;
 }
 

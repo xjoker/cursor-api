@@ -74,9 +74,9 @@ export interface ApiKeyRow {
   /** Allowed model patterns (exact id or `*` glob, case-insensitive). `null` = unrestricted, `[]` = none. */
   allowed_models: string[] | null;
   /**
-   * Per-key max-mode override: `null` = inherit the gateway `allow_max_mode` (default true),
-   * `false` = never run max-mode variants (non-max fallback or 403), `true` = allow even when the
-   * gateway default is false.
+   * Per-key max-mode restriction: `null` = inherit the gateway `allow_max_mode` (default true),
+   * `false` = never run max-mode variants (non-max fallback or 403). The gateway setting is a hard
+   * ceiling: effective = gateway AND key, so `true` cannot enable max mode when the gateway is false.
    */
   allow_max_mode: boolean | null;
   /** Requests allowed per quota period. `null` = unlimited. */
