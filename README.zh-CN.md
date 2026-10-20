@@ -281,12 +281,12 @@ print(client.chat.completions.create(
 | 字段 | 含义 |
 | --- | --- |
 | `allowed_models` | `null` = 不限模型；否则是精确模型 id 或 `*` 通配（不区分大小写）的列表，例如 `["gemini-*", "composer-2.5"]`。在 `model_aliases` 映射之后检查，并对解析出的目录 id 再检查一次，所以别名无法绕过白名单。通配只匹配目录 id，目录别名必须精确列出。`GET /v1/models` 只列出允许的模型，`GET /v1/models/{id}` 对其余模型返回 404。不允许的模型返回 `403 model_not_allowed`（`param: "model"`）。 |
-| `allow_max_mode` | `null` = 继承网关的 `allow_max_mode`；`true` / `false` 为该 Key 双向覆盖全局设置，回退 / `403 max_mode_not_allowed` 行为与全局一致（包括对 SDK 实际解析模型的检查）。 |
+| `allow_max_mode` | `null` = 继承网关的 `allow_max_mode`；`false` 对该 Key 关闭 max mode。网关设置是**硬上限**：实际生效 = 网关 **AND** Key，所以网关 `allow_max_mode = false` 时 Key 设 `true` 也不能打开 max mode。回退 / `403 max_mode_not_allowed` 行为与全局一致（包括对 SDK 实际解析模型的检查）。 |
 | `quota_requests` | 每周期最多请求数。在上游 run 之前原子预扣（并发请求不会超额），run 没有启动则退还。 |
-| `quota_tokens` | 每周期 Token 额度，属于**软上限**：已用 Token 低于额度就放行，请求结束后再累加，所以最后一个请求可能超出。 |
+| `quota_tokens` | 每周期 Token 额度，属于**软上限**。准入时每个请求原子地**预留**一个估算值（输入约为字符数 / 4，再加 1024 个输出 Token），只有「已用 + 已预留」低于额度才放行；结束时用实际计费替换预留（见下文「Token 计量」）。所以并发请求不会一起冲过快用完的额度，超出量以已放行请求超过预留的部分为上限（通常是一条长回复）。 |
 | `quota_period` | `total`（默认，永不重置）、`daily`、`monthly`。 |
-| `quota_tz` | 计算周期边界用的 IANA 时区（默认 `UTC`），例如 `Asia/Singapore`。 |
-| `max_concurrent` | 该 Key 同时进行中的最大请求数（按网关进程计）。 |
+| `quota_tz` | 计算周期边界用的 IANA 时区（默认 `UTC`），例如 `Asia/Singapore`。保存规范名（`asia/singapore` → `Asia/Singapore`），拒绝 `+08:00` 这类 UTC 偏移。已保存但当前运行时不认识的时区回退为 UTC 并写日志。在午夜切换夏令时的时区（Havana、Azores 等），一天从该日第一个存在的本地时刻开始。 |
+| `max_concurrent` | 该 Key 同时进行中的最大请求数（按网关进程计，多实例要乘以实例数）。因客户端工具调用而挂起的 Agent 也占一个槽，直到工具结果送回（续轮请求沿用这个槽）或挂起超时。 |
 | `quota_cache_read_weight` | `null` = 继承网关 `quota_cache_read_weight`（环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 `1.0`）。0 到 1 的数字：每个缓存读 Token 在 `quota_tokens` 中按多少计（例如 `0.1` 约等于缓存读的价格比例）。 |
 
 超出配额返回 `429 insufficient_quota`，带 `Retry-After`（距下个周期的秒数；`total` 不带）。超出并发上限返回 `429 concurrency_limit_exceeded`，`Retry-After: 1`。模型检查在配额之前，所以不允许的模型得到 403/404 而不是 429，也不扣次数。
@@ -294,8 +294,10 @@ print(client.chat.completions.create(
 管理 API：`POST /admin/api/keys` 接受以上字段；`PATCH /admin/api/keys/{id}` 修改任意字段（以及 `name`；没传的字段不变，传 `null` 表示取消限制）；`GET /admin/api/keys/{id}/usage` 返回本周期用量（`requests`、`tokens`、`remaining_*`、`in_flight`、`resets_at`）和最近几个周期；`POST /admin/api/keys/{id}/usage/reset` 把本周期清零。`GET /admin/api/keys` 会带上每把 Key 的策略和 `usage_current`。管理台在 **客户端 Key → 策略** 中编辑。
 
 Token 计量的限制：
-- Token 取自 SDK 每次 run 的用量（`run.wait().usage`）。Agent 累计总量永远不计入，否则续会话会重复计算。用量来源可插拔，便于以后接入官方的按 run 用量接口。
-- 以客户端工具调用结束的轮次（挂起的 run）在返回响应时可能还没有用量；这些轮次照常计入 `quota_requests`，但计入的 Token 可能少于实际消耗。
+- 每个请求按以下顺序计费：①SDK 每次 run 的用量（`run.wait().usage`），客户端在 run 启动后中断时也一样；②没有用量时按保守估算计：发往上游的输入，加上已输出的文本、思考和工具调用参数，约每 4 个字符 1 个 Token（适用于中断后没有用量、只有累计用量的情况）；③什么都拿不到（run 启动后失败）时，准入时的预留就作为计费。Agent 累计总量永远不计入，否则续会话会重复计算。用量来源可插拔，便于以后接入官方的按 run 用量接口。
+- 以客户端工具调用结束的轮次（挂起的 run）在返回响应时先按估算计费，所以放弃的工具轮也不会免费。工具结果送回、run 完成后，再补计「实际用量 − 已计部分」（不会是负数）。
+- run 没有启动的请求（校验错误、send 失败）会退还请求次数和预留。
+- 数据库：`PRAGMA user_version` 记录 schema 版本（10）。回滚到 v10 之前的版本会忽略策略列，也就是**所有客户端 Key 都变成不受限**；再次升级后策略恢复。
 - 暂不支持按费用（美元）设配额：本地 SDK Agent 不提供单次请求的费用。
 
 ---
