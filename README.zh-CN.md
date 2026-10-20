@@ -115,9 +115,10 @@ detailed = false
 | `park_timeout_ms` | 工具轮次在内存里保留多久（默认 **300000**）。网关重启后，下一次工具结果按 HTTP transcript 续场 |
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
+| `quota_reserve_recent_runs` | 按 Key 的 `quota_tokens` 预留同时覆盖该 Key 最近 N 次 run 的平均实际用量（环境变量 `QUOTA_RESERVE_RECENT_RUNS`，默认 **20**，`0` = 只用输入估算） |
 | `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数（`temperature`、`top_p`、`top_k`、各类 penalty、`seed`、OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`、`parallel_tool_calls: false`）而不返回 400（默认 **false**）。影响输出形态的字段（`stop`、`logit_bias`、`top_logprobs`）仍然 400 |
 | `history_resume` | 客户端没有传 `conversation_id` 时（Chat Completions、Messages、没有 `previous_response_id` 的 Responses），如果请求里最后一条 user 之前的历史与某个已完成的回合一致，就续用上一个 Cursor agent，只发送新的 user 消息（环境变量 `HISTORY_RESUME`，默认 **false**，需主动开启）。默认关闭的原因：实测（gemini-2.5-flash）续用回合的未缓存输入并没有比重发完整 transcript 少（9527 对 9471），agent 自己的上下文反而变成额外的缓存读（8160），计费 Token 不降反升。如果更看重更短的上游 prompt 或 agent 连续性、而不是最少计费 Token，可以开启。匹配方式是对全部消息做 hash（assistant 文本去首尾空白）；一次性使用（重新生成或分叉的回合会拿到新 agent 和完整 transcript）；按客户端 Key 隔离；内存保存 1 小时（最多最近 10000 条）。被截断（`length` / stop 序列）或 JSON 模式的回复不记录。续用失败时，在输出任何内容之前回退到完整 transcript。`false`（默认）= 每轮都新建 agent 并发送完整 transcript |
-| `enforce_output_limits` | 由**网关**执行 `max_tokens` / `max_completion_tokens`（Chat）、`max_output_tokens`（Responses）、`max_tokens`（Messages）以及 `stop` / `stop_sequences`（环境变量 `ENFORCE_OUTPUT_LIMITS`，默认 **false** = 行为不变：Token 上限照收不管，`stop` / 非空 `stop_sequences` 返回 400）。设为 `true`：网关截断可见文本并取消 Cursor run；结束原因为 `length`（Responses 为 `status: "incomplete"`，Messages 为 `stop_reason: "max_tokens"`）或 `stop`（Messages 为 `stop_reason: "stop_sequence"` 并带 `stop_sequence`）。Token 按每 4 个字符 1 个**估算**；思考文本不计入；Chat 最多 4 个 stop。流式时 stop 序列本身不会发给客户端（末尾几个字符会暂缓，直到确定不会组成 stop）。usage 仍是 Cursor 实际计费的用量 |
+| `enforce_output_limits` | 由**网关**执行 `max_tokens` / `max_completion_tokens`（Chat）、`max_output_tokens`（Responses）、`max_tokens`（Messages）以及 `stop` / `stop_sequences`（环境变量 `ENFORCE_OUTPUT_LIMITS`，默认 **false** = 行为不变：Token 上限照收不管，`stop` / 非空 `stop_sequences` 返回 400）。设为 `true`：网关截断可见文本并取消 Cursor run；结束原因为 `length`（Responses 为 `status: "incomplete"`，Messages 为 `stop_reason: "max_tokens"`）或 `stop`（Messages 为 `stop_reason: "stop_sequence"` 并带 `stop_sequence`）。Token 按每 4 个字符 1 个**估算**；截断时思考文本不计入；Chat 最多 4 个 stop、Messages 最多 16 个，每个最长 256 字符。上限、流式和 JSON 格式按每个 HTTP 请求生效（工具结果续轮用续轮自己的设置）。流式时 stop 序列本身不会发给客户端（末尾几个字符会暂缓，直到确定不会组成 stop）。usage 仍是 Cursor 实际计费的用量 |
 | `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params` 指向 max 变体）返回 `403 max_mode_not_allowed`。各条路由的 effort 一律按软提示处理，包括 Chat `reasoning_effort`、Responses `reasoning.effort` / 顶层 `reasoning_effort`、Anthropic `output_config.effort` / `thinking.budget_tokens`。所要求的档位需要 max 变体时，降到最高的非 max 档位（没有则用默认变体），不返回 403，并写日志（`max mode disallowed: using non-max variant`，字段 `softened_effort`、`effort`）。只在 max 变体里出现的参数值（如 `context=1m`）即使和其他参数混用也不会被发出。`Agent.create` / `resume` / `send` 之后，网关还会检查 SDK 实际解析出的模型（`agent.model` / `run.model`，可能和网关目录不一致）；如果是 max mode，就释放 agent 或取消 run，返回 `403`（流式时是一条 SSE 错误帧，并且在检查通过前不会输出任何模型文本）。受 SDK 限制，`send` 阶段的检查只能在 SDK 已经发出 run 之后进行：网关会取消它，但请求可能已经到达 Cursor 并按已用量计费；这类请求在日志里记 `max_mode = 1`，也不会重放。`params` 的取值不区分大小写（也可以用取值的显示名）匹配，并且总是按目录里的规范值转发，所以 `1M`、`1m context` 都按 `1m` 处理。每条请求日志记录的是**实际**的 `max_mode` |
 | `quota_cache_read_weight` | 缓存读 Token 计入按 Key `quota_tokens` 的权重（0–1，环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 **1.0**）；Key 自己的 `quota_cache_read_weight` 优先 |
 | `sse_keepalive_ms` | 空闲流式响应发送 `: keepalive` 注释的间隔（默认 **15000**；`0` 关闭） |
@@ -182,7 +183,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
 | `POST` | `/v1/messages` | Anthropic SDK、兼容 Claude 的客户端 |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
-| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，最多最近 1000 条；`store: false` 不保存；重启丢失） |
+| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，每个 Key 最多最近 100 条、总共 1000 条，总量满时淘汰条目最多的 Key 的最旧条目；`store: false` 不保存；重启丢失） |
 
 支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`，同时以 `delta.reasoning` / `message.reasoning` 再给一份，兼容 OpenRouter 风格客户端）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`reasoning_effort` 按尽力而为处理：精确匹配模型取值，否则取最接近档位；模型没有 effort 参数时忽略（布尔型思考开关：`none`/`minimal` 映射为关）。即使允许 max mode，「最接近档位」和思考开关也不会选只在 max 变体里出现的取值；只有精确的显式取值（例如模型列出 `max` 时传 `reasoning_effort: "max"`）才可能走 max mode。
 
@@ -288,7 +289,7 @@ print(client.chat.completions.create(
 | `allowed_models` | `null` = 不限模型；否则是精确模型 id 或 `*` 通配（不区分大小写）的列表，例如 `["gemini-*", "composer-2.5"]`。在 `model_aliases` 映射之后检查，并对解析出的目录 id 再检查一次，所以别名无法绕过白名单。通配只匹配目录 id，目录别名必须精确列出。`GET /v1/models` 只列出允许的模型，`GET /v1/models/{id}` 对其余模型返回 404。不允许的模型返回 `403 model_not_allowed`（`param: "model"`）。 |
 | `allow_max_mode` | `null` = 继承网关的 `allow_max_mode`；`false` 对该 Key 关闭 max mode。网关设置是**硬上限**：实际生效 = 网关 **AND** Key，所以网关 `allow_max_mode = false` 时 Key 设 `true` 也不能打开 max mode。管理接口返回 `effective_allow_max_mode`；Key 设为 `true` 但被网关上限压住时，还会带一条 `warnings`。管理台显示实际生效的状态。回退 / `403 max_mode_not_allowed` 行为与全局一致（包括对 SDK 实际解析模型的检查）。 |
 | `quota_requests` | 每周期最多请求数。在上游 run 之前原子预扣（并发请求不会超额），run 没有启动则退还。 |
-| `quota_tokens` | 每周期 Token 额度，属于**软上限**。准入时每个请求原子地**预留**一个估算值（输入约为字符数 / 4，再加 1024 个输出 Token），只有「已用 + 已预留」低于额度才放行；结束时用实际计费替换预留（见下文「Token 计量」）。所以并发请求不会一起冲过快用完的额度，超出量以已放行请求超过预留的部分为上限（通常是一条长回复）。 |
+| `quota_tokens` | 每周期 Token 额度，属于**软上限**。准入时每个请求原子地**预留**以下两者中较大的一个：输入估算（字符数 / 4，再加 1024 个输出 Token），或该 Key 最近 `quota_reserve_recent_runs` 次 run 的平均实际用量（默认 20 次，按进程保存在内存里）。只有「已用 + 已预留」低于额度才放行；结束时用实际计费替换预留（见下文「Token 计量」）。所以并发请求不会一起冲过快用完的额度，例如额度 100k 时，100 个约 20k Token 的并发 run 大约只放行 5 个。超出上界是「额度 − 1 + 已放行请求的 Σ(实际用量 − 预留)⁺」：Key 有历史后这一项很小；冷启动时所有预留都还只是输入估算，这一项可能较大。 |
 | `quota_period` | `total`（默认，永不重置）、`daily`、`monthly`。 |
 | `quota_tz` | 计算周期边界用的 IANA 时区（默认 `UTC`），例如 `Asia/Singapore`。保存规范名（`asia/singapore` → `Asia/Singapore`），拒绝 `+08:00` 这类 UTC 偏移。已保存但当前运行时不认识的时区回退为 UTC 并写日志。在午夜切换夏令时的时区（Havana、Azores 等），一天从该日第一个存在的本地时刻开始。 |
 | `max_concurrent` | 该 Key 同时进行中的最大请求数（按网关进程计，多实例要乘以实例数）。因客户端工具调用而挂起的 Agent 也占一个槽，直到工具结果送回（续轮请求沿用这个槽）或挂起超时。 |
@@ -299,10 +300,13 @@ print(client.chat.completions.create(
 管理 API：`POST /admin/api/keys` 接受以上字段；`PATCH /admin/api/keys/{id}` 修改任意字段（以及 `name`；没传的字段不变，传 `null` 表示取消限制）；`GET /admin/api/keys/{id}/usage` 返回本周期用量（`requests`、`tokens`、`remaining_*`、`in_flight`、`resets_at`）和最近几个周期；`POST /admin/api/keys/{id}/usage/reset` 把本周期清零。`GET /admin/api/keys` 会带上每把 Key 的策略和 `usage_current`。管理台在 **客户端 Key → 策略** 中编辑。
 
 Token 计量的限制：
-- 每个请求按以下顺序计费：①SDK 每次 run 的用量（`run.wait().usage`），客户端在 run 启动后中断时也一样；②没有用量时按保守估算计：发往上游的输入，加上已输出的文本、思考和工具调用参数，约每 4 个字符 1 个 Token（适用于中断后没有用量、只有累计用量的情况）；③什么都拿不到（run 启动后失败）时，准入时的预留就作为计费。Agent 累计总量永远不计入，否则续会话会重复计算。用量来源可插拔，便于以后接入官方的按 run 用量接口。
+- 每个请求按以下顺序计费：①SDK 每次 run 的用量（`run.wait().usage`）；run 启动后被中断或失败时，取这个用量和②中估算值的较大者，所以取消后上游报的部分用量或 0 不会导致少计；②没有用量时按保守估算计：发往上游的输入，加上已输出的文本、思考和工具调用参数，约每 4 个字符 1 个 Token（适用于中断后没有用量、只有累计用量的情况）；③什么都拿不到（run 启动后失败）时，准入时的预留就作为计费。Agent 累计总量永远不计入，否则续会话会重复计算。用量来源可插拔，便于以后接入官方的按 run 用量接口。
 - 以客户端工具调用结束的轮次（挂起的 run）在返回响应时先按估算计费，所以放弃的工具轮也不会免费。工具结果送回、run 完成后，再补计「实际用量 − 已计部分」（不会是负数）。
 - run 没有启动的请求（校验错误、send 失败）会退还请求次数和预留。
 - 数据库：`PRAGMA user_version` 记录 schema 版本（10）。回滚到 v10 之前的版本会忽略策略列，也就是**所有客户端 Key 都变成不受限**；再次升级后策略恢复。
+  - 回滚期间产生的用量，再次升级后不会补记到 `api_key_usage`。
+  - 在旧版本上删除 Key，会留下它的 `api_key_usage` 行（孤儿行，无害，不计入任何额度）。
+  - 每次启动都会把 schema 版本写成 10，即使旧版本写过别的值。
 - 暂不支持按费用（美元）设配额：本地 SDK Agent 不提供单次请求的费用。
 
 ---

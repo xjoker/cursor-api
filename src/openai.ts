@@ -79,6 +79,8 @@ const SAMPLING_FIELDS = new Set([
 ]);
 
 const MAX_STOP_SEQUENCES = 4;
+/** Longest accepted stop sequence (Chat `stop` and Messages `stop_sequences`); bounds stream hold-back. */
+export const MAX_STOP_SEQUENCE_CHARS = 256;
 
 export interface ChatParseOptions {
   ignoreSamplingParams?: boolean;
@@ -120,7 +122,7 @@ export function parseChatCompletionsRequest(input: unknown, options: ChatParseOp
   const reasoning = parseReasoningObject(body.reasoning);
   const stop = parseStop(body.stop, options);
   const maxOutputTokens = options.enforceOutputLimits
-    ? parseMaxTokens(body.max_completion_tokens, "max_completion_tokens") ?? parseMaxTokens(body.max_tokens, "max_tokens")
+    ? pickMaxTokens(body)
     : undefined;
 
   for (const key of Object.keys(body)) {
@@ -261,7 +263,17 @@ function parseStop(value: unknown, options: ChatParseOptions): string[] | undefi
   ) {
     throw invalidRequest(`Field 'stop' must be a non-empty string or up to ${String(MAX_STOP_SEQUENCES)} non-empty strings`);
   }
+  if (list.some((item) => item.length > MAX_STOP_SEQUENCE_CHARS)) {
+    throw invalidRequest(`Field 'stop' entries must be at most ${String(MAX_STOP_SEQUENCE_CHARS)} characters`);
+  }
   return list.length > 0 ? list : undefined;
+}
+
+/** Both fields are validated; `max_completion_tokens` wins when both are set. */
+function pickMaxTokens(body: Record<string, unknown>): number | undefined {
+  const completion = parseMaxTokens(body.max_completion_tokens, "max_completion_tokens");
+  const legacy = parseMaxTokens(body.max_tokens, "max_tokens");
+  return completion ?? legacy;
 }
 
 function parseMaxTokens(value: unknown, field: string): number | undefined {
