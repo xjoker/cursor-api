@@ -81,7 +81,6 @@ test("allow_max_mode=false rejects every explicit route to a max-only variant", 
     const cases = {
       params: chat({ model: "fake-max", params: [{ id: "context", value: "1m" }] }),
       variant: chat({ model: "fake-max", variant: "Max" }),
-      reasoning_effort: chat({ model: "fake-max", reasoning_effort: "max" }),
       max_only_model: chat({ model: "fake-maxonly" }),
     };
     for (const [name, request] of Object.entries(cases)) {
@@ -91,6 +90,8 @@ test("allow_max_mode=false rejects every explicit route to a max-only variant", 
         name,
       );
     }
+    // reasoning_effort is soft when max mode is off (#41 N2): highest non-max level, no 403.
+    assert.deepEqual(paramsOf(select(chat({ model: "fake-max", reasoning_effort: "max" }))), { context: "200k", reasoning_effort: "high" });
   } finally {
     configureMaxMode({ allowMaxMode: true });
   }
@@ -196,7 +197,8 @@ test("ALLOW_MAX_MODE=false: no route sends max mode to the SDK", { timeout: 30_0
     }
 
     // Explicit max requests are rejected before any SDK call, OpenAI and Anthropic shapes.
-    res = await api.chat({ model: "fake-max", reasoning_effort: "max", messages: [{ role: "user", content: "hi" }] });
+    // (reasoning_effort=max is soft and degrades; an explicit max variant is a hard 403.)
+    res = await api.chat({ model: "fake-max", variant: "Max", messages: [{ role: "user", content: "hi" }] });
     assert.equal(res.status, 403);
     const body = await res.json();
     assert.equal(body.error.code, "max_mode_not_allowed");

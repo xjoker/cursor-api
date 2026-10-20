@@ -17,6 +17,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 - **Max mode 计费提示**：新版 SDK 只要「与 params 匹配的目录变体全部是 max-only」就会自动以 max mode 发送；调用方显式传 `maxMode: false` 会被 SDK 覆盖。网关以默认变体参数为基础，所以默认变体是 max-only 的模型只写模型名也会走 max（默认行为保持不变）。
 - 1.0.38 每次 send 都会按目录解析模型；目录暂时不可用时抛出的可重试 `ConfigurationError` 现在映射为 `503 upstream_unavailable`（原来是 400）。
 
+### Changed (BREAKING)
+
+- **BREAKING：Usage 口径对齐 OpenAI**：SDK 的 `inputTokens` 不含缓存，现在 `prompt_tokens = input + cacheRead + cacheWrite`，`total_tokens = prompt + completion`（之前 `prompt + completion ≠ total`）。`prompt_tokens_details.cached_tokens` = 缓存读，`completion_tokens_details.reasoning_tokens` 在模型上报时返回。Responses 同口径；Anthropic `input_tokens` 仍不含缓存。请求日志 `input_tokens` 从此含缓存。
+  - 下游需要调整：自行计算 `prompt_tokens + cached_tokens` 的客户端会重复计数；按 `prompt_tokens` 对账或计价的数字会变大。
+  - 升级时，请求日志里旧行的 `input_tokens` 会一次性改写为含缓存的口径（以 `user_version` < 11 为条件），管理台的汇总不会混用两种口径。回滚到旧版本后，这些行仍然是新口径。
+
 ### Added
 
 - `allow_max_mode`（`ALLOW_MAX_MODE`，默认 `true`）：设为 `false` 时网关按 SDK 的同一规则检测 max mode，自动换成非 max 变体，无法换时返回 `403 max_mode_not_allowed`（覆盖 `params`、`variant`、`reasoning_effort`、Anthropic `output_config.effort`、模型别名、续会话和换 Key 重试）。
@@ -26,9 +32,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 - **按 Key 的模型策略与配额**（SAF-95）：客户端 Key 新增 `allowed_models`（精确 / `*` 通配，别名无法绕过，`/v1/models` 按 Key 过滤，`403 model_not_allowed`）、`allow_max_mode`（`null` 继承全局，`true/false` 覆盖）、`quota_requests` / `quota_tokens`（`total` / `daily` / `monthly`，按 `quota_tz` 时区；请求数原子预扣、run 未启动则退还；Token 为软上限，结束后按单次 run 用量累加）、`max_concurrent`。超额返回 `429 insufficient_quota`（带 `Retry-After`），超并发返回 `429 concurrency_limit_exceeded`。
 - 管理 API：`PATCH /admin/api/keys/{id}`、`GET /admin/api/keys/{id}/usage`、`POST /admin/api/keys/{id}/usage/reset`；`POST /admin/api/keys` 与 `GET /admin/api/keys` 支持 / 返回策略字段与本周期用量。管理台「客户端 Key」新增策略编辑。
 - 数据库：`api_keys` 新增策略列、新表 `api_key_usage`，schema 版本 10（与 max_mode 的 9 合并升级）。旧 Key 迁移后不受限制。
-- **Usage 口径对齐 OpenAI**：SDK 的 `inputTokens` 不含缓存，现在 `prompt_tokens = input + cacheRead + cacheWrite`，`total_tokens = prompt + completion`（之前 `prompt + completion ≠ total`）。`prompt_tokens_details.cached_tokens` = 缓存读，`completion_tokens_details.reasoning_tokens` 在模型上报时返回。Responses 同口径；Anthropic `input_tokens` 仍不含缓存。请求日志 `input_tokens` 从此含缓存。
 - **`reasoning_effort` 改为软提示**（Chat Completions / Responses 顶层 / Messages）：模型取值精确匹配优先，否则映射到最接近档位，模型没有 effort 参数时忽略（之前 400）；只有非标准且模型也没有的值才 400。
 - `quota_cache_read_weight`（全局 `QUOTA_CACHE_READ_WEIGHT`，默认 1.0，与之前一致；Key 级同名字段可覆盖）：缓存读 Token 计入 Token 配额的权重。schema 版本 11。gateway.toml 现支持小数。
+- #41 审查第 1 轮返工（Elliot）：
+  - 「最接近档位」映射和布尔思考开关不再选只在 max 变体里出现的取值（即使允许 max），只有精确的显式取值才可能走 max。
+  - 关闭 max 时，Chat `reasoning_effort` 与 Responses / Anthropic 的 effort 行为一致：降到最高的非 max 档位，不再 403；显式的 `variant` / `params` 仍然 403。
+  - TOML 整数键写成小数（如 `auth_failure_limit = 0.5`、`5.0`）启动时直接报错；`quota_cache_read_weight = true` 也报错。
 - SAF-95 审查第 1 轮返工（Elliot）：
   - 客户端中断：run 启动后中断按 run 用量计 Token，拿不到用量时按估算计。
   - `quota_tokens` 准入时预留估算值，结束后多退少补，并发不再能成倍超额。

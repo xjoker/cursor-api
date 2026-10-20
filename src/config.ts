@@ -173,7 +173,7 @@ export function loadConfig(
       true,
     ),
     quotaCacheReadWeight: parseWeight(
-      pickConfigured(env, "QUOTA_CACHE_READ_WEIGHT", tomlString(toml, "quota_cache_read_weight"), "quota_cache_read_weight"),
+      pickConfigured(env, "QUOTA_CACHE_READ_WEIGHT", tomlWeight(toml, "quota_cache_read_weight"), "quota_cache_read_weight"),
       1,
     ),
     sseKeepaliveMs: parseOptionalInterval(
@@ -460,19 +460,22 @@ function tomlBool(table: TomlTable, key: string): boolean | undefined {
 }
 
 function tomlInt(table: TomlTable, key: string): number | undefined {
-  const direct = scalarToNumber(table[key]);
+  const direct = scalarToNumber(table[key], key);
   if (direct !== undefined) return direct;
   for (const value of Object.values(table)) {
     if (value && typeof value === "object") {
-      const nested = scalarToNumber(value[key] as string | number | TomlTable | undefined);
+      const nested = scalarToNumber(value[key] as string | number | TomlTable | undefined, key);
       if (nested !== undefined) return nested;
     }
   }
   return undefined;
 }
 
-function scalarToNumber(value: string | number | boolean | TomlTable | undefined): number | undefined {
+function scalarToNumber(value: string | number | boolean | TomlTable | undefined, key: string): number | undefined {
   if (typeof value === "boolean") return undefined;
+  if (typeof value === "string" && /^\d+\.\d+$/.test(value.trim())) {
+    throw new Error(`${key} must be an integer (got ${value.trim()})`);
+  }
   if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   if (typeof value === "string" && /^[1-9]\d*$|^0$/.test(value)) return Number(value);
   return undefined;
@@ -525,6 +528,13 @@ function readTomlFile(file: string): TomlTable {
     throw new Error(`Cannot read ${file}: ${errorText(error)}`);
   }
   return parseToml(text, file);
+}
+
+/** Decimal TOML value as text; a boolean is a config error, not "unset" (N4). */
+function tomlWeight(table: TomlTable, key: string): string | undefined {
+  const values = [table[key], ...Object.values(table).map((value) => (value && typeof value === "object" ? value[key] : undefined))];
+  if (values.some((value) => typeof value === "boolean")) throw new Error(`${key} must be a number between 0 and 1`);
+  return tomlString(table, key);
 }
 
 function tomlString(table: TomlTable, key: string): string | undefined {
@@ -607,9 +617,10 @@ function parseTomlScalar(raw: string, source: string, lineNo: string | number): 
   if (/^[1-9]\d*$|^0$/.test(raw)) {
     return Number(raw);
   }
-  // Plain decimal floats (e.g. quota_cache_read_weight = 0.1).
+  // Plain decimal floats (e.g. quota_cache_read_weight = 0.1) stay strings, so integer keys can
+  // reject them at startup (N4) and decimal keys parse them themselves.
   if (/^(0|[1-9]\d*)\.\d+$/.test(raw)) {
-    return Number(raw);
+    return raw;
   }
   throw new Error(`Invalid TOML value in ${source}:${lineNo}`);
 }
