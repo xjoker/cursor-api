@@ -9,6 +9,18 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- 升级 `@cursor/sdk` 至 1.0.38。`zod` 改为 SDK 的 peer 依赖（npm 自动安装，无需手动添加）。选中的模型变体全部要求 max mode 时，SDK 会自动以 max mode 发送（计费可能高于普通模式）。
+
+### Added
+
+- `/v1/models` 的 `variants[]` 对仅支持 max mode 的变体返回 `is_max_mode: true`。
+
+---
+
 ## [20261020.1] — 2026-10-20
 
 ### Added

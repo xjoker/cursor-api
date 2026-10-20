@@ -224,6 +224,8 @@ export interface OpenAiModel {
     display_name: string;
     description?: string;
     is_default?: boolean;
+    /** True when Cursor only runs this variant in max mode (reported by newer Cursor SDKs). */
+    is_max_mode?: boolean;
     params: ModelParam[];
   }>;
 }

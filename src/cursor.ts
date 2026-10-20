@@ -448,7 +448,7 @@ function findCatalogModel(models: ModelListItem[], id: string): ModelListItem | 
   );
 }
 
-function toOpenAiModel(model: ModelListItem): OpenAiModel {
+export function toOpenAiModel(model: ModelListItem): OpenAiModel {
   const encoded: OpenAiModel = {
     id: model.id,
     object: "model",
@@ -473,6 +473,7 @@ function toOpenAiModel(model: ModelListItem): OpenAiModel {
       display_name: variant.displayName,
       ...(variant.description ? { description: variant.description } : {}),
       ...(variant.isDefault === true ? { is_default: true } : {}),
+      ...(variant.isMaxMode === true ? { is_max_mode: true } : {}),
       params: variant.params,
     }));
   }
