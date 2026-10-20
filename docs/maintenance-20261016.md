@@ -42,7 +42,7 @@
 
 ## 运行与数据边界
 
-Node 最低版本 22.13；官方 Docker 镜像使用 Node 22、`linux/amd64`，宿主数据目录挂载到 `/app/data`。依赖为 `@cursor/sdk` 1.0.37、TypeScript 7.0.2、Node 类型 22.20.5；锁文件不再需要旧 `undici` 覆盖。
+Node 最低版本 22.13；官方 Docker 镜像使用 Node 22、`linux/amd64`，宿主数据目录挂载到 `/app/data`。依赖版本以 `package.json` / `package-lock.json` 为准（`@cursor/sdk`、TypeScript、Node 类型均精确锁定）；锁文件不再需要旧 `undici` 覆盖。
 
 无 Docker 时默认仅监听 `127.0.0.1`；官方镜像通过 `GATEWAY_DEFAULT_HOST=0.0.0.0` 监听容器网络，挂载 TOML 的 `host` 优先级更高。环境变量 `GATEWAY_HOST` 覆盖 TOML 时输出提示。
 

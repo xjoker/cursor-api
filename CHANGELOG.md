@@ -13,10 +13,14 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ### Changed
 
-- 升级 `@cursor/sdk` 至 1.0.38。`zod` 改为 SDK 的 peer 依赖（npm 自动安装，无需手动添加）。选中的模型变体全部要求 max mode 时，SDK 会自动以 max mode 发送（计费可能高于普通模式）。
+- 升级 `@cursor/sdk` 至 1.0.38。`zod` 改为 SDK 的 peer 依赖（npm 自动安装，无需手动添加）。
+- **Max mode 计费提示**：新版 SDK 只要「与 params 匹配的目录变体全部是 max-only」就会自动以 max mode 发送；调用方显式传 `maxMode: false` 会被 SDK 覆盖。网关以默认变体参数为基础，所以默认变体是 max-only 的模型只写模型名也会走 max（默认行为保持不变）。
+- 1.0.38 每次 send 都会按目录解析模型；目录暂时不可用时抛出的可重试 `ConfigurationError` 现在映射为 `503 upstream_unavailable`（原来是 400）。
 
 ### Added
 
+- `allow_max_mode`（`ALLOW_MAX_MODE`，默认 `true`）：设为 `false` 时网关按 SDK 的同一规则检测 max mode，自动换成非 max 变体，无法换时返回 `403 max_mode_not_allowed`（覆盖 `params`、`variant`、`reasoning_effort`、Anthropic `output_config.effort`、模型别名、续会话和换 Key 重试）。
+- 请求日志新增 `max_mode` 列（1/0，未跑到 run 时为空），`GET /admin/api/logs` 返回该字段；系统日志 `chat/messages/responses completed` 带 `max_mode`。
 - `/v1/models` 的 `variants[]` 对仅支持 max mode 的变体返回 `is_max_mode: true`。
 
 ---

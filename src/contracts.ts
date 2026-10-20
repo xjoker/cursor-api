@@ -33,6 +33,11 @@ export interface AppConfig {
   parkTimeoutMs: number;
   /** Unsupported Chat Completions sampling knobs are dropped instead of rejected. */
   ignoreSamplingParams: boolean;
+  /**
+   * Allow requests that resolve to a Cursor max-mode variant (SDK >= 1.0.38 turns max mode on
+   * automatically for those). When false the gateway picks a non-max variant or rejects.
+   */
+  allowMaxMode: boolean;
   /** SSE comment heartbeat interval while a stream is open; 0 disables it. */
   sseKeepaliveMs: number;
   /** Failed authentication attempts allowed per address each minute; 0 disables throttling. */
@@ -114,6 +119,8 @@ export interface RequestLogRow {
   gateway_ms: number | null;
   request_detail: string | null;
   response_detail: string | null;
+  /** 1 = run used Cursor max mode, 0 = not, null = unknown (no run / legacy row). */
+  max_mode?: number | null;
   has_detail?: boolean;
   key_name?: string | null;
   key_prefix?: string | null;
@@ -242,4 +249,6 @@ export interface CursorChatResult {
   tool_calls?: OpenAiToolCall[];
   /** Cursor `thinking-delta` text; OpenCode reads this as `reasoning_content`. */
   reasoning?: string;
+  /** True when the run was sent with Cursor max mode (billed at max rates). */
+  max_mode?: boolean;
 }

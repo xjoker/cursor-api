@@ -40,6 +40,7 @@ api_key_pepper = ""
 # max_live_sessions = 256        # running + parked Cursor sessions kept in memory
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
+# allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
 # auth_failure_limit = 20        # failed auth attempts per address per minute; 0 = off
 # cors_allow_origins = "*"       # comma-separated HTTP origins; empty disables CORS
@@ -165,6 +166,10 @@ export function loadConfig(
     ignoreSamplingParams: parseBoolean(
       pickConfigured(env, "IGNORE_SAMPLING_PARAMS", boolToString(tomlBool(toml, "ignore_sampling_params")), "ignore_sampling_params"),
       false,
+    ),
+    allowMaxMode: parseBoolean(
+      pickConfigured(env, "ALLOW_MAX_MODE", boolToString(tomlBool(toml, "allow_max_mode")), "allow_max_mode"),
+      true,
     ),
     sseKeepaliveMs: parseOptionalInterval(
       pickConfigured(env, "SSE_KEEPALIVE_MS", intToString(tomlInt(toml, "sse_keepalive_ms")), "sse_keepalive_ms"),

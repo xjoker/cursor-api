@@ -24,7 +24,7 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
 /** Per-row cap for the client-controlled `model` column (UTF-8 bytes). */
 export const MAX_LOG_MODEL_BYTES = 256;
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 const MAX_CONVERSATIONS_PER_KEY = 1_000;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
@@ -195,8 +195,8 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
       input_tokens, output_tokens, total_tokens,
       cache_read_tokens, cache_write_tokens, reasoning_tokens,
       error_code, created_at,
-      upstream_ms, gateway_ms, request_detail, response_detail
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      upstream_ms, gateway_ms, request_detail, response_detail, max_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.api_key_id,
@@ -217,6 +217,7 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.gateway_ms,
     row.request_detail,
     row.response_detail,
+    row.max_mode ?? null,
   );
   pruneRequestLogs(db);
 }
@@ -233,7 +234,7 @@ export function listRequestLogs(db: DatabaseSync, query: RequestLogQuery): {
               l.input_tokens, l.output_tokens, l.total_tokens,
               l.cache_read_tokens, l.cache_write_tokens, l.reasoning_tokens,
               l.error_code, l.created_at,
-              l.upstream_ms, l.gateway_ms,
+              l.upstream_ms, l.gateway_ms, l.max_mode,
               CASE WHEN l.request_detail IS NOT NULL OR l.response_detail IS NOT NULL THEN 1 ELSE 0 END AS has_detail,
               k.name AS key_name, k.key_prefix AS key_prefix
        FROM request_logs l
@@ -524,6 +525,9 @@ function migrateRequestLogs(db: DatabaseSync): void {
   if (!columns.has("reasoning_tokens")) {
     db.exec("ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER");
   }
+  if (!columns.has("max_mode")) {
+    db.exec("ALTER TABLE request_logs ADD COLUMN max_mode INTEGER");
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
 }
@@ -756,6 +760,7 @@ function mapRequestLog(row: Record<string, unknown>): RequestLogRow {
     gateway_ms: asNullableNumber(row.gateway_ms),
     request_detail: asNullableString(row.request_detail),
     response_detail: asNullableString(row.response_detail),
+    max_mode: asNullableNumber(row.max_mode),
     has_detail:
       asNullableString(row.request_detail) !== null || asNullableString(row.response_detail) !== null,
     key_name: asNullableString(row.key_name),

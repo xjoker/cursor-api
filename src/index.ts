@@ -46,7 +46,13 @@ import {
   parseResponsesRequest,
   ResponsesStreamWriter,
 } from "./responses.js";
-import { getCursorModel, listCursorModels, runFailureError, warmCursorAccount } from "./cursor.js";
+import {
+  configureMaxMode,
+  getCursorModel,
+  listCursorModels,
+  runFailureError,
+  warmCursorAccount,
+} from "./cursor.js";
 import {
   aliasLiveConversation,
   configureSessionLimits,
@@ -66,6 +72,7 @@ try {
 }
 
 configureSse({ keepaliveMs: config.sseKeepaliveMs });
+configureMaxMode({ allowMaxMode: config.allowMaxMode });
 try {
   configureAuthThrottle(config.authFailureLimit, { trustedProxies: config.trustedProxies });
 } catch (error) {
@@ -513,6 +520,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
+      max_mode: maxModeOf(chatResult),
     });
     logInfo("chat completed", {
       request_id: requestId,
@@ -528,6 +536,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
+      max_mode: maxModeOf(chatResult) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -718,6 +727,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
+      max_mode: maxModeOf(chatResult),
     });
     logInfo("messages completed", {
       request_id: requestId,
@@ -733,6 +743,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
+      max_mode: maxModeOf(chatResult) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -944,6 +955,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
+      max_mode: maxModeOf(chatResult),
     });
     logInfo("responses completed", {
       request_id: requestId,
@@ -959,6 +971,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
+      max_mode: maxModeOf(chatResult) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -1027,6 +1040,12 @@ function buildResponseDetail(
     error_code: errorCode,
     ...(errorMessage ? { error_message: errorMessage } : {}),
   });
+}
+
+/** 1 / 0 when a run happened, null when the request never reached a run. */
+function maxModeOf(result: CursorChatResult | null): number | null {
+  if (!result) return null;
+  return result.max_mode === true ? 1 : 0;
 }
 
 function peekModel(body: unknown): string {

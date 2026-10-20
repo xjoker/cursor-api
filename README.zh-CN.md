@@ -116,6 +116,7 @@ detailed = false
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
 | `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数而不返回 400（默认 **false**） |
+| `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params`/`reasoning_effort` 指向 max 变体）返回 `403 max_mode_not_allowed`。Anthropic 的 `output_config.effort` 属于软提示，会被丢弃而不是报错。每条请求日志都会记录 `max_mode` |
 | `sse_keepalive_ms` | 空闲流式响应发送 `: keepalive` 注释的间隔（默认 **15000**；`0` 关闭） |
 | `cors_allow_origins` | 浏览器跨域来源，默认 `"*"`；用逗号分隔精确来源（如 `"https://app.example.com,http://localhost:5173"`），空字符串关闭 CORS。环境变量 `CORS_ALLOW_ORIGINS` 可覆盖，包括空值 |
 | `auth_failure_limit` | 每个客户端地址在任意 60 秒滑动窗口内允许的认证失败次数（默认 **20**，最大 1000；`0` 关闭）。管理密钥和客户端 Key 分开计数。**管理端：**达到上限后，该地址的所有管理请求（包括正确密钥）都返回 `429` 和 `Retry-After`，直到窗口内的失败数回落。**客户端 Key：**正确的 Key 永远不会被限流，只有继续使用错误 Key 的请求会返回 `429` + `Retry-After`（代替 `401`）。不带任何 Key 的请求不计数。IPv6 按 /64 合并计数 |
@@ -249,6 +250,8 @@ Responses 还会收下并忽略采样参数（`temperature`、`top_p` 等）以�
 支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等），以及 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供本地客户端执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP。
 
 不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
+
+Max mode：`GET /v1/models` 会给 max-only 变体加上 `is_max_mode: true`。如果某个模型的默认变体是 max-only，又不想走 max，请显式选择非 max 变体（例如 `params: [{"id":"context","value":"256k"}]`），或设置 `allow_max_mode = false`。请求切换到另一个 Cursor Key 或重放会话时，会重新解析模型；允许 max mode 时，每次真正跑起来的尝试都按 max 计费。
 
 ```python
 from openai import OpenAI

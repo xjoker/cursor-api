@@ -70,6 +70,8 @@ interface LiveSession {
   parkTimer: ReturnType<typeof setTimeout> | undefined;
   indexKeys: string[];
   modelParams: CursorChatResult["params"];
+  /** The selection resolved to a Cursor max-mode variant (billed at max rates). */
+  maxMode: boolean;
   text: string;
   thinking: string;
   sink: ChatTurnSink | undefined;
@@ -557,7 +559,7 @@ async function resumeUserTurnWithKey(
   const model = await resolveChatModel(options.apiKey, options.request);
   await options.claimOutput?.();
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
-  const session = emptySession(options, model.params);
+  const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   try {
     session.agent = await resumeLocalChatAgent({
@@ -618,7 +620,7 @@ async function startAgentSessionWithKey(prompt: string, options: TurnOptions): P
   const model = await resolveChatModel(options.apiKey, options.request);
   await options.claimOutput?.();
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
-  const session = emptySession(options, model.params);
+  const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   try {
     session.agent = await createLocalChatAgent({
@@ -651,6 +653,7 @@ function emptySession(
     parkTimeoutMs?: number;
   },
   modelParams: CursorChatResult["params"],
+  maxMode = false,
 ): LiveSession {
   return {
     apiKeyId: options.apiKeyId,
@@ -667,6 +670,7 @@ function emptySession(
     parkTimer: undefined,
     indexKeys: [],
     modelParams,
+    maxMode,
     text: "",
     thinking: "",
     sink: options.sink,
@@ -820,6 +824,7 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
       usage: toChatUsage(undefined),
       usageKnown: false,
       params: session.modelParams,
+      ...(session.maxMode ? { max_mode: true } : {}),
       status: "finished",
       finish_reason: "tool_calls",
       tool_calls: outcome.calls,
@@ -967,6 +972,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         status: "cancelled",
         finish_reason: "cancelled",
         params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
       };
     }
     if (result.status === "error") {
@@ -978,6 +984,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         status: "error",
         finish_reason: "error",
         params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
       };
     }
     return {
@@ -988,6 +995,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         ? { raw_cost_cents: billed.cost.rawCostCents, charged_cents: billed.cost.chargedCents }
         : null,
       params: session.modelParams,
+      ...(session.maxMode ? { max_mode: true } : {}),
       status: "finished",
       finish_reason: "stop",
     };
@@ -1000,6 +1008,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         status: "cancelled",
         finish_reason: "cancelled",
         params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
       };
     }
     throw mapCursorError(error);

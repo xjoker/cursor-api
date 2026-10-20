@@ -51,7 +51,42 @@ const CATALOG = [
       { displayName: "Fake Reasoner High", params: [{ id: "reasoning_effort", value: "high" }] },
     ],
   },
+  {
+    // Shaped like grok-4.7: the DEFAULT variant is max-only (1m context); 200k variants are not.
+    id: "fake-max",
+    displayName: "Fake Max",
+    aliases: ["fake-max-alias"],
+    parameters: [
+      { id: "context", values: [{ value: "200k" }, { value: "1m" }] },
+      { id: "reasoning_effort", values: [{ value: "low" }, { value: "high" }, { value: "max" }] },
+    ],
+    variants: [
+      { displayName: "Fake Max Low", params: [{ id: "context", value: "200k" }, { id: "reasoning_effort", value: "low" }] },
+      { displayName: "Fake Max High", params: [{ id: "context", value: "200k" }, { id: "reasoning_effort", value: "high" }] },
+      { displayName: "Fake Max 1M High", isDefault: true, isMaxMode: true, params: [{ id: "context", value: "1m" }, { id: "reasoning_effort", value: "high" }] },
+      { displayName: "Max", isMaxMode: true, params: [{ id: "context", value: "1m" }, { id: "reasoning_effort", value: "max" }] },
+    ],
+  },
+  {
+    id: "fake-maxonly",
+    displayName: "Fake Max Only",
+    parameters: [{ id: "context", values: [{ value: "1m" }] }],
+    variants: [{ displayName: "Fake Max Only", isDefault: true, isMaxMode: true, params: [{ id: "context", value: "1m" }] }],
+  },
 ];
+
+/** Mirrors the @cursor/sdk 1.0.38 local rule: explicit maxMode, else params non-empty and every matching variant is max-only. */
+function sdkMaxMode(model) {
+  if (!model) return false;
+  if (model.maxMode === true) return true;
+  const params = model.params ?? [];
+  if (params.length === 0) return false;
+  const item = CATALOG.find((entry) => entry.id === model.id);
+  const matching = (item?.variants ?? []).filter((variant) =>
+    params.every((param) => variant.params.some((own) => own.id.trim() === param.id.trim() && own.value.trim() === param.value.trim())),
+  );
+  return matching.length > 0 && matching.every((variant) => variant.isMaxMode === true);
+}
 
 function catalogForKey(apiKey) {
   if (apiKey.startsWith("model-a-")) return [{ ...CATALOG[0], id: "fake-model-a", aliases: [] }];
@@ -69,7 +104,7 @@ function checkKey(apiKey) {
   }
 }
 
-export const calls = { create: [], send: [], disposed: [] };
+export const calls = { create: [], resume: [], send: [], disposed: [] };
 globalThis.__fakeCursorCalls = calls;
 
 export const Cursor = {
@@ -129,6 +164,12 @@ function makeAgent(apiKey, agentId, model) {
           await emit({ type: "text-delta", text });
           return;
         }
+        // Reports what the SDK would send upstream (selection + resolved max mode).
+        if (prompt.includes("ECHO_MAX")) {
+          text = JSON.stringify({ id: model?.id ?? null, params: model?.params ?? [], sdk_max_mode: sdkMaxMode(model) });
+          await emit({ type: "text-delta", text });
+          return;
+        }
         if (prompt.includes("ECHO_AGENT")) {
           text = agentId;
           await emit({ type: "text-delta", text });
@@ -183,7 +224,7 @@ export const Agent = {
   async create(options) {
     checkKey(options.apiKey);
     agentSeq += 1;
-    calls.create.push({ apiKey: options.apiKey });
+    calls.create.push({ apiKey: options.apiKey, model: options.model, sdkMaxMode: sdkMaxMode(options.model) });
     const agentId = `agent-${String(agentSeq)}`;
     agentOwners.set(agentId, options.apiKey);
     return makeAgent(options.apiKey, agentId, options.model);
@@ -194,6 +235,7 @@ export const Agent = {
     if (owner !== undefined && owner !== options.apiKey) {
       throw new AuthenticationError("agent belongs to another Cursor key");
     }
+    calls.resume.push({ agentId, model: options.model, sdkMaxMode: sdkMaxMode(options.model) });
     return makeAgent(options.apiKey, agentId, options.model);
   },
 };

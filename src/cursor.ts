@@ -13,6 +13,7 @@ import {
   type ModelParameterDefinition,
   type ModelParameterValue,
   type ModelSelection,
+  type ModelVariant,
   type SDKAgent,
   type SDKCustomTool,
   type TokenUsage,
@@ -21,6 +22,7 @@ import type { ModelParam, OpenAiModel, ParsedChatRequest, Usage } from "./contra
 import {
   GatewayError,
   invalidRequest,
+  maxModeNotAllowed,
   modelNotFound,
   rateLimitError,
   conversationBusyError,
@@ -92,12 +94,32 @@ export async function getCursorAccount(apiKey: string): Promise<{
   }
 }
 
-export async function validateChatRequestModel(apiKey: string, request: ParsedChatRequest): Promise<void> {
-  await resolveChatModel(apiKey, request);
+/** Per-request model policy. `allowMaxMode` is ANDed with the gateway-wide `allow_max_mode`. */
+export interface ModelSelectionOptions {
+  allowMaxMode?: boolean;
 }
 
-export async function resolveChatModel(apiKey: string, request: ParsedChatRequest): Promise<ModelSelection> {
-  return resolveModelSelection(apiKey, request);
+let gatewayAllowMaxMode = true;
+
+/** Gateway-wide `allow_max_mode` (default true = keep SDK behaviour). */
+export function configureMaxMode(options: { allowMaxMode: boolean }): void {
+  gatewayAllowMaxMode = options.allowMaxMode;
+}
+
+export async function validateChatRequestModel(
+  apiKey: string,
+  request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
+): Promise<void> {
+  await resolveChatModel(apiKey, request, options);
+}
+
+export async function resolveChatModel(
+  apiKey: string,
+  request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
+): Promise<ModelSelection> {
+  return resolveModelSelection(apiKey, request, options);
 }
 
 /**
@@ -184,23 +206,112 @@ async function loadCatalog(apiKey: string): Promise<ModelListItem[]> {
   }
 }
 
-async function resolveModelSelection(apiKey: string, request: ParsedChatRequest): Promise<ModelSelection> {
+async function resolveModelSelection(
+  apiKey: string,
+  request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
+): Promise<ModelSelection> {
   const catalog = await loadCatalog(apiKey);
-  return resolveCatalogModelSelection(catalog, request);
+  return resolveCatalogModelSelection(catalog, request, options);
 }
 
+/**
+ * Resolves the catalog model and params for a request.
+ *
+ * Max mode: since @cursor/sdk 1.0.38 the SDK itself sets `maxMode: true` whenever `params` is
+ * non-empty and every catalog variant containing all of those params has `isMaxMode`
+ * (`sdkWouldUseMaxMode`). Passing `maxMode: false` does NOT prevent that — the SDK overwrites it —
+ * so the only reliable guard is choosing params that do not trigger the rule. When max mode is
+ * disallowed we therefore:
+ *   1. keep the client's explicit choices (`params`, `variant`, `reasoning_effort`, `fast`, …),
+ *   2. replace the default-variant base with the closest non-max variant consistent with them,
+ *   3. reject with 403 `max_mode_not_allowed` when no such variant exists (max-only models, or the
+ *      client explicitly asked for a max-only variant). Anthropic effort hints are soft: a hint
+ *      that only matches max variants is dropped instead of rejecting.
+ * When the rule fires and max mode is allowed, the selection carries `maxMode: true` explicitly
+ * (same as what the SDK would send) so logs and responses can report it.
+ */
 export function resolveCatalogModelSelection(
   catalog: ModelListItem[],
   request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
 ): ModelSelection {
   const item = findCatalogModel(catalog, request.model);
   if (!item) {
     throw modelNotFound(request.model);
   }
-  return {
-    id: item.id,
-    params: resolveChatParams(item, request),
+  const params = resolveChatParams(item, request);
+  const autoMax = sdkWouldUseMaxMode(item, params);
+  const allowMaxMode = gatewayAllowMaxMode && options?.allowMaxMode !== false;
+  if (allowMaxMode) {
+    return autoMax ? { id: item.id, params, maxMode: true } : { id: item.id, params };
+  }
+  const hasMaxVariants = (item.variants ?? []).some((variant) => variant.isMaxMode === true);
+  if (!hasMaxVariants || (!autoMax && matchesNonMaxVariant(item, params))) {
+    return { id: item.id, params };
+  }
+  // Max-only combination, or a mix (e.g. max-only context + low effort) that matches no variant:
+  // rebuild from the closest non-max variant instead of guessing how upstream bills it.
+  // Anthropic `output_config.effort` / thinking budgets are soft hints: drop them before rejecting.
+  const candidates =
+    request.reasoning_effort_hint !== undefined ? [request, { ...request, reasoning_effort_hint: undefined }] : [request];
+  for (const candidate of candidates) {
+    const fallback = nonMaxParams(item, candidate);
+    if (fallback && !sdkWouldUseMaxMode(item, fallback)) {
+      return { id: item.id, params: fallback };
+    }
+  }
+  if (!autoMax) return { id: item.id, params };
+  throw maxModeNotAllowed(item.id);
+}
+
+function matchesNonMaxVariant(model: ModelListItem, params: ModelParameterValue[] | undefined): boolean {
+  const variants = model.variants ?? [];
+  const ids = new Set(variants.flatMap((variant) => variant.params.map((param) => param.id.trim())));
+  const constraining = (params ?? []).filter((param) => ids.has(param.id.trim()));
+  return variants.some((variant) => variant.isMaxMode !== true && variantContains(variant, constraining));
+}
+
+/** Exact copy of the @cursor/sdk 1.0.38 auto max-mode rule (local-model validation). */
+export function sdkWouldUseMaxMode(model: ModelListItem, params: ModelParameterValue[] | undefined): boolean {
+  const wanted = params ?? [];
+  if (wanted.length === 0) return false;
+  const matching = (model.variants ?? []).filter((variant) => variantContains(variant, wanted));
+  return matching.length > 0 && matching.every((variant) => variant.isMaxMode === true);
+}
+
+function variantContains(variant: ModelVariant, params: ModelParameterValue[]): boolean {
+  return params.every((param) =>
+    variant.params.some((own) => own.id.trim() === param.id.trim() && own.value.trim() === param.value.trim()),
+  );
+}
+
+/**
+ * Params for the closest non-max variant that honours the client's explicit choices, or
+ * undefined when every compatible variant is max-only.
+ */
+function nonMaxParams(model: ModelListItem, request: ParsedChatRequest): ModelParameterValue[] | undefined {
+  const variants = model.variants ?? [];
+  const withoutDefault: ModelListItem = {
+    ...model,
+    variants: variants.map(({ isDefault: _isDefault, ...variant }) => variant),
   };
+  const explicit = resolveChatParams(withoutDefault, request) ?? [];
+  const variantParamIds = new Set(variants.flatMap((variant) => variant.params.map((param) => param.id.trim())));
+  const constraining = explicit.filter((param) => variantParamIds.has(param.id.trim()));
+  const defaults = variants.find((variant) => variant.isDefault === true)?.params ?? [];
+  let best: { variant: ModelVariant; score: number } | undefined;
+  for (const variant of variants) {
+    if (variant.isMaxMode === true || !variantContains(variant, constraining)) continue;
+    const score = variant.params.filter((param) =>
+      defaults.some((own) => own.id.trim() === param.id.trim() && own.value.trim() === param.value.trim()),
+    ).length;
+    if (!best || score > best.score) best = { variant, score };
+  }
+  if (!best) return undefined;
+  const merged = new Map(best.variant.params.map((param) => [param.id, param.value]));
+  for (const param of explicit) merged.set(param.id, param.value);
+  return [...merged.entries()].map(([id, value]) => ({ id, value }));
 }
 
 /** Map OpenAI `variant` / `reasoning_effort` / `fast` onto Cursor catalog params. */
@@ -541,6 +652,9 @@ function classifyCursorError(error: unknown): GatewayError {
   }
   if (error instanceof AgentBusyError) return conversationBusyError();
   if (error instanceof ConfigurationError) {
+    // 1.0.38 raises a retryable ConfigurationError when its catalog lookup (max-mode check) fails;
+    // that is a transient upstream problem, not a bad request.
+    if (error.isRetryable) return upstreamUnavailable(withUpstreamDetail("Cursor is temporarily unavailable", error.message));
     return invalidRequest(error.message);
   }
   if (error instanceof CursorSdkError && (error.status === 408 || error.status === 504)) {
