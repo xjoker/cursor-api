@@ -33,6 +33,19 @@ export interface AppConfig {
   parkTimeoutMs: number;
   /** Unsupported Chat Completions sampling knobs are dropped instead of rejected. */
   ignoreSamplingParams: boolean;
+  /** Enforce `max_tokens` / `stop` at the gateway (cut + cancel); false = accept-and-ignore / 400. */
+  enforceOutputLimits: boolean;
+  /** Without a client conversation_id, resume the previous agent when the history hash matches. */
+  historyResume: boolean;
+  /**
+   * Allow requests that resolve to a Cursor max-mode variant (SDK >= 1.0.38 turns max mode on
+   * automatically for those). When false the gateway picks a non-max variant or rejects.
+   */
+  allowMaxMode: boolean;
+  /** Weight (0..1) of cache-read tokens in per-key token quotas; per-key value overrides. */
+  quotaCacheReadWeight: number;
+  /** Per-key token reservation also covers the average of the key's last N runs (0 = off). */
+  quotaReserveRecentRuns: number;
   /** SSE comment heartbeat interval while a stream is open; 0 disables it. */
   sseKeepaliveMs: number;
   /** Failed authentication attempts allowed per address each minute; 0 disables throttling. */
@@ -61,6 +74,41 @@ export interface ApiKeyRow {
   request_limit: number;
   used_requests: number;
   created_at: string;
+  updated_at: string;
+  /** Allowed model patterns (exact id or `*` glob, case-insensitive). `null` = unrestricted, `[]` = none. */
+  allowed_models: string[] | null;
+  /**
+   * Per-key max-mode restriction: `null` = inherit the gateway `allow_max_mode` (default true),
+   * `false` = never run max-mode variants (non-max fallback or 403). The gateway setting is a hard
+   * ceiling: effective = gateway AND key, so `true` cannot enable max mode when the gateway is false.
+   */
+  allow_max_mode: boolean | null;
+  /** Requests allowed per quota period. `null` = unlimited. */
+  quota_requests: number | null;
+  /** `total_tokens` allowed per quota period (soft cap). `null` = unlimited. */
+  quota_tokens: number | null;
+  quota_period: QuotaPeriod;
+  /** IANA time zone used to cut daily / monthly periods. */
+  quota_tz: string;
+  /** Max in-flight requests for this key. `null` = unlimited. */
+  max_concurrent: number | null;
+  /** Weight (0..1) of cache-read tokens in `quota_tokens`; `null` = gateway `quota_cache_read_weight`. */
+  quota_cache_read_weight: number | null;
+}
+
+export type QuotaPeriod = "total" | "daily" | "monthly";
+
+/** Policy fields that govern which models / variants a client key may use. */
+export interface KeyModelPolicy {
+  allowedModels: string[] | null;
+  allowMaxMode: boolean | null;
+}
+
+export interface KeyUsageRow {
+  api_key_id: string;
+  period_start: string;
+  requests: number;
+  tokens: number;
   updated_at: string;
 }
 
@@ -114,6 +162,8 @@ export interface RequestLogRow {
   gateway_ms: number | null;
   request_detail: string | null;
   response_detail: string | null;
+  /** 1 = run used Cursor max mode, 0 = not, null = unknown (no run / legacy row). */
+  max_mode?: number | null;
   has_detail?: boolean;
   key_name?: string | null;
   key_prefix?: string | null;
@@ -205,7 +255,21 @@ export interface ParsedChatRequest {
   conversation_id?: string;
   /** The gateway assigned the conversation ID, so transcript matching remains valid. */
   conversation_id_generated?: boolean;
+  /** Client-supplied end-user id (`user`); scopes history-hash reuse within a client key. */
+  user?: string;
+  /** OpenRouter `reasoning.exclude`: do not return thinking text (the model still reasons). */
+  reasoning_exclude?: boolean;
+  /** Gateway-enforced stop sequences (`enforce_output_limits`). */
+  stop?: string[];
+  /** Gateway-enforced output cap in estimated tokens (`enforce_output_limits`). */
+  max_output_tokens?: number;
+  /** Best-effort structured output (`response_format` / Responses `text.format`). */
+  output_format?: OutputFormat;
 }
+
+export type OutputFormat =
+  | { type: "json_object" }
+  | { type: "json_schema"; name?: string; schema?: unknown; strict?: boolean };
 
 export interface OpenAiModel {
   id: string;
@@ -224,6 +288,8 @@ export interface OpenAiModel {
     display_name: string;
     description?: string;
     is_default?: boolean;
+    /** True when Cursor only runs this variant in max mode (reported by newer Cursor SDKs). */
+    is_max_mode?: boolean;
     params: ModelParam[];
   }>;
 }
@@ -235,9 +301,31 @@ export interface CursorChatResult {
   cost?: CursorCost | null;
   params?: ModelParam[];
   status: "finished" | "error" | "cancelled";
-  finish_reason: "stop" | "tool_calls" | "cancelled" | "error";
+  /** `length` / `stop` (via `stop_sequence`) only when the gateway cut the output (`enforce_output_limits`). */
+  finish_reason: "stop" | "tool_calls" | "cancelled" | "error" | "length";
+  /** Set when `output_format` asked for JSON: whether the final text parsed as JSON. */
+  json_valid?: boolean;
+  /** The stop sequence that cut the output (`enforce_output_limits`). */
+  stop_sequence?: string;
+  /** Internal: the Cursor agent that served the turn (history-hash resume); never sent to clients. */
+  agent_ref?: { agentId: string; cursorKeyId?: string };
   error?: { message: string; code?: string };
   tool_calls?: OpenAiToolCall[];
   /** Cursor `thinking-delta` text; OpenCode reads this as `reasoning_content`. */
   reasoning?: string;
+  /** True when the run was sent with Cursor max mode (billed at max rates). */
+  max_mode?: boolean;
+  /**
+   * Where `usage` came from: `run` = this run only (`run.wait().usage`),
+   * `agent_total` = cumulative `agent.getUsage()` fallback (may include earlier turns).
+   */
+  usageScope?: "run" | "agent_total";
+  /**
+   * Gateway estimate (~4 chars/token) of this HTTP turn's tokens: input sent upstream plus streamed
+   * text, thinking and tool-call arguments. Charged to `quota_tokens` when no run-scoped usage is
+   * known (client abort, tool-call suspension, cumulative-only usage).
+   */
+  quota_estimate_tokens?: number;
+  /** Tokens already charged for earlier tool-call rounds of the same run (subtracted from run usage). */
+  quota_precharged_tokens?: number;
 }

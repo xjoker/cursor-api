@@ -238,7 +238,9 @@ test("a keyword swallowed by an in-place rule still masks the whole value", () =
 test("format() falls back to a log_format_error line instead of throwing", () => {
   const circular = {};
   circular.self = circular;
-  for (const fields of [{ big: 10n }, { get boom() { throw new Error(S); } }, { circular }]) {
+  // Cycles are handled by the walker itself (`[circular]`) and must not throw either.
+  assert.doesNotThrow(() => capture(() => logInfo("cycle", { circular, note: S })));
+  for (const fields of [{ big: 10n }, { get boom() { throw new Error(S); } }]) {
     let line = "";
     const out = process.stdout.write;
     process.stdout.write = (chunk) => ((line += chunk), true);

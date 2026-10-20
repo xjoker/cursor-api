@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { parseChatCompletionsRequest } from "../dist/openai.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 const base = {
   model: "fake-model",
@@ -22,8 +22,8 @@ const sampling = {
   parallel_tool_calls: false,
 };
 
-test("ignore_sampling_params is off by default and configurable via TOML or env", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-sampling-"));
+test("ignore_sampling_params is off by default and configurable via TOML or env", (context) => {
+  const root = makeTempDir(context, "cursor-api-sampling-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   const file = join(root, "data", "config", "gateway.toml");
   const secrets = ['cursor_api_key = "c"', 'admin_access_key = "a"', 'api_key_pepper = "p"'];

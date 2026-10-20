@@ -19,16 +19,22 @@ import {
   createLocalChatAgent,
   disposeAgent,
   mapCursorError,
+  actualMaxMode,
+  maxModeAllowedFor,
   resolveChatModel,
+  type ModelSelectionOptions,
   resumeLocalChatAgent,
   runFailureError,
   toChatUsage,
 } from "./cursor.js";
-import { getConversationMapping, pruneConversations, upsertConversation, type ConversationMapping } from "./db.js";
-import { conversationBusyError, GatewayError, invalidRequest } from "./errors.js";
-import { logError, logInfo } from "./log.js";
+import { deleteAgentConversations, getConversationMapping, pruneConversations, upsertConversation, type ConversationMapping } from "./db.js";
+import { estimateTokens, holdParkedSlot } from "./key-policy.js";
+import { conversationBusyError, GatewayError, invalidRequest, maxModeNotAllowed } from "./errors.js";
+import { logError, logInfo, logWarn } from "./log.js";
 import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
+import { normalizeJsonReply, OutputLimiter, outputFormatInstruction } from "./output-limits.js";
+import { forgetAgent, hashHistory, historyResumeEnabled, rememberHistory, takeHistory } from "./history-resume.js";
 
 const DEFAULT_PARK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -70,6 +76,30 @@ interface LiveSession {
   parkTimer: ReturnType<typeof setTimeout> | undefined;
   indexKeys: string[];
   modelParams: CursorChatResult["params"];
+  /** The selection resolved to a Cursor max-mode variant (billed at max rates). */
+  /** ACTUAL max-mode flag: the SDK-resolved `agent.model` / `run.model`, else the gateway prediction. */
+  maxMode: boolean;
+  /** Whether max mode may be sent for this session (gateway flag and request policy). */
+  allowMaxMode: boolean;
+  /** Deltas held back until the run's SDK-resolved model passed the max-mode check. */
+  heldDeltas?: InteractionUpdate[];
+  /** Per-turn output shaping from the HTTP request that started or continued the run (this turn). */
+  output?: {
+    limiter?: OutputLimiter;
+    limits?: { stop?: string[]; maxTokens?: number };
+    excludeReasoning: boolean;
+    format?: ParsedChatRequest["output_format"];
+    stream: boolean;
+  };
+  /** Quota bookkeeping for the current run: input chars of this HTTP turn, estimates already charged. */
+  /**
+   * Quota bookkeeping for the current run: input chars of this HTTP turn (prompt as sent upstream,
+   * including any JSON-mode instruction), thinking chars streamed (counted even when
+   * `reasoning.exclude` hides them from the client), estimates already charged.
+   */
+  quota: { inputChars: number; thinkingChars?: number; precharged: number };
+  /** Release of the `max_concurrent` slot held while suspended on client tool calls (F3). */
+  releaseParkedSlot?: () => void;
   text: string;
   thinking: string;
   sink: ChatTurnSink | undefined;
@@ -225,11 +255,42 @@ interface RunChatTurnOptions {
   sink?: ChatTurnSink;
   parkTimeoutMs?: number;
   db?: DatabaseSync;
+  /** Client-key model policy (allowlist + max-mode override), applied on every model resolution. */
+  modelPolicy?: ModelSelectionOptions;
+  /** Called once an upstream run exists (send accepted or parked run continued). */
+  onUpstreamStarted?: () => void;
 }
 
 type TurnOptions = Omit<RunChatTurnOptions, "onClaimed"> & {
   claimOutput?: () => Promise<void>;
+  /**
+   * History-hash reuse: the full transcript a fresh agent would have been sent. The quota estimate
+   * counts it (not just the new message), so a reused turn is charged like HISTORY_RESUME=false.
+   */
+  quotaPrompt?: string;
 };
+
+/** Agents claimed by an in-flight resume (any path); see {@link claimAgent}. */
+const claimedAgents = new Set<string>();
+
+/** Busy: claimed by another resume, or held by a live (running or parked) session. */
+function agentBusy(agentId: string): boolean {
+  if (claimedAgents.has(agentId)) return true;
+  for (const session of liveSessions) if (session.agent?.agentId === agentId) return true;
+  return false;
+}
+
+/** Per-agent in-flight lock: undefined when the agent is busy, else an idempotent release. */
+function claimAgent(agentId: string): (() => void) | undefined {
+  if (agentBusy(agentId)) return undefined;
+  claimedAgents.add(agentId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    claimedAgents.delete(agentId);
+  };
+}
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -367,6 +428,32 @@ export function validateChatTurnRequest(request: ParsedChatRequest): ChatTurnKin
   return turn;
 }
 
+/**
+ * True when `request` carries tool results for an agent this client key has suspended (so the
+ * request continues a run that already holds a `max_concurrent` slot). Never throws.
+ */
+export function resumesParkedTurn(apiKeyId: string, request: ParsedChatRequest): boolean {
+  let turn: ChatTurnKind;
+  try {
+    turn = classifyChatTurn(request.messages);
+  } catch {
+    return false;
+  }
+  if (turn.kind !== "tool_results") return false;
+  const byStem = sessions.get(sessionKey(apiKeyId, hashMessages(turn.stem)));
+  const byConversation = request.conversation_id
+    ? sessions.get(conversationKey(apiKeyId, request.conversation_id))
+    : undefined;
+  const route = resolveParkedRoute({
+    conversationId: request.conversation_id,
+    conversationIdGenerated: request.conversation_id_generated,
+    hasConversationParks: Boolean(byConversation && byConversation.parks.size > 0),
+    hasStemParks: Boolean(byStem && byStem.parks.size > 0),
+  });
+  const session = route === "conversation" ? byConversation : route === "stem" ? byStem : undefined;
+  return session?.releaseParkedSlot !== undefined;
+}
+
 export function conversationKey(apiKeyId: string, conversationId: string): string {
   return `${apiKeyId}:conv:${conversationId}`;
 }
@@ -426,8 +513,27 @@ export async function runChatTurn(options: RunChatTurnOptions): Promise<CursorCh
           await options.onClaimed?.();
         }
       : undefined;
-    return await runClaimedChatTurn({ ...options, claimOutput }, turn);
+    const result = await runClaimedChatTurn({ ...options, claimOutput }, turn);
+    rememberHistoryTurn(options, result);
+    return result;
   });
+}
+
+/** Client manages no conversation of its own (no `conversation_id`, or a gateway-generated one). */
+function usesHistoryResume(request: ParsedChatRequest): boolean {
+  return !request.conversation_id || request.conversation_id_generated === true;
+}
+
+/**
+ * Remember `history + this reply → agent` after a normal, complete answer. Truncated (`length` /
+ * stop-sequence) and JSON-normalised replies differ from what the agent holds, so they are skipped.
+ */
+function rememberHistoryTurn(options: TurnOptions, result: CursorChatResult): void {
+  if (!historyResumeEnabled() || !usesHistoryResume(options.request) || !result.agent_ref) return;
+  if (result.status !== "finished" || result.finish_reason !== "stop") return;
+  if (result.stop_sequence !== undefined || options.request.output_format) return;
+  const history = [...options.request.messages, { role: "assistant" as const, content: result.text }];
+  rememberHistory(options.apiKeyId, options.request.user, hashHistory(history), result.agent_ref);
 }
 
 async function runClaimedChatTurn(
@@ -462,6 +568,7 @@ async function runClaimedChatTurn(
   });
 
   if (action === "continue_park" && turn.kind === "tool_results" && parked) {
+    if (parked.agent) forgetAgent(parked.agent.agentId);
     rememberConversation(parked, options);
     parked.sink = options.sink;
     parked.parkTimeoutMs = options.parkTimeoutMs ?? parked.parkTimeoutMs;
@@ -474,8 +581,9 @@ async function runClaimedChatTurn(
     }
     parked.lastRequestMessages = options.request.messages;
     indexSession(parked, options.apiKeyId, hashMessages(options.request.messages));
+    options.onUpstreamStarted?.();
     const operation = async (): Promise<CursorChatResult> =>
-      ensureSuccessfulRun(await continueRun(parked, options.abortSignal));
+      ensureSuccessfulRun(await continueRun(parked, options.abortSignal, options.request));
     return options.keyPool
       ? await options.keyPool.runForId(parked.cursorKeyId, async () => await operation())
       : await operation();
@@ -496,6 +604,22 @@ async function runClaimedChatTurn(
   if (turn.kind !== "user") {
     throw invalidRequest("Last message must be role 'user' or 'tool'");
   }
+  if (historyResumeEnabled() && usesHistoryResume(options.request) && turn.stem.length > 0) {
+    // Taken atomically (the record and every other record of that agent are gone from here on).
+    const previous = takeHistory(options.apiKeyId, options.request.user, hashHistory(turn.stem));
+    if (previous) {
+      logInfo("history matched a previous agent; sending only the new message", {
+        api_key_id: options.apiKeyId,
+        agent_id: previous.agentId,
+        history_messages: turn.stem.length,
+      });
+      // resumeUserTurn falls back to the full transcript if the resume fails before output, and
+      // uses a new agent if this one is busy on another path.
+      return await resumeUserTurn(turn, { ...options, quotaPrompt: renderTranscript([...turn.stem, turn.user]) }, previous, {
+        newAgentIfBusy: true,
+      });
+    }
+  }
   return await startNewSession(turn, options);
 }
 
@@ -503,10 +627,36 @@ async function resumeUserTurn(
   turn: Extract<ChatTurnKind, { kind: "user" }>,
   options: TurnOptions,
   stored: ConversationMapping | undefined,
+  flags: { newAgentIfBusy?: boolean } = {},
 ): Promise<CursorChatResult> {
   if (!stored) {
     return await startNewSession(turn, options);
   }
+  // One request per agent at a time, whichever path (conversation_id, previous_response_id,
+  // history hash) found it.
+  const releaseAgent = claimAgent(stored.agentId);
+  if (!releaseAgent) {
+    if (!flags.newAgentIfBusy) throw conversationBusyError();
+    logInfo("history matched a busy agent; starting a new agent", {
+      api_key_id: options.apiKeyId,
+      agent_id: stored.agentId,
+    });
+    return await startNewSession(turn, options);
+  }
+  // This agent is about to move on: no history record may resume it afterwards.
+  forgetAgent(stored.agentId);
+  try {
+    return await resumeClaimedUserTurn(turn, options, stored);
+  } finally {
+    releaseAgent();
+  }
+}
+
+async function resumeClaimedUserTurn(
+  turn: Extract<ChatTurnKind, { kind: "user" }>,
+  options: TurnOptions,
+  stored: ConversationMapping,
+): Promise<CursorChatResult> {
   const pool = options.keyPool;
   if (!pool) {
     return await resumeUserTurnWithKey(turn, options, stored.agentId);
@@ -539,6 +689,9 @@ async function resumeUserTurn(
     );
   } catch (error) {
     if (turn.stem.length === 0 || emitted || options.abortSignal.aborted) throw error;
+    // A policy block (e.g. the send-stage max-mode recheck) is final: replaying would send the
+    // same max request upstream a second time (C2).
+    if (error instanceof GatewayError && error.httpStatus === 403) throw error;
     logInfo("conversation resume failed, replaying full transcript", {
       api_key_id: options.apiKeyId,
       conversation_id: options.request.conversation_id ?? null,
@@ -554,10 +707,9 @@ async function resumeUserTurnWithKey(
   options: TurnOptions,
   storedAgentId: string,
 ): Promise<CursorChatResult> {
-  const model = await resolveChatModel(options.apiKey, options.request);
-  await options.claimOutput?.();
+  const model = await resolveChatModel(options.apiKey, options.request, options.modelPolicy);
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
-  const session = emptySession(options, model.params);
+  const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   try {
     session.agent = await resumeLocalChatAgent({
@@ -566,17 +718,21 @@ async function resumeUserTurnWithKey(
       workspaceDir: options.workspaceDir,
       model,
       customTools,
+      allowMaxMode: session.allowMaxMode,
     });
   } catch (error) {
     releaseCapacity();
     throw error;
   }
+  session.maxMode = actualMaxMode(session.agent.model, session.maxMode);
   logInfo("resumed stored conversation", {
     api_key_id: options.apiKeyId,
     conversation_id: options.request.conversation_id ?? null,
     agent_id: storedAgentId,
   });
   try {
+    // Claim (stream headers) only after the SDK-resolved max-mode check, so a 403 is still JSON.
+    await options.claimOutput?.();
     rememberConversation(session, options);
   } catch (error) {
     await dropSession(session);
@@ -615,10 +771,9 @@ async function startAgentSession(prompt: string, options: TurnOptions): Promise<
 }
 
 async function startAgentSessionWithKey(prompt: string, options: TurnOptions): Promise<CursorChatResult> {
-  const model = await resolveChatModel(options.apiKey, options.request);
-  await options.claimOutput?.();
+  const model = await resolveChatModel(options.apiKey, options.request, options.modelPolicy);
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
-  const session = emptySession(options, model.params);
+  const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   try {
     session.agent = await createLocalChatAgent({
@@ -626,12 +781,16 @@ async function startAgentSessionWithKey(prompt: string, options: TurnOptions): P
       workspaceDir: options.workspaceDir,
       model,
       customTools,
+      allowMaxMode: session.allowMaxMode,
     });
   } catch (error) {
     releaseCapacity();
     throw mapCursorError(error);
   }
+  session.maxMode = actualMaxMode(session.agent.model, session.maxMode);
   try {
+    // Claim (stream headers) only after the SDK-resolved max-mode check, so a 403 is still JSON.
+    await options.claimOutput?.();
     rememberConversation(session, options);
   } catch (error) {
     await dropSession(session);
@@ -649,8 +808,10 @@ function emptySession(
     request: ParsedChatRequest;
     sink?: ChatTurnSink;
     parkTimeoutMs?: number;
+    modelPolicy?: ModelSelectionOptions;
   },
   modelParams: CursorChatResult["params"],
+  maxMode = false,
 ): LiveSession {
   return {
     apiKeyId: options.apiKeyId,
@@ -667,6 +828,9 @@ function emptySession(
     parkTimer: undefined,
     indexKeys: [],
     modelParams,
+    maxMode,
+    allowMaxMode: maxModeAllowedFor(options.modelPolicy),
+    quota: { inputChars: 0, precharged: 0 },
     text: "",
     thinking: "",
     sink: options.sink,
@@ -729,6 +893,9 @@ async function sendOnSession(
     request: ParsedChatRequest;
     abortSignal: AbortSignal;
     sink?: ChatTurnSink;
+    onUpstreamStarted?: () => void;
+    quotaPrompt?: string;
+    db?: DatabaseSync;
   },
 ): Promise<CursorChatResult> {
   session.text = "";
@@ -740,23 +907,60 @@ async function sendOnSession(
   session.sink = options.sink;
   session.lastRequestMessages = options.request.messages;
   session.lastActiveAt = Date.now();
+  session.output = outputShapingFor(options.request);
+  // JSON-mode instruction goes to the upstream prompt only (stored messages / hashes unchanged),
+  // but it is sent, so it counts toward the quota estimate.
+  const instruction = outputFormatInstruction(options.request.output_format);
+  const text = prompt + instruction;
+  // A history-reused turn sends only the new message, but the agent replays the whole context:
+  // estimate it like the full transcript (same charge as HISTORY_RESUME=false).
+  session.quota = { inputChars: (options.quotaPrompt ?? prompt).length + instruction.length, precharged: 0 };
   liveSessions.add(session);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   const images = imagesOfLastUser(options.request.messages);
 
   let run: Run;
+  // Max mode disallowed: hold deltas while `send` resolves so nothing streams before the
+  // run.model max-mode check. (Allowed: nothing to check, stream directly.)
+  session.heldDeltas = session.allowMaxMode ? undefined : [];
   try {
-    run = await session.agent.send(images && images.length > 0 ? { text: prompt, images } : prompt, {
+    run = await session.agent.send(images && images.length > 0 ? { text, images } : text, {
       local: { ...(customTools ? { customTools } : {}), force: true },
       onDelta: async ({ update }) => {
         await emitDelta(session, update);
       },
     });
   } catch (error) {
+    session.heldDeltas = undefined;
     await dropSession(session);
     throw mapCursorError(error);
   }
+  // The upstream run exists from here on (counts toward the request quota even if cancelled below).
+  options.onUpstreamStarted?.();
+  if (run.model?.maxMode === true) {
+    session.maxMode = true;
+    if (!session.allowMaxMode) {
+      // The SDK re-resolves the model on every send; never let a disallowed max run continue.
+      logWarn("sdk sent a max-mode run although max mode is disallowed; cancelling", {
+        api_key_id: session.apiKeyId,
+        model: run.model.id,
+      });
+      // Keep holding (and discarding) deltas: the cancelled run may still emit some.
+      session.heldDeltas = [];
+      // The rejected send has already changed upstream context; every alias must stop resuming it.
+      try {
+        if (options.db) deleteAgentConversations(options.db, session.apiKeyId, session.agent.agentId);
+      } finally {
+        if (run.supports("cancel")) await run.cancel().catch(() => undefined);
+        await dropSession(session);
+      }
+      throw maxModeNotAllowed(run.model.id, { dispatched: true });
+    }
+  }
+  await releaseHeldDeltas(session);
   session.run = run;
+  // A limit may already have been hit while `send` was resolving.
+  if (session.output?.limiter?.cut) cancelForCut(session);
   session.waitPromise = settleRun(session, options.abortSignal);
   bindAbort(session, options.abortSignal);
   indexSession(session, session.apiKeyId, hashMessages(options.request.messages));
@@ -766,6 +970,7 @@ async function sendOnSession(
 export async function continueRun(
   session: LiveSession,
   abortSignal: AbortSignal,
+  request?: ParsedChatRequest,
 ): Promise<CursorChatResult> {
   session.text = "";
   session.thinking = "";
@@ -773,6 +978,13 @@ export async function continueRun(
   session.lastFlushed = [];
   session.batchReady = new Deferred<OpenAiToolCall[]>();
   session.lastActiveAt = Date.now();
+  // Output shaping (limits, stream, JSON format, reasoning.exclude) is per HTTP turn: take it from
+  // the continuing request; limits restart for the continued run.
+  if (request) session.output = outputShapingFor(request);
+  else if (session.output?.limits) session.output.limiter = new OutputLimiter(session.output.limits.stop, session.output.limits.maxTokens);
+  // No longer suspended: the continuing HTTP request holds its own slot.
+  session.releaseParkedSlot?.();
+  session.releaseParkedSlot = undefined;
   clearParkTimer(session);
   bindAbort(session, abortSignal);
   if (session.batch.length > 0) {
@@ -801,6 +1013,10 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
   }
   if (outcome.kind === "tools") {
     session.lastActiveAt = Date.now();
+    // Charge this round now (the client may never resume) and hold a concurrency slot while parked.
+    const estimate = segmentEstimate(session, outcome.calls);
+    session.quota = { inputChars: 0, thinkingChars: 0, precharged: (session.quota?.precharged ?? 0) + estimate };
+    session.releaseParkedSlot ??= holdParkedSlot(session.apiKeyId);
     armParkTimeout(session);
     indexSession(
       session,
@@ -820,13 +1036,19 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
       usage: toChatUsage(undefined),
       usageKnown: false,
       params: session.modelParams,
+      ...(session.maxMode ? { max_mode: true } : {}),
       status: "finished",
       finish_reason: "tool_calls",
       tool_calls: outcome.calls,
+      quota_estimate_tokens: estimate,
     });
   }
   await dropSession(session);
-  return withThinking(session, outcome.result);
+  const agentId = session.agent?.agentId;
+  return withThinking(session, {
+    ...outcome.result,
+    ...(agentId ? { agent_ref: { agentId, cursorKeyId: session.cursorKeyId } } : {}),
+  });
 }
 
 export function applyToolResults(
@@ -850,6 +1072,7 @@ export function applyToolResults(
       throw invalidRequest(`Unknown tool_call_id '${result.toolCallId}'`);
     }
   }
+  if (session.quota) for (const result of results) session.quota.inputChars += result.content.length;
   for (const result of results) {
     const parked = session.parks.get(result.toolCallId);
     if (!parked) {
@@ -924,16 +1147,116 @@ function flushBatch(session: LiveSession): void {
 }
 
 async function emitDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
+  if (session.heldDeltas) {
+    session.heldDeltas.push(update);
+    return;
+  }
+  await deliverDelta(session, update);
+}
+
+/** Replays held deltas in order (new ones keep queueing meanwhile), then streams directly. */
+async function releaseHeldDeltas(session: LiveSession): Promise<void> {
+  const held = session.heldDeltas;
+  if (!held) return;
+  while (held.length > 0) {
+    const update = held.shift() as InteractionUpdate;
+    await deliverDelta(session, update);
+  }
+  session.heldDeltas = undefined;
+}
+
+async function deliverDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
   if (update.type === "thinking-delta") {
     if (update.text === "") return;
+    // Upstream produced it, so it is charged whether or not the client sees it.
+    if (session.quota) session.quota.thinkingChars = (session.quota.thinkingChars ?? 0) + update.text.length;
+    if (session.output?.excludeReasoning) return;
     session.thinking += update.text;
     if (session.sink) await session.sink.onThinking(update.text);
     return;
   }
   if (update.type !== "text-delta") return;
   if (update.text === "") return;
-  session.text += update.text;
-  if (session.sink) await session.sink.onText(update.text);
+  const limiter = session.output?.limiter;
+  const visible = limiter ? limiter.push(update.text) : update.text;
+  await appendText(session, visible);
+  if (limiter?.cut) cancelForCut(session);
+}
+
+async function appendText(session: LiveSession, text: string): Promise<void> {
+  if (text === "") return;
+  session.text += text;
+  if (session.sink) await session.sink.onText(text);
+}
+
+function outputShapingFor(request: ParsedChatRequest): LiveSession["output"] {
+  const limits =
+    request.stop !== undefined || request.max_output_tokens !== undefined
+      ? { ...(request.stop ? { stop: request.stop } : {}), ...(request.max_output_tokens !== undefined ? { maxTokens: request.max_output_tokens } : {}) }
+      : undefined;
+  return {
+    ...(limits ? { limits, limiter: new OutputLimiter(limits.stop, limits.maxTokens) } : {}),
+    excludeReasoning: request.reasoning_exclude === true,
+    ...(request.output_format ? { format: request.output_format } : {}),
+    stream: request.stream,
+  };
+}
+
+/** Output limit hit: stop the upstream run (the cut text is already final). */
+function cancelForCut(session: LiveSession): void {
+  const run = session.run;
+  if (!run || session.parks.size > 0) return;
+  if (run.supports("cancel")) void run.cancel().catch(() => undefined);
+}
+
+/** Final text plus finish details for limits and JSON mode (successful or limit-cancelled runs). */
+async function finishOutput(
+  session: LiveSession,
+  upstreamText: string | undefined,
+): Promise<Pick<CursorChatResult, "text" | "finish_reason" | "json_valid" | "stop_sequence">> {
+  const limiter = session.output?.limiter;
+  let text = upstreamText ?? session.text;
+  let finish: CursorChatResult["finish_reason"] = "stop";
+  let stopSequence: string | undefined;
+  if (limiter) {
+    await appendText(session, limiter.flush());
+    text = session.text;
+    const cut = limiter.cut;
+    if (cut?.reason === "length") finish = "length";
+    if (cut?.reason === "stop") stopSequence = cut.sequence;
+  }
+  let jsonValid: boolean | undefined;
+  if (session.output?.format) {
+    const normalized = normalizeJsonReply(text, !session.output.stream);
+    text = normalized.text;
+    jsonValid = normalized.valid;
+    if (!jsonValid) {
+      logWarn("json output requested but the reply is not valid JSON", {
+        api_key_id: session.apiKeyId,
+        format: session.output.format.type,
+      });
+    }
+  }
+  return {
+    text,
+    finish_reason: finish,
+    ...(jsonValid !== undefined ? { json_valid: jsonValid } : {}),
+    ...(stopSequence !== undefined ? { stop_sequence: stopSequence } : {}),
+  };
+}
+
+/** Estimated tokens of the current HTTP turn (input + everything streamed), ~4 chars per token. */
+function segmentEstimate(session: LiveSession, calls: OpenAiToolCall[] = []): number {
+  let chars = (session.quota?.inputChars ?? 0) + session.text.length + (session.quota?.thinkingChars ?? 0);
+  for (const call of calls) chars += (call.name?.length ?? 0) + (call.arguments?.length ?? 0);
+  return estimateTokens(chars);
+}
+
+function quotaFields(session: LiveSession): Pick<CursorChatResult, "quota_estimate_tokens" | "quota_precharged_tokens"> {
+  return {
+    quota_estimate_tokens: segmentEstimate(session),
+    ...((session.quota?.precharged ?? 0) > 0 ? { quota_precharged_tokens: session.quota.precharged } : {}),
+  };
 }
 
 function withThinking(session: LiveSession, result: CursorChatResult): CursorChatResult {
@@ -959,14 +1282,32 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
     const result = await run.wait();
     const billed = await billedUsageOf(session.agent);
     const rawUsage = result.usage ?? billed?.usage;
+    const usageScope = result.usage ? ("run" as const) : billed?.usage ? ("agent_total" as const) : undefined;
+    if (result.status === "cancelled" && session.output?.limiter?.cut && !abortSignal.aborted) {
+      // Cancelled by the gateway's own max_tokens / stop cut: a normal, truncated completion.
+      return {
+        usage: toChatUsage(rawUsage),
+        usageKnown: rawUsage !== undefined,
+        ...(usageScope ? { usageScope } : {}),
+        params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        status: "finished",
+        ...(await finishOutput(session, undefined)),
+        ...quotaFields(session),
+      };
+    }
     if (result.status === "cancelled") {
+      // F1: a client abort still pays for what the run used (run usage if reported, else estimate).
       return {
         text: session.text,
-        usage: toChatUsage(undefined),
-        usageKnown: false,
+        usage: toChatUsage(rawUsage),
+        usageKnown: rawUsage !== undefined,
+        ...(usageScope ? { usageScope } : {}),
         status: "cancelled",
         finish_reason: "cancelled",
         params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
       };
     }
     if (result.status === "error") {
@@ -975,23 +1316,39 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         text: session.text,
         usage: toChatUsage(rawUsage),
         usageKnown: rawUsage !== undefined,
+        ...(usageScope ? { usageScope } : {}),
         status: "error",
         finish_reason: "error",
         params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
       };
     }
     return {
-      text: result.result ?? session.text,
       usage: toChatUsage(rawUsage),
       usageKnown: rawUsage !== undefined,
+      ...(usageScope ? { usageScope } : {}),
       cost: billed?.cost
         ? { raw_cost_cents: billed.cost.rawCostCents, charged_cents: billed.cost.chargedCents }
         : null,
       params: session.modelParams,
+      ...(session.maxMode ? { max_mode: true } : {}),
       status: "finished",
-      finish_reason: "stop",
+      ...(await finishOutput(session, result.result)),
+      ...quotaFields(session),
     };
   } catch (error) {
+    if (session.output?.limiter?.cut && !abortSignal.aborted) {
+      return {
+        usage: toChatUsage(undefined),
+        usageKnown: false,
+        params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        status: "finished",
+        ...(await finishOutput(session, undefined)),
+        ...quotaFields(session),
+      };
+    }
     if (abortSignal.aborted) {
       return {
         text: session.text,
@@ -1000,6 +1357,8 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
         status: "cancelled",
         finish_reason: "cancelled",
         params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
       };
     }
     throw mapCursorError(error);
@@ -1055,6 +1414,8 @@ function indexSession(session: LiveSession, apiKeyId: string, hash: string): voi
 
 async function dropSession(session: LiveSession): Promise<void> {
   liveSessions.delete(session);
+  session.releaseParkedSlot?.();
+  session.releaseParkedSlot = undefined;
   clearParkTimer(session);
   if (session.flushTimer) clearTimeout(session.flushTimer);
   for (const key of session.indexKeys) {

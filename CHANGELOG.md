@@ -9,6 +9,32 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20261020.2] — 2026-10-20
+
+### Added
+
+- 客户端 Key 支持模型白名单、请求与 Token 配额、每日/月度周期及并发上限；管理台可编辑策略、查看和重置本期用量。
+- `allow_max_mode` 默认开启；关闭时限制 SDK 自动选择 max 变体，全局关闭是硬上限，Key 只能进一步收紧。SDK 已发送的 max run 只能取消，可能仍产生费用。
+- `quota_cache_read_weight` 控制缓存读 Token 的配额权重，默认 1；准入预留参考最近 20 次 run 用量，可通过 `quota_reserve_recent_runs` 调整。
+- Chat 支持 OpenRouter reasoning 对象与双字段推理输出；支持尽力而为的 JSON 输出格式，不保证合法 JSON 或 schema 合规。
+- `enforce_output_limits` 默认关闭；开启后执行三协议输出长度和 stop 序列限制，Token 按每 4 字符估算，触发时取消上游 run。
+- `GET /v1/responses/{id}` 按客户端 Key 隔离读取内存中的 Response；1 小时过期，每 Key 100 条、总计 1000 条，重启丢失，`store:false` 不保存。
+- `history_resume` 默认关闭；开启后按 Key、user 和完整历史复用已完成的 agent，记录一次性使用，agent 忙时显式续接返回 409。未证实能节省上游计费 Token。
+
+### Changed
+
+- 升级 `@cursor/sdk` 至 1.0.38，新增模型变体 `is_max_mode`，可重试的目录配置错误返回 503。
+- **BREAKING：OpenAI usage 输入包含缓存读写**，`prompt_tokens + completion_tokens = total_tokens`；Responses 同口径，Anthropic 保持未缓存输入与缓存分列。schema 11 会一次性改写旧请求日志的输入计数；回滚后旧行仍保留新口径。
+- 推理档位采用模型可支持的相近档位；精确 variant / params 继续校验，软提示不会选中仅 max 可用的值。
+- Token 配额是软上限：准入原子预留，run 未启动时退还，完成后按单次用量结算；中断、失败及缺少 usage 时计入估算，工具停车占用并发槽。冷启动及在途请求仍可能超额。
+
+### Fixed
+
+- 工具续接只采用实际选中会话的停车并发槽，显式其他会话不能绕过单 Key 并发限制。
+- SDK 已派发但被 max-mode 策略拒绝时，取消 run 并清除该 Key 下指向该 agent 的全部会话映射，后续请求重新建会话。
+- 请求和响应日志入库前递归脱敏，遮盖模型字段、上游错误和凭据形状；详细日志在截断前脱敏，仍应谨慎开启以保护普通提示词内容。
+- 测试默认使用假 SDK 和出网守卫；Linux CI 使用空网络命名空间。临时目录检查同样保留守卫，新功能测试结束后回收临时目录。
+
 ## [20261020.1] — 2026-10-20
 
 ### Added
@@ -31,6 +57,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 ### Changed
 
 - **Log redaction (stdout/stderr and the admin system log).** Now readable: token counts under the exact count field names (`input_tokens`, `output_tokens`, `total_tokens`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `cached_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `max_tokens`, `max_output_tokens`, `max_completion_tokens`, `budget_tokens`, `token_count`, `prompt_token_count`, in snake_case, camelCase or kebab-case) when the value is a number or null, and the `*_tokens_details` usage objects when they are plain objects (walked, so their own credential fields are still masked; an array or string there is masked); `api_key_id` and `api_key_name`. The names `key_prefix` and `api_key_prefix` are not treated as credentials, but their values are still scrubbed, so a real 12-character `cgk_…` key prefix is shown as `[redacted]`. Error text whose only credential word is an exact count phrase stays readable only when the phrase is followed by the end of the text, a number or `null` (optionally after `:`/`=`, quotes or closing punctuation, and again followed by one of these), or one of the words `must`, `should`, `cannot`, `exceed(s/ed)`, `limit`, `of`, `maximum`, `is too` (`max_tokens must be …`, `max_tokens: 4096`, `210000 tokens > 200000 maximum`); anything else after the phrase (`max_tokens=9abc`, `max_tokens: 1 abc`, `max_tokens is abc`, a newline, `->`, `(`, `/`) masks the value whole. Still masked: any other field whose name contains `token`, `secret`, `password`, `passwd`, `api_key`, `access_key`, `private_key`, `authorization`, `cookie`, `pepper`, `credential`, `bearer` or `jwt` (camelCase, kebab-case and plural included, e.g. `accessToken`, `refresh_tokens`, `idTokens`), whatever the value type; a count field name with a non-numeric value; string values whose raw text contains `token`, `secret`, `password`, `passwd`, `api_key`, `authorization`, `pepper`, `cookie` or `credential` outside such a count phrase (and a count phrase does not excuse a value that also contains a 16+ character letter-and-digit run). New: the log message is scrubbed too — `Bearer …`, `Basic <base64>`, `cgk_…`, `sk-…`, Cursor session tokens (`user_…::…`), `Authorization: <scheme> …` and `name=value` / `"name":"value"` forms such as `access_token=`, `client_secret:` or `password=` are masked in place. Log messages and string field values longer than 16 384 characters are cut (at a word break, marked `…[truncated]`) before redaction; a cut field value is masked whole when its full original text contains one of the credential words above anywhere, including past the cut (no count-phrase exception). The redaction work is linear in the input size and does not throw on multi-megabyte input. Upstream Cursor error text (`upstream_message` in `cursor run failed`, and the detail appended to gateway error messages, which is also logged as `error_message`) gets the same raw-text check before it is logged or returned: if it contains a credential word, the detail is replaced by `[redacted]`, so clients now see e.g. `Cursor request failed: [redacted]` instead of the scrubbed upstream text. A log line that cannot be serialized (BigInt, circular or throwing fields) is written as `{"message":"[redacted]","log_format_error":true}` instead of throwing.
+- **Request log redaction (`request_logs`, admin log viewer).** `request_detail`, `response_detail` (including the `error_message` snapshot written even with `detailed = false`) and `model` now get the same masking as stdout and the system log before they are stored: bodies are redacted structurally before they are truncated to `detailed_max_bytes`, and `insertRequestLog` masks again as the last step (invalid or truncated JSON is scrubbed as text). Field names are checked too: a name that carries a credential shape, or whitespace plus a credential word (`Bearer token_abc <secret>`, `password <secret>`), is replaced whole by `[redacted]`, so a secret sent as an unknown field name is not kept. Bodies get in-place masking only (no whole-value fallback), so prompts that merely mention a credential word stay readable. The stored `error_message` is the exception: like upstream error text in the system log, it is checked on its raw text and stored as `[redacted]` when it contains a credential word (`Bearer token_abc <secret>`, `password <secret>`). Nested objects and arrays are walked in both sinks (depth-capped, cycle-safe). New shapes masked in place: standalone JWTs, `ghp_…`/`github_pat_…`, `AKIA…`/`ASIA…`, URL userinfo passwords (`https://user:[redacted]@host`), `X-Management-Key: …`, `Cookie:`/`Set-Cookie:` header values, short `Bearer` values with a digit or symbol, JSON-escaped `\n` after `Bearer`/`Authorization:`, prefixed `HTTP_AUTHORIZATION:`/`x_authorization=`, plural and `passphrase`/`admin_key`/`cursor_key` names, and values that only start like `null`/`true`/`[redacted]`. Now readable: `page_token`/`pageToken` cursors, `prompt_cache_key`, `idempotency_key`, `Basic` followed by a short word (`Basic Auth0`), and plural count values such as `max_tokens: 4096`. `*_key` / bare `key` field names are credentials. Existing rows are not rewritten.
 
 ---
 

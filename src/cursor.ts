@@ -13,6 +13,7 @@ import {
   type ModelParameterDefinition,
   type ModelParameterValue,
   type ModelSelection,
+  type ModelVariant,
   type SDKAgent,
   type SDKCustomTool,
   type TokenUsage,
@@ -21,6 +22,8 @@ import type { ModelParam, OpenAiModel, ParsedChatRequest, Usage } from "./contra
 import {
   GatewayError,
   invalidRequest,
+  maxModeNotAllowed,
+  modelNotAllowed,
   modelNotFound,
   rateLimitError,
   conversationBusyError,
@@ -29,7 +32,8 @@ import {
   upstreamTimeout,
   upstreamUnavailable,
 } from "./errors.js";
-import { logError, redactLogText } from "./log.js";
+import { logError, logInfo, logWarn, redactLogText } from "./log.js";
+import { isCatalogModelAllowed } from "./key-policy.js";
 
 const CATALOG_TTL_MS = 60_000;
 const ACCOUNT_TTL_MS = 10 * 60 * 1000;
@@ -92,12 +96,40 @@ export async function getCursorAccount(apiKey: string): Promise<{
   }
 }
 
-export async function validateChatRequestModel(apiKey: string, request: ParsedChatRequest): Promise<void> {
-  await resolveChatModel(apiKey, request);
+/** Per-request (per client key) model policy. */
+export interface ModelSelectionOptions {
+  /** Overrides the gateway-wide `allow_max_mode` when not null/undefined. */
+  allowMaxMode?: boolean | null;
+  /** Client-key allowlist (exact ids or `*` globs); null/undefined = unrestricted. */
+  allowedModels?: string[] | null;
 }
 
-export async function resolveChatModel(apiKey: string, request: ParsedChatRequest): Promise<ModelSelection> {
-  return resolveModelSelection(apiKey, request);
+let gatewayAllowMaxMode = true;
+
+/** Gateway-wide `allow_max_mode` (default true = keep SDK behaviour). */
+export function configureMaxMode(options: { allowMaxMode: boolean }): void {
+  gatewayAllowMaxMode = options.allowMaxMode;
+  if (process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON?.trim()) {
+    logWarn("CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON is set: the SDK resolves models from it, not from the gateway catalog", {
+      allow_max_mode: options.allowMaxMode,
+    });
+  }
+}
+
+export async function validateChatRequestModel(
+  apiKey: string,
+  request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
+): Promise<void> {
+  await resolveChatModel(apiKey, request, options);
+}
+
+export async function resolveChatModel(
+  apiKey: string,
+  request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
+): Promise<ModelSelection> {
+  return resolveModelSelection(apiKey, request, options);
 }
 
 /**
@@ -115,12 +147,15 @@ export async function createLocalChatAgent(options: {
   workspaceDir: string;
   model: ModelSelection;
   customTools?: Record<string, SDKCustomTool>;
+  /** Effective max-mode permission (see `maxModeAllowedFor`); default = gateway flag. */
+  allowMaxMode?: boolean;
 }): Promise<SDKAgent> {
   await mkdir(options.workspaceDir, { recursive: true });
   const hasCustomTools =
     options.customTools !== undefined && Object.keys(options.customTools).length > 0;
+  let agent: SDKAgent;
   try {
-    return await Agent.create({
+    agent = await Agent.create({
       apiKey: options.apiKey,
       model: options.model,
       tools: localChatAgentTools(hasCustomTools),
@@ -133,6 +168,8 @@ export async function createLocalChatAgent(options: {
   } catch (error) {
     throw mapCursorError(error);
   }
+  await guardResolvedMaxMode(agent, options.model, options.allowMaxMode ?? gatewayAllowMaxMode);
+  return agent;
 }
 
 export async function resumeLocalChatAgent(options: {
@@ -141,12 +178,15 @@ export async function resumeLocalChatAgent(options: {
   workspaceDir: string;
   model: ModelSelection;
   customTools?: Record<string, SDKCustomTool>;
+  /** Effective max-mode permission (see `maxModeAllowedFor`); default = gateway flag. */
+  allowMaxMode?: boolean;
 }): Promise<SDKAgent> {
   await mkdir(options.workspaceDir, { recursive: true });
   const hasCustomTools =
     options.customTools !== undefined && Object.keys(options.customTools).length > 0;
+  let agent: SDKAgent;
   try {
-    return await Agent.resume(options.agentId, {
+    agent = await Agent.resume(options.agentId, {
       apiKey: options.apiKey,
       model: options.model,
       tools: localChatAgentTools(hasCustomTools),
@@ -159,6 +199,8 @@ export async function resumeLocalChatAgent(options: {
   } catch (error) {
     throw mapCursorError(error);
   }
+  await guardResolvedMaxMode(agent, options.model, options.allowMaxMode ?? gatewayAllowMaxMode);
+  return agent;
 }
 
 export async function billedUsageOf(agent: SDKAgent): Promise<AgentUsage | undefined> {
@@ -184,23 +226,193 @@ async function loadCatalog(apiKey: string): Promise<ModelListItem[]> {
   }
 }
 
-async function resolveModelSelection(apiKey: string, request: ParsedChatRequest): Promise<ModelSelection> {
+async function resolveModelSelection(
+  apiKey: string,
+  request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
+): Promise<ModelSelection> {
   const catalog = await loadCatalog(apiKey);
-  return resolveCatalogModelSelection(catalog, request);
+  return resolveCatalogModelSelection(catalog, request, options);
 }
 
+/**
+ * Resolves the catalog model and params for a request.
+ *
+ * Max mode: since @cursor/sdk 1.0.38 the SDK itself sets `maxMode: true` whenever `params` is
+ * non-empty and every catalog variant containing all of those params has `isMaxMode`
+ * (`sdkWouldUseMaxMode`). Passing `maxMode: false` does NOT prevent that — the SDK overwrites it —
+ * so the only reliable guard is choosing params that do not trigger the rule. When max mode is
+ * disallowed we therefore:
+ *   1. keep the client's explicit choices (`params`, `variant`, `reasoning_effort`, `fast`, …),
+ *   2. replace the default-variant base with the closest non-max variant consistent with them,
+ *   3. reject with 403 `max_mode_not_allowed` when no such variant exists (max-only models, or the
+ *      client explicitly asked for a max-only variant via `variant` / `params`). Effort (chat
+ *      `reasoning_effort` and Responses / Anthropic hints) is soft: it degrades to the highest
+ *      non-max level, then to the default variant, instead of rejecting.
+ * When the rule fires and max mode is allowed, the selection carries `maxMode: true` explicitly
+ * (same as what the SDK would send) so logs and responses can report it.
+ */
 export function resolveCatalogModelSelection(
   catalog: ModelListItem[],
   request: ParsedChatRequest,
+  options?: ModelSelectionOptions,
 ): ModelSelection {
   const item = findCatalogModel(catalog, request.model);
   if (!item) {
     throw modelNotFound(request.model);
   }
-  return {
-    id: item.id,
-    params: resolveChatParams(item, request),
+  if (!isCatalogModelAllowed({ allowedModels: options?.allowedModels ?? null, allowMaxMode: null }, request.model, item.id)) {
+    throw modelNotAllowed(request.model);
+  }
+  const params = resolveChatParams(item, request);
+  const autoMax = sdkWouldUseMaxMode(item, params);
+  const allowMaxMode = maxModeAllowedFor(options);
+  if (allowMaxMode) {
+    return autoMax ? { id: item.id, params, maxMode: true } : { id: item.id, params };
+  }
+  const hasMaxVariants = (item.variants ?? []).some((variant) => variant.isMaxMode === true);
+  if (!hasMaxVariants || (!autoMax && matchesNonMaxVariant(item, params))) {
+    return { id: item.id, params };
+  }
+  // Max-only combination, or a mix (e.g. max-only context + low effort) that matches no variant:
+  // rebuild from the closest non-max variant instead of guessing how upstream bills it.
+  // Anthropic `output_config.effort` / thinking budgets are soft hints: drop them before rejecting.
+  // Effort (chat `reasoning_effort` and Responses / Anthropic hints alike) is soft here (N2):
+  // degrade to the highest non-max effort level, then drop it, before rejecting.
+  const hasEffort = request.reasoning_effort !== undefined || request.reasoning_effort_hint !== undefined;
+  const top = hasEffort ? highestNonMaxEffort(item) : undefined;
+  const candidates: ParsedChatRequest[] = [request];
+  if (hasEffort) {
+    if (top !== undefined) candidates.push({ ...request, reasoning_effort: undefined, reasoning_effort_hint: top });
+    candidates.push({ ...request, reasoning_effort: undefined, reasoning_effort_hint: undefined });
+  }
+  for (const [index, candidate] of candidates.entries()) {
+    const fallback = nonMaxParams(item, candidate);
+    if (fallback && !sdkWouldUseMaxMode(item, fallback) && maxOnlyParamValues(item, fallback).length === 0) {
+      logInfo("max mode disallowed: using non-max variant", {
+        model: item.id,
+        requested_params: params ?? [],
+        params: fallback,
+        ...(index > 0 ? { softened_effort: request.reasoning_effort ?? request.reasoning_effort_hint, effort: candidate.reasoning_effort_hint ?? null } : {}),
+      });
+      if (index > 0) softenedHints.add(request);
+      return { id: item.id, params: fallback };
+    }
+  }
+  // No non-max fallback. Even when the SDK rule would not fire (the mix matches no variant),
+  // never forward a param value that only max variants carry (e.g. context=1m + effort=low).
+  if (!autoMax && maxOnlyParamValues(item, params).length === 0) return { id: item.id, params };
+  throw maxModeNotAllowed(item.id);
+}
+
+/**
+ * Requests whose soft effort hint (Responses `reasoning.effort`, Anthropic effort / thinking
+ * budget) was dropped to stay off max mode. Read with `wasHintSoftened`.
+ */
+const softenedHints = new WeakSet<ParsedChatRequest>();
+
+export function wasHintSoftened(request: ParsedChatRequest): boolean {
+  return softenedHints.has(request);
+}
+
+/**
+ * Effective max-mode permission: the gateway `allow_max_mode` is a hard ceiling and a key's
+ * `allow_max_mode` can only restrict further (effective = global AND key; key `null` = inherit).
+ */
+export function maxModeAllowedFor(options?: ModelSelectionOptions): boolean {
+  return gatewayAllowMaxMode && options?.allowMaxMode !== false;
+}
+
+/** `(id, value)` pairs from `params` that appear in at least one variant and only in max variants. */
+export function maxOnlyParamValues(model: ModelListItem, params: ModelParameterValue[] | undefined): ModelParameterValue[] {
+  const variants = model.variants ?? [];
+  return (params ?? []).filter((param) => {
+    // Case-insensitive on purpose (second line of defence behind canonical values, C1).
+    const folded = (value: string): string => value.trim().toLowerCase();
+    const carrying = variants.filter((variant) =>
+      variant.params.some((own) => own.id.trim() === param.id.trim() && folded(own.value) === folded(param.value)),
+    );
+    return carrying.length > 0 && carrying.every((variant) => variant.isMaxMode === true);
+  });
+}
+
+/**
+ * Called after `Agent.create` / `Agent.resume` / `send`: the SDK resolves the model against its
+ * own in-process catalog (which can differ from the gateway's: cache age,
+ * CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON, alias collisions). Returns the ACTUAL max-mode flag.
+ */
+export function actualMaxMode(selection: { maxMode?: boolean } | undefined, predicted: boolean): boolean {
+  return selection === undefined ? predicted : selection.maxMode === true;
+}
+
+async function guardResolvedMaxMode(agent: SDKAgent, model: ModelSelection, allowMaxMode: boolean): Promise<void> {
+  if (allowMaxMode || agent.model?.maxMode !== true) return;
+  logWarn("sdk resolved max mode although the gateway selected a non-max variant", {
+    model: model.id,
+    params: model.params ?? [],
+    sdk_model: agent.model.id,
+  });
+  await disposeAgent(agent).catch(() => undefined);
+  throw maxModeNotAllowed(model.id);
+}
+
+function matchesNonMaxVariant(model: ModelListItem, params: ModelParameterValue[] | undefined): boolean {
+  const variants = model.variants ?? [];
+  const ids = new Set(variants.flatMap((variant) => variant.params.map((param) => param.id.trim())));
+  const constraining = (params ?? []).filter((param) => ids.has(param.id.trim()));
+  return variants.some((variant) => variant.isMaxMode !== true && variantContains(variant, constraining));
+}
+
+/** Exact copy of the @cursor/sdk 1.0.38 auto max-mode rule (local-model validation). */
+export function sdkWouldUseMaxMode(model: ModelListItem, params: ModelParameterValue[] | undefined): boolean {
+  const wanted = params ?? [];
+  if (wanted.length === 0) return false;
+  const matching = (model.variants ?? []).filter((variant) => variantContains(variant, wanted));
+  return matching.length > 0 && matching.every((variant) => variant.isMaxMode === true);
+}
+
+function variantContains(variant: ModelVariant, params: ModelParameterValue[]): boolean {
+  return params.every((param) =>
+    variant.params.some((own) => own.id.trim() === param.id.trim() && own.value.trim() === param.value.trim()),
+  );
+}
+
+/**
+ * Params for the closest non-max variant that honours the client's explicit choices, or
+ * undefined when every compatible variant is max-only.
+ */
+function nonMaxParams(model: ModelListItem, request: ParsedChatRequest): ModelParameterValue[] | undefined {
+  const variants = model.variants ?? [];
+  const withoutDefault: ModelListItem = {
+    ...model,
+    variants: variants.map(({ isDefault: _isDefault, ...variant }) => variant),
   };
+  const explicit = resolveChatParams(withoutDefault, request) ?? [];
+  const variantParamIds = new Set(variants.flatMap((variant) => variant.params.map((param) => param.id.trim())));
+  const constraining = explicit.filter((param) => variantParamIds.has(param.id.trim()));
+  const defaults = variants.find((variant) => variant.isDefault === true)?.params ?? [];
+  let best: { variant: ModelVariant; score: number } | undefined;
+  for (const variant of variants) {
+    if (variant.isMaxMode === true || !variantContains(variant, constraining)) continue;
+    const score = variant.params.filter((param) =>
+      defaults.some((own) => own.id.trim() === param.id.trim() && own.value.trim() === param.value.trim()),
+    ).length;
+    // Ties: deterministic, independent of catalog order (lexicographic params signature).
+    if (!best || score > best.score || (score === best.score && variantSignature(variant) < variantSignature(best.variant))) {
+      best = { variant, score };
+    }
+  }
+  if (!best) return undefined;
+  const merged = new Map(best.variant.params.map((param) => [param.id, param.value]));
+  for (const param of explicit) merged.set(param.id, param.value);
+  return [...merged.entries()].map(([id, value]) => ({ id, value }));
+}
+
+function variantSignature(variant: ModelVariant): string {
+  return variant.params
+    .map((param) => `${param.id.trim()}=${param.value.trim()}`)
+    .sort()
+    .join("&");
 }
 
 /** Map OpenAI `variant` / `reasoning_effort` / `fast` onto Cursor catalog params. */
@@ -224,16 +436,13 @@ export function resolveChatParams(
   }
   if (request.params) {
     for (const param of request.params) {
-      if (model) assertAllowedParam(model, param);
-      merged.set(param.id, param.value);
+      // Forward the catalog's canonical value only (C1): `1M` / a display name like "1m context"
+      // must not slip past the case-sensitive max-only checks and the SDK rule.
+      merged.set(param.id, model ? assertAllowedParam(model, param) : param.value);
     }
   }
 
-  applyNamedParam(model, request.model, merged, request.reasoning_effort, {
-    field: "reasoning_effort",
-    ids: ["reasoning_effort", "effort", "reasoning"],
-    displayName: /effort|reasoning|thinking/i,
-  });
+  applyReasoningEffort(model, request.model, merged, request.reasoning_effort);
   if (request.reasoning_effort === undefined && request.reasoning_effort_hint !== undefined && model) {
     applyEffortHint(model, merged, request.reasoning_effort_hint);
   }
@@ -385,6 +594,67 @@ function applyNamedParam(
 }
 
 const EFFORT_RANK = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_OFF = new Set(["none", "off", "minimal"]);
+
+/**
+ * OpenAI `reasoning_effort` (Chat Completions, Responses top level, Messages extension).
+ * A value the model lists is used as is (explicit choice, so max-mode rules still apply);
+ * a standard level the model lacks maps to the nearest one; a model without an effort
+ * control ignores it. Only values that are neither listed nor a standard level are 400.
+ */
+function applyReasoningEffort(
+  model: ModelListItem | undefined,
+  requestedId: string,
+  merged: Map<string, string>,
+  raw: string | undefined,
+): void {
+  if (raw === undefined) return;
+  if (!model) {
+    throw invalidRequest(`Cannot map 'reasoning_effort' because model '${requestedId}' is not in the catalog`);
+  }
+  const wanted = foldKey(raw);
+  const parameter = findParameter(model, { ids: ["reasoning_effort", "effort", "reasoning"], displayName: /effort|reasoning|thinking/i });
+  const exact = parameter?.values.find((value) => foldKey(value.value) === wanted || foldKey(value.displayName ?? "") === wanted);
+  if (parameter && exact) {
+    merged.set(parameter.id, exact.value);
+    return;
+  }
+  if (!EFFORT_RANK.includes(wanted)) {
+    const allowed = parameter ? parameter.values.map((item) => item.value).join(", ") : EFFORT_RANK.join(", ");
+    throw invalidRequest(`Invalid reasoning_effort='${raw}'. Allowed: ${allowed}`);
+  }
+  if (!parameter) return;
+  if (isBooleanParam(parameter)) {
+    const on = !EFFORT_OFF.has(wanted);
+    const value = parameter.values.find((item) => foldKey(item.value) === String(on));
+    // Non-exact mapping never selects a value only max variants carry (N1): only an exact,
+    // explicit request may reach max mode.
+    if (value && !isMaxOnlyValue(model, parameter.id, value.value)) merged.set(parameter.id, value.value);
+    return;
+  }
+  applyEffortHint(model, merged, raw);
+}
+
+/** True when `(id, value)` appears in at least one variant and only in max variants. */
+function isMaxOnlyValue(model: ModelListItem, id: string, value: string): boolean {
+  return maxOnlyParamValues(model, [{ id, value }]).length > 0;
+}
+
+/**
+ * Highest ranked effort value of the model that is not max-only (used when max mode is off and
+ * an effort request would need a max variant), or undefined when there is none.
+ */
+export function highestNonMaxEffort(model: ModelListItem): string | undefined {
+  const parameter = findParameter(model, { ids: ["reasoning_effort", "effort", "reasoning"], displayName: /effort|reasoning|thinking/i });
+  if (!parameter || isBooleanParam(parameter)) return undefined;
+  let best: { value: string; rank: number } | undefined;
+  for (const value of parameter.values) {
+    const rank = EFFORT_RANK.indexOf(foldKey(value.value));
+    if (rank < 0 || isMaxOnlyValue(model, parameter.id, value.value)) continue;
+    if (!best || rank > best.rank) best = { value: value.value, rank };
+  }
+  return best?.value;
+}
 
 export function applyEffortHint(model: ModelListItem, merged: Map<string, string>, hint: string): void {
   const parameter = findParameter(model, { ids: ["reasoning_effort", "effort", "reasoning"], displayName: /effort|reasoning|thinking/i });
@@ -400,7 +670,8 @@ export function applyEffortHint(model: ModelListItem, merged: Map<string, string
   let best: { value: string; distance: number; rank: number } | undefined;
   for (const value of parameter.values) {
     const rank = EFFORT_RANK.indexOf(foldKey(value.value));
-    if (rank < 0) continue;
+    // Nearest match skips values only max variants carry (N1).
+    if (rank < 0 || isMaxOnlyValue(model, parameter.id, value.value)) continue;
     const distance = Math.abs(rank - target);
     if (!best || distance < best.distance || (distance === best.distance && rank < best.rank)) best = { value: value.value, distance, rank };
   }
@@ -418,13 +689,14 @@ function findParameter(
   );
 }
 
-function assertAllowedParam(model: ModelListItem, param: ModelParam): void {
+/** Validates `param` against the catalog and returns its canonical value. */
+function assertAllowedParam(model: ModelListItem, param: ModelParam): string {
   const parameter = model.parameters?.find((item) => item.id === param.id);
   if (!parameter) {
     const allowed = (model.parameters ?? []).map((item) => item.id).join(", ") || "(none)";
     throw invalidRequest(`Unknown param '${param.id}' for model '${model.id}'. Allowed: ${allowed}`);
   }
-  matchParamValue(parameter, param.value);
+  return matchParamValue(parameter, param.value);
 }
 
 function matchParamValue(parameter: ModelParameterDefinition, raw: string): string {
@@ -448,7 +720,7 @@ function findCatalogModel(models: ModelListItem[], id: string): ModelListItem | 
   );
 }
 
-function toOpenAiModel(model: ModelListItem): OpenAiModel {
+export function toOpenAiModel(model: ModelListItem): OpenAiModel {
   const encoded: OpenAiModel = {
     id: model.id,
     object: "model",
@@ -473,6 +745,7 @@ function toOpenAiModel(model: ModelListItem): OpenAiModel {
       display_name: variant.displayName,
       ...(variant.description ? { description: variant.description } : {}),
       ...(variant.isDefault === true ? { is_default: true } : {}),
+      ...(variant.isMaxMode === true ? { is_max_mode: true } : {}),
       params: variant.params,
     }));
   }
@@ -487,17 +760,28 @@ async function readBilledUsage(agent: SDKAgent): Promise<AgentUsage | undefined>
   }
 }
 
+function nonNegative(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
 function toUsage(usage: TokenUsage | undefined): Usage {
   if (!usage) {
     return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   }
+  // SDK `inputTokens` excludes cache reads/writes (its totalTokens = input + output + cacheRead +
+  // cacheWrite). OpenAI's `prompt_tokens` includes cached tokens, so fold them in and keep
+  // total = prompt + completion. Anthropic encoders subtract the cache parts again.
+  const cacheRead = nonNegative(usage.cacheReadTokens);
+  const cacheWrite = nonNegative(usage.cacheWriteTokens);
+  const prompt = nonNegative(usage.inputTokens) + cacheRead + cacheWrite;
+  const completion = nonNegative(usage.outputTokens);
   return {
-    prompt_tokens: usage.inputTokens,
-    completion_tokens: usage.outputTokens,
-    total_tokens: usage.totalTokens,
-    cache_read_tokens: usage.cacheReadTokens,
-    cache_write_tokens: usage.cacheWriteTokens,
-    reasoning_tokens: usage.reasoningTokens,
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    cache_read_tokens: cacheRead,
+    cache_write_tokens: cacheWrite,
+    ...(usage.reasoningTokens !== undefined ? { reasoning_tokens: nonNegative(usage.reasoningTokens) } : {}),
   };
 }
 
@@ -540,6 +824,9 @@ function classifyCursorError(error: unknown): GatewayError {
   }
   if (error instanceof AgentBusyError) return conversationBusyError();
   if (error instanceof ConfigurationError) {
+    // 1.0.38 raises a retryable ConfigurationError when its catalog lookup (max-mode check) fails;
+    // that is a transient upstream problem, not a bad request.
+    if (error.isRetryable) return upstreamUnavailable(withUpstreamDetail("Cursor is temporarily unavailable", error.message));
     return invalidRequest(error.message);
   }
   if (error instanceof CursorSdkError && (error.status === 408 || error.status === 504)) {

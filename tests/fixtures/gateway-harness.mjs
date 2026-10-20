@@ -1,4 +1,5 @@
 // Starts dist/index.js against the fake Cursor SDK with a throwaway data dir and client key.
+// The data dir is deleted by stop() (or on a failed start) only after the gateway process exits.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -6,10 +7,12 @@ import { mkdtempSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeTempDir } from "./temp-dir.mjs";
 
 export const CLIENT_KEY = "cgk_integration_test_key";
 
-export async function startFakeGateway(extraEnv = {}) {
+/** `options.keyPolicy` seeds per-key policy columns (allowed_models, quota_requests, ...) on the client key. */
+export async function startFakeGateway(extraEnv = {}, options = {}) {
   const { digestClientKey } = await import("../../dist/auth.js");
   const { insertApiKey, openDb } = await import("../../dist/db.js");
   const dataDir = mkdtempSync(join(tmpdir(), "cursor-api-it-"));
@@ -23,6 +26,7 @@ export async function startFakeGateway(extraEnv = {}) {
     key_digest: digestClientKey(pepper, CLIENT_KEY),
     created_at: now,
     updated_at: now,
+    ...(options.keyPolicy ?? {}),
   });
   db.close();
 
@@ -33,7 +37,7 @@ export async function startFakeGateway(extraEnv = {}) {
     ["--import", join(import.meta.dirname, "register-fake-sdk.mjs"), "dist/index.js"],
     {
       cwd: root,
-      env: {
+      env: guardedEnv({
         ...process.env,
         NODE_ENV: "production",
         DATA_DIR: dataDir,
@@ -44,7 +48,7 @@ export async function startFakeGateway(extraEnv = {}) {
         GATEWAY_HOST: "127.0.0.1",
         GATEWAY_PORT: String(port),
         ...extraEnv,
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -55,23 +59,44 @@ export async function startFakeGateway(extraEnv = {}) {
   child.stdout.on("data", (chunk) => (output += chunk));
   child.stderr.on("data", (chunk) => (output += chunk));
 
-  const started = Date.now();
-  while (!output.includes('"message":"gateway listening"')) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(`gateway exited before ready:\n${output}`);
+  const stopChild = async () => {
+    try {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await exited;
+    } finally {
+      removeTempDir(dataDir);
     }
-    if (Date.now() - started > 5_000) throw new Error(`gateway did not become ready:\n${output}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+  };
+
+  const started = Date.now();
+  try {
+    while (!output.includes('"message":"gateway listening"')) {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`gateway exited before ready:\n${output}`);
+      }
+      if (Date.now() - started > 5_000) throw new Error(`gateway did not become ready:\n${output}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } catch (error) {
+    await stopChild();
+    throw error;
   }
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
+    dataDir,
     output: () => output,
-    async stop() {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      await exited;
-    },
+    stop: stopChild,
   };
+}
+
+/** The gateway child must inherit the no-network guard whenever this process runs under it (SAF-102). */
+function guardedEnv(env) {
+  if (process.env.CURSOR_API_NETGUARD_LOG) {
+    assert.match(env.NODE_OPTIONS ?? "", /no-network\.mjs/, "gateway child would run without the network guard");
+    assert.equal(env.CURSOR_API_NETGUARD_LOG, process.env.CURSOR_API_NETGUARD_LOG);
+  }
+  return env;
 }
 
 /** Parses an SSE body into [{event, data}] frames. */

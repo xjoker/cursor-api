@@ -40,6 +40,11 @@ api_key_pepper = ""
 # max_live_sessions = 256        # running + parked Cursor sessions kept in memory
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
+# enforce_output_limits = false  # true: enforce max_tokens / stop at the gateway (cut + cancel the run)
+# history_resume = false  # opt-in: no conversation_id → resume the previous agent when the history hash matches
+# allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
+# quota_cache_read_weight = 1.0  # 0..1: how much a cache-read token counts toward per-key token quotas
+# quota_reserve_recent_runs = 20 # quota_tokens reservation >= average of the key's last N runs; 0 = input estimate only
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
 # auth_failure_limit = 20        # failed auth attempts per address per minute; 0 = off
 # cors_allow_origins = "*"       # comma-separated HTTP origins; empty disables CORS
@@ -165,6 +170,27 @@ export function loadConfig(
     ignoreSamplingParams: parseBoolean(
       pickConfigured(env, "IGNORE_SAMPLING_PARAMS", boolToString(tomlBool(toml, "ignore_sampling_params")), "ignore_sampling_params"),
       false,
+    ),
+    historyResume: parseBoolean(
+      pickConfigured(env, "HISTORY_RESUME", boolToString(tomlBool(toml, "history_resume")), "history_resume"),
+      false,
+    ),
+    enforceOutputLimits: parseBoolean(
+      pickConfigured(env, "ENFORCE_OUTPUT_LIMITS", boolToString(tomlBool(toml, "enforce_output_limits")), "enforce_output_limits"),
+      false,
+    ),
+    allowMaxMode: parseBoolean(
+      pickConfigured(env, "ALLOW_MAX_MODE", boolToString(tomlBool(toml, "allow_max_mode")), "allow_max_mode"),
+      true,
+    ),
+    quotaCacheReadWeight: parseWeight(
+      pickConfigured(env, "QUOTA_CACHE_READ_WEIGHT", tomlWeight(toml, "quota_cache_read_weight"), "quota_cache_read_weight"),
+      1,
+    ),
+    quotaReserveRecentRuns: parseOptionalInterval(
+      pickConfigured(env, "QUOTA_RESERVE_RECENT_RUNS", intToString(tomlInt(toml, "quota_reserve_recent_runs")), "quota_reserve_recent_runs"),
+      20,
+      { min: 1, max: 1000 },
     ),
     sseKeepaliveMs: parseOptionalInterval(
       pickConfigured(env, "SSE_KEEPALIVE_MS", intToString(tomlInt(toml, "sse_keepalive_ms")), "sse_keepalive_ms"),
@@ -395,6 +421,17 @@ function parseOptionalInterval(
   return parseBoundedInt(configured, fallback, bounds);
 }
 
+/** A decimal weight in [0, 1]. */
+function parseWeight(configured: { value: string | undefined; source: string }, fallback: number): number {
+  const trimmed = optionalTrimmed(configured.value);
+  if (trimmed === undefined) return fallback;
+  const parsed = /^\d+(\.\d+)?$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error(`${configured.source} must be a number between 0 and 1 (got ${JSON.stringify(trimmed)})`);
+  }
+  return parsed;
+}
+
 function parseBoolean(
   configured: { value: string | undefined; source: string },
   fallback: boolean,
@@ -439,19 +476,22 @@ function tomlBool(table: TomlTable, key: string): boolean | undefined {
 }
 
 function tomlInt(table: TomlTable, key: string): number | undefined {
-  const direct = scalarToNumber(table[key]);
+  const direct = scalarToNumber(table[key], key);
   if (direct !== undefined) return direct;
   for (const value of Object.values(table)) {
     if (value && typeof value === "object") {
-      const nested = scalarToNumber(value[key] as string | number | TomlTable | undefined);
+      const nested = scalarToNumber(value[key] as string | number | TomlTable | undefined, key);
       if (nested !== undefined) return nested;
     }
   }
   return undefined;
 }
 
-function scalarToNumber(value: string | number | boolean | TomlTable | undefined): number | undefined {
+function scalarToNumber(value: string | number | boolean | TomlTable | undefined, key: string): number | undefined {
   if (typeof value === "boolean") return undefined;
+  if (typeof value === "string" && /^\d+\.\d+$/.test(value.trim())) {
+    throw new Error(`${key} must be an integer (got ${value.trim()})`);
+  }
   if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   if (typeof value === "string" && /^[1-9]\d*$|^0$/.test(value)) return Number(value);
   return undefined;
@@ -504,6 +544,13 @@ function readTomlFile(file: string): TomlTable {
     throw new Error(`Cannot read ${file}: ${errorText(error)}`);
   }
   return parseToml(text, file);
+}
+
+/** Decimal TOML value as text; a boolean is a config error, not "unset" (N4). */
+function tomlWeight(table: TomlTable, key: string): string | undefined {
+  const values = [table[key], ...Object.values(table).map((value) => (value && typeof value === "object" ? value[key] : undefined))];
+  if (values.some((value) => typeof value === "boolean")) throw new Error(`${key} must be a number between 0 and 1`);
+  return tomlString(table, key);
 }
 
 function tomlString(table: TomlTable, key: string): string | undefined {
@@ -585,6 +632,11 @@ function parseTomlScalar(raw: string, source: string, lineNo: string | number): 
   }
   if (/^[1-9]\d*$|^0$/.test(raw)) {
     return Number(raw);
+  }
+  // Plain decimal floats (e.g. quota_cache_read_weight = 0.1) stay strings, so integer keys can
+  // reject them at startup (N4) and decimal keys parse them themselves.
+  if (/^(0|[1-9]\d*)\.\d+$/.test(raw)) {
+    return raw;
   }
   throw new Error(`Invalid TOML value in ${source}:${lineNo}`);
 }

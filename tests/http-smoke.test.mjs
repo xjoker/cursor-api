@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
-test("HTTP smoke covers health and client/admin authentication boundaries", { timeout: 10_000 }, async () => {
+test("HTTP smoke covers health and client/admin authentication boundaries", { timeout: 10_000 }, async (context) => {
   const { digestClientKey } = await import("../dist/auth.js");
   const { disableApiKey, insertApiKey, openDb } = await import("../dist/db.js");
-  const dataDir = mkdtempSync(join(tmpdir(), "cursor-api-http-"));
+  const dataDir = makeTempDir(context, "cursor-api-http-");
   const workspaceDir = join(dataDir, "workspace");
   const pepper = "test-pepper";
   const disabledKey = "cgk_disabled_test_key";
@@ -28,7 +27,8 @@ test("HTTP smoke covers health and client/admin authentication boundaries", { ti
   db.close();
 
   const port = await reservePort();
-  const child = spawn(process.execPath, ["dist/index.js"], {
+  // Fake SDK: the smoke test must never reach api.cursor.com / api2.cursor.sh (startup warm-up).
+  const child = spawn(process.execPath, ["--import", join(import.meta.dirname, "fixtures", "register-fake-sdk.mjs"), "dist/index.js"], {
     cwd: join(import.meta.dirname, ".."),
     env: {
       ...process.env,

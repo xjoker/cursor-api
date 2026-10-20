@@ -4,6 +4,16 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import path from "node:path";
 import { handleAdminRequest } from "./admin.js";
 import { requireClientKey } from "./auth.js";
+import {
+  admitKeyRequest,
+  configureQuota,
+  configureQuotaReserve,
+  isListedModelAllowed,
+  keyModelPolicy,
+  needsModelPrecheck,
+  reservationFor,
+  type KeyTicket,
+} from "./key-policy.js";
 import { configureAuthThrottle } from "./auth-throttle.js";
 import { loadConfig } from "./config.js";
 import { resolveModelAlias } from "./model-alias.js";
@@ -35,7 +45,7 @@ import {
   newAnthropicMessageId,
   parseAnthropicMessagesRequest,
 } from "./anthropic.js";
-import { logError, logInfo, setSystemLogWriter, truncateUtf8 } from "./log.js";
+import { logError, logInfo, redactLogText, redactValue, setSystemLogWriter, truncateUtf8 } from "./log.js";
 import {
   encodeNonStreamCompletion,
   encodeStreamChunk,
@@ -46,15 +56,27 @@ import {
   parseResponsesRequest,
   ResponsesStreamWriter,
 } from "./responses.js";
-import { getCursorModel, listCursorModels, runFailureError, warmCursorAccount } from "./cursor.js";
+import { getStoredResponse, storeResponse } from "./response-store.js";
+import { clientFinishReason } from "./output-limits.js";
+import { configureHistoryResume } from "./history-resume.js";
+import {
+  configureMaxMode,
+  getCursorModel,
+  listCursorModels,
+  runFailureError,
+  validateChatRequestModel,
+  warmCursorAccount,
+  type ModelSelectionOptions,
+} from "./cursor.js";
 import {
   aliasLiveConversation,
   configureSessionLimits,
+  resumesParkedTurn,
   runChatTurn,
   startSessionSweeper,
   validateChatTurnRequest,
 } from "./session.js";
-import type { AppConfig, CursorChatResult, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
+import type { ApiKeyRow, AppConfig, CursorChatResult, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
 
 let config: AppConfig;
 try {
@@ -66,6 +88,9 @@ try {
 }
 
 configureSse({ keepaliveMs: config.sseKeepaliveMs });
+configureMaxMode({ allowMaxMode: config.allowMaxMode });
+configureQuota({ cacheReadWeight: config.quotaCacheReadWeight });
+configureQuotaReserve({ recentRuns: config.quotaReserveRecentRuns });
 try {
   configureAuthThrottle(config.authFailureLimit, { trustedProxies: config.trustedProxies });
 } catch (error) {
@@ -91,6 +116,7 @@ const db = openDb(config.dataDir, {
   maxDetailBytes: config.logMaxDetailBytes,
 });
 configureSessionLimits({ maxLiveSessions: config.maxLiveSessions });
+configureHistoryResume({ enabled: config.historyResume });
 startSessionSweeper({ db, conversationTtlDays: config.conversationTtlDays });
 setSystemLogWriter((entry) => {
   insertSystemLog(db, entry);
@@ -158,6 +184,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           base_url: "/v1",
           chat_completions: "POST /v1/chat/completions",
           responses: "POST /v1/responses",
+          response: "GET /v1/responses/{id} (in-memory, 1h)",
           messages: "POST /v1/messages (Anthropic)",
           count_tokens: "POST /v1/messages/count_tokens (estimate)",
           models: "GET /v1/models",
@@ -207,7 +234,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     if (req.method === "GET" && url.pathname === "/v1/models") {
       const key = requireClientKey(req, db, config.apiKeyPepper);
-      const models = await keyPool.run((apiKey) => listCursorModels(apiKey));
+      const policy = keyModelPolicy(key);
+      const models = (await keyPool.run((apiKey) => listCursorModels(apiKey))).filter((model) =>
+        isListedModelAllowed(policy, model),
+      );
       logInfo("models listed", { api_key_id: key.id, count: models.length });
       sendJson(res, 200, { object: "list", data: models }, cors);
       return;
@@ -220,7 +250,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         throw modelNotFound(id);
       }
       const model = await keyPool.run((apiKey) => getCursorModel(apiKey, id));
-      if (!model) {
+      if (!model || !isListedModelAllowed(keyModelPolicy(key), model)) {
         throw modelNotFound(id);
       }
       sendJson(res, 200, model, cors);
@@ -244,6 +274,22 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     if (req.method === "POST" && url.pathname === "/v1/responses") {
       await handleResponses(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/v1/responses/")) {
+      const key = requireClientKey(req, db, config.apiKeyPepper);
+      let id: string;
+      try {
+        id = decodeURIComponent(url.pathname.slice("/v1/responses/".length));
+      } catch {
+        throw new GatewayError(400, "invalid_request", "Malformed response id in path", "invalid_request_error");
+      }
+      const stored = id === "" || id.includes("/") ? undefined : getStoredResponse(key.id, id);
+      if (!stored) {
+        throw new GatewayError(404, "not_found", `Response '${id}' not found`, "invalid_request_error");
+      }
+      sendJson(res, 200, stored, cors);
       return;
     }
 
@@ -281,16 +327,22 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let requestDetail: string | null = null;
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
+  let ticket: KeyTicket | undefined;
+  let maxDispatched = false;
 
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
-    const parsed = parseChatCompletionsRequest(body, { ignoreSamplingParams: config.ignoreSamplingParams });
+    const parsed = parseChatCompletionsRequest(body, {
+      ignoreSamplingParams: config.ignoreSamplingParams,
+      enforceOutputLimits: config.enforceOutputLimits,
+    });
     parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
     validateChatTurnRequest(parsed);
+    ticket = await admitTurn(key, parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
@@ -390,6 +442,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
+        modelPolicy: modelOptionsFor(key),
+        onUpstreamStarted: () => ticket?.markStarted(),
       });
       upstreamMs = Date.now() - upstreamStarted;
       chatResult = result;
@@ -421,7 +475,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
 
       const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+      const finishReason = clientFinishReason(result);
 
       if (parsed.stream) {
         await writeSse(
@@ -474,6 +528,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
     errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
@@ -490,6 +545,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       res.end();
     }
   } finally {
+    ticket?.finish(chatResult);
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
     responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
@@ -513,6 +569,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
+      max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("chat completed", {
       request_id: requestId,
@@ -528,6 +585,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
+      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -566,17 +624,20 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   let requestDetail: string | null = null;
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
+  let ticket: KeyTicket | undefined;
+  let maxDispatched = false;
   let writer: AnthropicStreamWriter | undefined;
 
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
-    const parsed = parseAnthropicMessagesRequest(body);
+    const parsed = parseAnthropicMessagesRequest(body, { enforceOutputLimits: config.enforceOutputLimits });
     parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
     validateChatTurnRequest(parsed);
+    ticket = await admitTurn(key, parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
@@ -631,6 +692,8 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
+        modelPolicy: modelOptionsFor(key),
+        onUpstreamStarted: () => ticket?.markStarted(),
       });
       upstreamMs = Date.now() - upstreamStarted;
       chatResult = result;
@@ -652,13 +715,14 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       }
 
       const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+      const finishReason = clientFinishReason(result);
 
       if (parsed.stream) {
         await writer?.complete({
           content: result.text,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
           finish_reason: finishReason,
+          ...(result.stop_sequence !== undefined ? { stop_sequence: result.stop_sequence } : {}),
           usage: result.usageKnown ? result.usage : null,
         });
         res.end();
@@ -675,6 +739,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
             params: result.params,
             tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
             finish_reason: finishReason,
+            ...(result.stop_sequence !== undefined ? { stop_sequence: result.stop_sequence } : {}),
             ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
           }),
           { "x-request-id": requestId, "request-id": requestId, ...headers },
@@ -687,6 +752,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
     errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendAnthropicError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
@@ -695,6 +761,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       res.end();
     }
   } finally {
+    ticket?.finish(chatResult);
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
     responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
@@ -718,6 +785,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
+      max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("messages completed", {
       request_id: requestId,
@@ -733,6 +801,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
+      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -755,13 +824,16 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   let requestDetail: string | null = null;
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
+  let ticket: KeyTicket | undefined;
+  let maxDispatched = false;
   let writer: ResponsesStreamWriter | undefined;
 
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
-    const parsed = parseResponsesRequest(body);
+    const parsed = parseResponsesRequest(body, { enforceOutputLimits: config.enforceOutputLimits });
+    const keepResponse = !(typeof body === "object" && body !== null && (body as { store?: unknown }).store === false);
     parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
@@ -771,6 +843,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       parsed.conversation_id_generated = true;
     }
     validateChatTurnRequest(parsed);
+    ticket = await admitTurn(key, parsed);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
@@ -835,6 +908,8 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         sink,
         parkTimeoutMs: config.parkTimeoutMs,
         db,
+        modelPolicy: modelOptionsFor(key),
+        onUpstreamStarted: () => ticket?.markStarted(),
       });
       rememberResponseChain(key.id, resumeId, requestId);
       upstreamMs = Date.now() - upstreamStarted;
@@ -868,10 +943,10 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       }
 
       const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+      const finishReason = clientFinishReason(result);
 
       if (parsed.stream) {
-        await writer?.complete({
+        const final = await writer?.complete({
           content: result.text,
           usage: result.usageKnown ? result.usage : null,
           cost: result.cost,
@@ -880,26 +955,24 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
           reasoning_content: result.reasoning,
           finish_reason: finishReason,
         });
+        if (final && keepResponse) storeResponse(key.id, final);
         res.end();
       } else {
-        sendJson(
-          res,
-          200,
-          encodeNonStreamResponse({
-            id: requestId,
-            created,
-            model: parsed.model,
-            content: result.text,
-            usage: result.usageKnown ? result.usage : null,
-            cost: result.cost,
-            params: result.params,
-            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-            finish_reason: finishReason,
-            customToolNames,
-            ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
-          }),
-          { "x-request-id": requestId, ...headers },
-        );
+        const final = encodeNonStreamResponse({
+          id: requestId,
+          created,
+          model: parsed.model,
+          content: result.text,
+          usage: result.usageKnown ? result.usage : null,
+          cost: result.cost,
+          params: result.params,
+          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+          finish_reason: finishReason,
+          customToolNames,
+          ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
+        });
+        if (keepResponse) storeResponse(key.id, final);
+        sendJson(res, 200, final, { "x-request-id": requestId, ...headers });
       }
     } finally {
       req.off("close", onClose);
@@ -908,6 +981,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
     errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
@@ -921,6 +995,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       res.end();
     }
   } finally {
+    ticket?.finish(chatResult);
     const durationMs = Date.now() - started;
     const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
     responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
@@ -944,6 +1019,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
+      max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("responses completed", {
       request_id: requestId,
@@ -959,6 +1035,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
+      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -975,7 +1052,7 @@ function rememberResponseChain(apiKeyId: string, resumeId: string | undefined, r
 }
 
 function buildRequestDetail(parsed: ParsedChatRequest): string {
-  return JSON.stringify({
+  return stringifyRedacted({
     model: parsed.model,
     stream: parsed.stream,
     messages: parsed.messages,
@@ -990,7 +1067,7 @@ function buildRequestDetail(parsed: ParsedChatRequest): string {
 
 function snapshotIncomingBody(body: unknown): string | null {
   if (!config.logDetailed) return null;
-  return truncateUtf8(JSON.stringify(body), config.logDetailedMaxBytes);
+  return truncateUtf8(stringifyRedacted(body), config.logDetailedMaxBytes);
 }
 
 function snapshotResponseDetail(
@@ -1005,10 +1082,10 @@ function snapshotResponseDetail(
     );
   }
   if (!errorCode) return null;
-  return JSON.stringify({
+  return stringifyRedacted({
     status: "error",
     error_code: errorCode,
-    ...(errorMessage ? { error_message: errorMessage } : {}),
+    ...(errorMessage ? { error_message: redactLogText(errorMessage) } : {}),
   });
 }
 
@@ -1017,7 +1094,7 @@ function buildResponseDetail(
   errorCode: string | null,
   errorMessage: string | null,
 ): string {
-  return JSON.stringify({
+  return stringifyRedacted({
     status: result?.status ?? (errorCode ? "error" : "unknown"),
     text: result?.text ?? "",
     usage: result?.usageKnown ? result.usage : null,
@@ -1025,8 +1102,44 @@ function buildResponseDetail(
     finish_reason: result?.finish_reason ?? null,
     tool_calls: result?.tool_calls?.map((call) => call.name) ?? null,
     error_code: errorCode,
-    ...(errorMessage ? { error_message: errorMessage } : {}),
+    ...(errorMessage ? { error_message: redactLogText(errorMessage) } : {}),
   });
+}
+
+function modelOptionsFor(key: ApiKeyRow): ModelSelectionOptions {
+  return { allowedModels: key.allowed_models, allowMaxMode: key.allow_max_mode };
+}
+
+/**
+ * Per-key gate before any upstream run: keys with a model / quota policy resolve the model first
+ * (403 model_not_allowed / max_mode_not_allowed and 404 win over 429, nothing is pre-charged), then
+ * the request is admitted (concurrency slot + atomic request pre-charge). Unrestricted keys skip both.
+ */
+async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<KeyTicket> {
+  if (needsModelPrecheck(key)) {
+    await keyPool.run((apiKey) => validateChatRequestModel(apiKey, request, modelOptionsFor(key)), undefined, {
+      record: false,
+    });
+  }
+  return admitKeyRequest(db, key, Date.now(), {
+    reserveTokens: reservationFor(request, key.id),
+    resumesParked: resumesParkedTurn(key.id, request),
+  });
+}
+
+/**
+ * 1 / 0 when a run happened, null when the request never reached a run. A send-stage max-mode
+ * block (the max run was already sent, then cancelled) logs 1.
+ */
+function maxModeOf(result: CursorChatResult | null, dispatched = false): number | null {
+  if (dispatched) return 1;
+  if (!result) return null;
+  return result.max_mode === true ? 1 : 0;
+}
+
+/** Redact before truncating so a cut can't leave a partial secret that the patterns no longer match. */
+function stringifyRedacted(value: unknown): string {
+  return JSON.stringify(redactValue(value));
 }
 
 function peekModel(body: unknown): string {

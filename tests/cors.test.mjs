@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { corsHeaders } from "../dist/http.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 test("CORS allows wildcard, exact origins, or no browser origins", () => {
   const req = { headers: { origin: "https://client.example" } };
@@ -17,8 +17,8 @@ test("CORS allows wildcard, exact origins, or no browser origins", () => {
   assert.deepEqual(corsHeaders(req, []), {});
 });
 
-test("CORS config validates origins and respects an explicitly empty environment override", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-cors-"));
+test("CORS config validates origins and respects an explicitly empty environment override", (context) => {
+  const root = makeTempDir(context, "cursor-api-cors-");
   mkdirSync(join(root, "data/config"), { recursive: true });
   writeFileSync(join(root, "data/config/gateway.toml"), [
     'cursor_api_key = "test"', 'admin_access_key = "test"', 'api_key_pepper = "test"',

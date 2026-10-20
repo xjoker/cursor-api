@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
@@ -11,9 +10,10 @@ import {
   parseResponsesRequest,
   ResponsesStreamWriter,
 } from "../dist/responses.js";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
-test("TOML trailing comments and hashes inside strings are valid", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-toml-"));
+test("TOML trailing comments and hashes inside strings are valid", (context) => {
+  const root = makeTempDir(context, "cursor-api-toml-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   writeFileSync(
     join(root, "data", "config", "gateway.toml"),
@@ -33,8 +33,8 @@ test("TOML trailing comments and hashes inside strings are valid", () => {
   assert.equal(cfg.cursorApiKey, "ab#cd");
 });
 
-test("only production bootstraps a missing gateway.toml", () => {
-  const productionRoot = mkdtempSync(join(tmpdir(), "cursor-api-bootstrap-"));
+test("only production bootstraps a missing gateway.toml", (context) => {
+  const productionRoot = makeTempDir(context, "cursor-api-bootstrap-");
   const productionPath = join(productionRoot, "data", "config", "gateway.toml");
   assert.equal(existsSync(productionPath), false);
   assert.throws(
@@ -45,7 +45,7 @@ test("only production bootstraps a missing gateway.toml", () => {
   const text = readFileSync(productionPath, "utf8");
   assert.match(text, /cursor_api_key = ""/);
 
-  const developmentRoot = mkdtempSync(join(tmpdir(), "cursor-api-no-bootstrap-"));
+  const developmentRoot = makeTempDir(context, "cursor-api-no-bootstrap-");
   const developmentPath = join(developmentRoot, "data", "config", "gateway.toml");
   assert.throws(
     () => loadConfig({ DATA_DIR: "data" }, developmentRoot),
@@ -54,7 +54,7 @@ test("only production bootstraps a missing gateway.toml", () => {
   assert.equal(existsSync(developmentPath), false);
 });
 
-test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 127.0.0.1", () => {
+test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 127.0.0.1", (context) => {
   const load = (env, root) => {
     const warnings = [];
     const cfg = loadConfig({ DATA_DIR: "data", ...env }, root, (message, fields) => warnings.push({ message, fields }));
@@ -62,7 +62,7 @@ test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 
   };
 
   // No TOML host.
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-host-default-"));
+  const root = makeTempDir(context, "cursor-api-host-default-");
   writeGatewayConfig(root);
   assert.equal(load({}, root).host, "127.0.0.1");
   assert.equal(load({ NODE_ENV: "production" }, root).host, "127.0.0.1");
@@ -72,7 +72,7 @@ test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 
 
   // TOML host beats the container default (GATEWAY_DEFAULT_HOST) in both directions.
   for (const tomlHost of ["127.0.0.1", "::", "0.0.0.0"]) {
-    const tomlRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-toml-"));
+    const tomlRoot = makeTempDir(context, "cursor-api-host-toml-");
     writeGatewayConfig(tomlRoot, [`host = "${tomlHost}"`]);
     assert.deepEqual(
       load({ NODE_ENV: "production", GATEWAY_DEFAULT_HOST: "0.0.0.0" }, tomlRoot),
@@ -83,7 +83,7 @@ test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 
   }
 
   // Explicit GATEWAY_HOST beats TOML and warns when it changes the configured value.
-  const loopRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-override-"));
+  const loopRoot = makeTempDir(context, "cursor-api-host-override-");
   writeGatewayConfig(loopRoot, ['host = "127.0.0.1"']);
   const overridden = load({ GATEWAY_HOST: "0.0.0.0", GATEWAY_DEFAULT_HOST: "0.0.0.0" }, loopRoot);
   assert.equal(overridden.host, "0.0.0.0");
@@ -94,7 +94,7 @@ test("listen host precedence: GATEWAY_HOST > TOML host > GATEWAY_DEFAULT_HOST > 
   assert.deepEqual(load({ GATEWAY_HOST: " 127.0.0.1 " }, loopRoot), { host: "127.0.0.1", warnings: [] });
 
   // The auto-created config must not pin a host, so the container default applies.
-  const bootRoot = mkdtempSync(join(tmpdir(), "cursor-api-host-bootstrap-"));
+  const bootRoot = makeTempDir(context, "cursor-api-host-bootstrap-");
   assert.throws(() => loadConfig({ NODE_ENV: "production", DATA_DIR: "data" }, bootRoot));
   const template = readFileSync(join(bootRoot, "data", "config", "gateway.toml"), "utf8");
   assert.doesNotMatch(template, /^\s*host\s*=/m);
@@ -141,15 +141,15 @@ function runtimeStageEnv(dockerfile) {
   return env;
 }
 
-test("log policy applies defaults and TOML overrides, then rejects an invalid env override", () => {
-  const defaultRoot = mkdtempSync(join(tmpdir(), "cursor-api-log-defaults-"));
+test("log policy applies defaults and TOML overrides, then rejects an invalid env override", (context) => {
+  const defaultRoot = makeTempDir(context, "cursor-api-log-defaults-");
   writeGatewayConfig(defaultRoot);
   const defaults = loadConfig({ DATA_DIR: "data" }, defaultRoot);
   assert.equal(defaults.logRetentionDays, 7);
   assert.equal(defaults.logDetailed, false);
   assert.equal(defaults.logMaxDetailBytes, 268_435_456);
 
-  const overrideRoot = mkdtempSync(join(tmpdir(), "cursor-api-log-overrides-"));
+  const overrideRoot = makeTempDir(context, "cursor-api-log-overrides-");
   writeGatewayConfig(overrideRoot, [
     "[logs]",
     "retention_days = 7",
@@ -182,9 +182,9 @@ function writeGatewayConfig(root, extraLines = []) {
   );
 }
 
-test("request logs are pruned to max_rows", async () => {
+test("request logs are pruned to max_rows", async (context) => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-prune-"));
+  const root = makeTempDir(context, "cursor-api-prune-");
   const db = openDb(root, { retentionDays: 30, maxRows: 2, maxDetailBytes: 268_435_456 });
   const now = new Date().toISOString();
   insertApiKey(db, {
@@ -229,9 +229,9 @@ test("request logs are pruned to max_rows", async () => {
   );
 });
 
-test("max_detail_bytes counts UTF-8 bytes instead of characters", async () => {
+test("max_detail_bytes counts UTF-8 bytes instead of characters", async (context) => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-detail-utf8-"));
+  const root = makeTempDir(context, "cursor-api-detail-utf8-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 100 });
   insertApiKey(db, seedKey("key-1"));
   for (let i = 0; i < 2; i += 1) {
@@ -246,9 +246,9 @@ test("max_detail_bytes counts UTF-8 bytes instead of characters", async () => {
   assert.equal(logs[0]?.id, "req-utf8-1");
 });
 
-test("request logs are pruned when model bytes exceed max_detail_bytes", async () => {
+test("request logs are pruned when model bytes exceed max_detail_bytes", async (context) => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-model-cap-"));
+  const root = makeTempDir(context, "cursor-api-model-cap-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 80 });
   const now = new Date().toISOString();
   insertApiKey(db, {
@@ -287,9 +287,9 @@ test("request logs are pruned when model bytes exceed max_detail_bytes", async (
   assert.equal(logs[0]?.id, "req-3");
 });
 
-test("request log byte cap uses UTF-8 bytes not character length", async () => {
+test("request log byte cap uses UTF-8 bytes not character length", async (context) => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-utf8-cap-"));
+  const root = makeTempDir(context, "cursor-api-utf8-cap-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 200 });
   const now = new Date().toISOString();
   insertApiKey(db, {
@@ -331,10 +331,10 @@ test("request log byte cap uses UTF-8 bytes not character length", async () => {
   assert.equal(logs[0]?.id, "req-1");
 });
 
-test("insertRequestLog truncates oversized model before persist", async () => {
+test("insertRequestLog truncates oversized model before persist", async (context) => {
   const { openDb, insertApiKey, insertRequestLog, listRequestLogs, MAX_LOG_MODEL_BYTES } =
     await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-model-trunc-"));
+  const root = makeTempDir(context, "cursor-api-model-trunc-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 268_435_456 });
   const now = new Date().toISOString();
   insertApiKey(db, {
@@ -371,9 +371,9 @@ test("insertRequestLog truncates oversized model before persist", async () => {
   assert.notEqual(logs[0]?.model?.length, 10_000);
 });
 
-test("sqlite database file is owner-readable only when chmod works", async () => {
+test("sqlite database file is owner-readable only when chmod works", async (context) => {
   const { openDb } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-chmod-"));
+  const root = makeTempDir(context, "cursor-api-chmod-");
   openDb(root, { retentionDays: 7, maxRows: 1000, maxDetailBytes: 1_048_576 });
   const mode = statSync(join(root, "cursor-api.sqlite")).mode & 0o777;
   assert.equal(mode, 0o600);
@@ -968,8 +968,8 @@ test("parked-session routing honors explicit IDs and image identity", async () =
   assert.notEqual(hashMessages(first), hashMessages(second));
 });
 
-test("configuration reads park timeout and gives GIT_COMMIT env precedence", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-park-"));
+test("configuration reads park timeout and gives GIT_COMMIT env precedence", (context) => {
+  const root = makeTempDir(context, "cursor-api-park-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   mkdirSync(join(root, ".git", "refs", "heads"), { recursive: true });
   writeFileSync(
@@ -1007,7 +1007,7 @@ test("agent creation grants only MCP when client tools are present", async (cont
     calls.push(options);
     return { agentId: `agent-${calls.length}` };
   });
-  const workspaceDir = mkdtempSync(join(tmpdir(), "cursor-api-agent-tools-"));
+  const workspaceDir = makeTempDir(context, "cursor-api-agent-tools-");
   const base = { apiKey: "test-key", workspaceDir, model: { id: "grok-4.5" } };
 
   await createLocalChatAgent(base);
@@ -1227,7 +1227,7 @@ function seedLog(overrides) {
   };
 }
 
-test("conversation mappings update and key deletion retains audit logs", async () => {
+test("conversation mappings update and key deletion retains audit logs", async (context) => {
   const {
     deleteApiKey,
     getConversationAgentId,
@@ -1238,7 +1238,7 @@ test("conversation mappings update and key deletion retains audit logs", async (
     openDb,
     upsertConversation,
   } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-conv-"));
+  const root = makeTempDir(context, "cursor-api-conv-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
   insertApiKey(db, seedKey("key-1"));
   upsertConversation(db, "key-1", "thread-1", "agent-abc");
@@ -1256,10 +1256,10 @@ test("conversation mappings update and key deletion retains audit logs", async (
   assert.equal(logs[0]?.key_name, null);
 });
 
-test("conversation mappings are capped per client key", async () => {
+test("conversation mappings are capped per client key", async (context) => {
   const { openDb, insertApiKey, upsertConversation, getConversationAgentId } =
     await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-conv-cap-"));
+  const root = makeTempDir(context, "cursor-api-conv-cap-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
   insertApiKey(db, seedKey("key-1"));
   insertApiKey(db, seedKey("key-2"));
@@ -1285,9 +1285,9 @@ test("conversation mappings are capped per client key", async () => {
   assert.equal(getConversationAgentId(db, "key-2", "other-thread"), "other-agent");
 });
 
-test("the seven-day call series fills missing UTC days with zeros", async () => {
+test("the seven-day call series fills missing UTC days with zeros", async (context) => {
   const { openDb, insertApiKey, insertRequestLog, requestCallsByDay } = await import("../dist/db.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-calls-day-"));
+  const root = makeTempDir(context, "cursor-api-calls-day-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
   insertApiKey(db, seedKey("key-1"));
   const today = new Date();
@@ -1307,10 +1307,10 @@ test("the seven-day call series fills missing UTC days with zeros", async () => 
   assert.equal(series.find((row) => row.day === utcDay(1))?.count, 0);
 });
 
-test("system logs persist from logInfo and list with level filter", async () => {
+test("system logs persist from logInfo and list with level filter", async (context) => {
   const { openDb, listSystemLogs, pruneSystemLogs } = await import("../dist/db.js");
   const { setSystemLogWriter, logInfo, logError } = await import("../dist/log.js");
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-syslog-"));
+  const root = makeTempDir(context, "cursor-api-syslog-");
   const db = openDb(root, { retentionDays: 30, maxRows: 100, maxDetailBytes: 1_048_576 });
   const { insertSystemLog } = await import("../dist/db.js");
   setSystemLogWriter((entry) => insertSystemLog(db, entry));
@@ -1692,4 +1692,19 @@ test("writeSseEvent writes event and data lines", async () => {
 test("aliasLiveConversation is a no-op for the same id", async () => {
   const { aliasLiveConversation } = await import("../dist/session.js");
   assert.equal(aliasLiveConversation("key-1", "resp_1", "resp_1"), false);
+});
+
+test("model listing exposes is_max_mode only for max-only variants", async () => {
+  const { toOpenAiModel } = await import("../dist/cursor.js");
+  const encoded = toOpenAiModel({
+    id: "max-only",
+    displayName: "Max Only",
+    parameters: [],
+    variants: [
+      { displayName: "Max", isMaxMode: true, isDefault: true, params: [] },
+      { displayName: "Normal", params: [] },
+    ],
+  });
+  assert.equal(encoded.variants[0].is_max_mode, true);
+  assert.equal("is_max_mode" in encoded.variants[1], false);
 });

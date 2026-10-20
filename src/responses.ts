@@ -7,26 +7,22 @@ import type {
   Usage,
 } from "./contracts.js";
 import { invalidRequest } from "./errors.js";
-import { parseChatCompletionsRequest } from "./openai.js";
+import { type ChatParseOptions, parseChatCompletionsRequest, parseResponseFormat } from "./openai.js";
 
 const SKIPPED_ITEM_TYPES = new Set(["reasoning", "item_reference", "compaction"]);
 
-export function parseResponsesRequest(body: unknown): ParsedChatRequest {
+export function parseResponsesRequest(body: unknown, options: ChatParseOptions = {}): ParsedChatRequest {
   if (!isPlainObject(body)) {
     throw invalidRequest("Request body must be a JSON object");
   }
 
   // Codex / OpenAI SDK 会带 client_metadata 等未知顶层字段；忽略，不 400。
+  let outputFormat: ParsedChatRequest["output_format"];
   if ("text" in body && body.text !== undefined) {
     if (!isPlainObject(body.text)) {
       throw invalidRequest("Field 'text' must be an object");
     }
-    if ("format" in body.text && body.text.format !== undefined) {
-      const format = body.text.format;
-      if (!isPlainObject(format) || format.type !== "text") {
-        throw invalidRequest("Only text.format.type 'text' is supported");
-      }
-    }
+    outputFormat = parseResponseFormat(body.text.format, "text.format");
   }
 
   const messages = convertInputToMessages(body.input, body.instructions);
@@ -58,10 +54,11 @@ export function parseResponsesRequest(body: unknown): ParsedChatRequest {
   };
   if (conversationId) chatBody.conversation_id = conversationId;
   dropUndefined(chatBody);
-  const parsed = parseChatCompletionsRequest(chatBody);
+  const parsed = parseChatCompletionsRequest(chatBody, { enforceOutputLimits: options.enforceOutputLimits });
   parsed.includeUsage = true;
   const effortHint = reasoningEffortOf(body.reasoning);
   if (effortHint !== undefined) parsed.reasoning_effort_hint = effortHint;
+  if (outputFormat !== undefined) parsed.output_format = outputFormat;
   if (customToolNames.length > 0) parsed.customToolNames = customToolNames;
   return parsed;
 }
@@ -75,24 +72,19 @@ export function encodeNonStreamResponse(input: {
   cost?: CursorCost | null;
   params?: ModelParam[];
   tool_calls?: OpenAiToolCall[];
-  finish_reason?: "stop" | "tool_calls" | "cancelled" | "error";
+  finish_reason?: "stop" | "tool_calls" | "cancelled" | "error" | "length";
   reasoning_content?: string;
   customToolNames?: Iterable<string>;
 }): Record<string, unknown> {
   const output = encodeOutputItems(input);
-  const status =
-    input.finish_reason === "cancelled"
-      ? "cancelled"
-      : input.finish_reason === "error"
-        ? "failed"
-        : "completed";
+  const status = responseStatusOf(input.finish_reason);
   const body: Record<string, unknown> = {
     id: input.id,
     object: "response",
     created_at: input.created,
     status,
     error: null,
-    incomplete_details: status === "cancelled" ? { reason: "cancelled" } : null,
+    incomplete_details: incompleteDetailsOf(input.finish_reason),
     model: input.model,
     output,
     parallel_tool_calls: true,
@@ -102,6 +94,22 @@ export function encodeNonStreamResponse(input: {
   };
   body.usage = encodeResponsesUsage(input.usage);
   return body;
+}
+
+type ResponseFinish = "stop" | "tool_calls" | "cancelled" | "error" | "length" | undefined;
+
+/** `length` (gateway max_output_tokens cut) is `incomplete`, like OpenAI. */
+export function responseStatusOf(finish: ResponseFinish): "completed" | "cancelled" | "failed" | "incomplete" {
+  if (finish === "cancelled") return "cancelled";
+  if (finish === "error") return "failed";
+  if (finish === "length") return "incomplete";
+  return "completed";
+}
+
+function incompleteDetailsOf(finish: ResponseFinish): { reason: string } | null {
+  if (finish === "cancelled") return { reason: "cancelled" };
+  if (finish === "length") return { reason: "max_output_tokens" };
+  return null;
 }
 
 export function encodeResponsesUsage(usage: Usage | null): Record<string, unknown> {
@@ -279,8 +287,8 @@ export class ResponsesStreamWriter {
     params?: ModelParam[];
     tool_calls?: OpenAiToolCall[];
     reasoning_content?: string;
-    finish_reason?: "stop" | "tool_calls" | "cancelled" | "error";
-  }): Promise<void> {
+    finish_reason?: "stop" | "tool_calls" | "cancelled" | "error" | "length";
+  }): Promise<Record<string, unknown>> {
     await this.closeReasoning();
     const openMessage = this.message;
     if (result.content !== "" && openMessage === undefined) {
@@ -297,32 +305,27 @@ export class ResponsesStreamWriter {
       }
     }
     await this.closeMessage();
-    const status =
-      result.finish_reason === "cancelled"
-        ? "cancelled"
-        : result.finish_reason === "error"
-          ? "failed"
-          : "completed";
+    const status = responseStatusOf(result.finish_reason);
     const event =
       status === "completed"
         ? "response.completed"
         : status === "failed"
           ? "response.failed"
           : "response.incomplete";
-    await this.event(event, {
-      response: {
-        id: this.meta.id,
-        object: "response",
-        created_at: this.meta.created,
-        status,
-        error: null,
-        incomplete_details: status === "cancelled" ? { reason: "cancelled" } : null,
-        model: this.meta.model,
-        output: this.snapshotOutput(result),
-        usage: encodeResponsesUsage(result.usage),
-        cursor: encodeCursorExtra(result.cost, result.params),
-      },
-    });
+    const response = {
+      id: this.meta.id,
+      object: "response",
+      created_at: this.meta.created,
+      status,
+      error: null,
+      incomplete_details: incompleteDetailsOf(result.finish_reason),
+      model: this.meta.model,
+      output: this.snapshotOutput(result),
+      usage: encodeResponsesUsage(result.usage),
+      cursor: encodeCursorExtra(result.cost, result.params),
+    };
+    await this.event(event, { response });
+    return response;
   }
 
   async fail(error: { message: string; type: string; code: string }): Promise<void> {

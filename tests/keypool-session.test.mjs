@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openDb } from "../dist/db.js";
 import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 const auth = { authorization: `Bearer ${CLIENT_KEY}`, "content-type": "application/json" };
 
@@ -13,8 +12,8 @@ async function post(gateway, path, body, headers = auth) {
   return fetch(`${gateway.baseUrl}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
-test("old conversation databases gain a nullable Cursor key fingerprint without losing mappings", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-key-owner-migration-"));
+test("old conversation databases gain a nullable Cursor key fingerprint without losing mappings", (context) => {
+  const root = makeTempDir(context, "cursor-api-key-owner-migration-");
   const path = join(root, "cursor-api.sqlite");
   const legacy = new DatabaseSync(path);
   legacy.exec(`

@@ -597,6 +597,8 @@
 
     /* ─── Layout helpers ──────────────────────────────────────────── */
     .toolbar, .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+    .policy-editor .stack { display: grid; gap: 8px; max-width: 640px; }
+    .policy-editor textarea { width: 100%; font-family: inherit; }
     .filters {
       display: flex;
       flex-wrap: nowrap;
@@ -1270,6 +1272,30 @@
       "keys.colTok": "Token",
       "keys.colCache": "缓存读",
       "keys.colCreated": "创建时间",
+      "keys.colPolicy": "策略 / 配额",
+      "keys.policy": "策略",
+      "keys.policyTitle": "Key 策略",
+      "keys.unrestricted": "不限",
+      "keys.allowedModels": "允许的模型（每行一个，支持 * 通配；留空=不限）",
+      "keys.allowMax": "Max mode",
+      "keys.allowMaxInherit": "继承全局",
+      "keys.allowMaxYes": "允许",
+      "keys.allowMaxNo": "禁止",
+      "keys.allowMaxEffective": "实际生效",
+      "keys.allowMaxCeiling": "全局 allow_max_mode=false 是上限，Key 设为允许不会生效",
+      "keys.quotaRequests": "请求配额（留空=不限）",
+      "keys.quotaTokens": "Token 配额（软上限，留空=不限）",
+      "keys.quotaPeriod": "周期",
+      "keys.periodTotal": "总量",
+      "keys.periodDaily": "每日",
+      "keys.periodMonthly": "每月",
+      "keys.quotaTz": "时区（IANA）",
+      "keys.maxConcurrent": "并发上限（留空=不限）",
+      "keys.cacheWeight": "缓存读 Token 计入权重 0–1（留空=继承全局）",
+      "keys.save": "保存",
+      "keys.cancel": "取消",
+      "keys.resetUsage": "重置本期用量",
+      "keys.usageNow": "本期 {period}：请求 {req}，Token {tok}",
       "keys.disabled": "已停用",
       "keys.enabled": "可用",
       "keys.enable": "恢复",
@@ -1462,6 +1488,30 @@
       "keys.colTok": "Tokens",
       "keys.colCache": "Cache read",
       "keys.colCreated": "Created",
+      "keys.colPolicy": "Policy / quota",
+      "keys.policy": "Policy",
+      "keys.policyTitle": "Key policy",
+      "keys.unrestricted": "unrestricted",
+      "keys.allowedModels": "Allowed models (one per line, * wildcards; empty = unrestricted)",
+      "keys.allowMax": "Max mode",
+      "keys.allowMaxInherit": "Inherit global",
+      "keys.allowMaxYes": "Allow",
+      "keys.allowMaxNo": "Deny",
+      "keys.allowMaxEffective": "Effective",
+      "keys.allowMaxCeiling": "the gateway allow_max_mode=false is a hard ceiling; Allow has no effect",
+      "keys.quotaRequests": "Request quota (empty = unlimited)",
+      "keys.quotaTokens": "Token quota (soft cap, empty = unlimited)",
+      "keys.quotaPeriod": "Period",
+      "keys.periodTotal": "Total",
+      "keys.periodDaily": "Daily",
+      "keys.periodMonthly": "Monthly",
+      "keys.quotaTz": "Time zone (IANA)",
+      "keys.maxConcurrent": "Max concurrent (empty = unlimited)",
+      "keys.cacheWeight": "Cache-read token weight 0–1 (empty = inherit global)",
+      "keys.save": "Save",
+      "keys.cancel": "Cancel",
+      "keys.resetUsage": "Reset current usage",
+      "keys.usageNow": "Period {period}: {req} requests, {tok} tokens",
       "keys.disabled": "Disabled",
       "keys.enabled": "Enabled",
       "keys.enable": "Enable",
@@ -1963,10 +2013,11 @@
         <thead><tr>
           <th>${t("keys.colName")}</th><th>${t("keys.colPrefix")}</th><th>${t("keys.colStatus")}</th>
           <th class="num">${t("keys.colReq")}</th><th class="num">${t("keys.colTok")}</th><th class="num">${t("keys.colCache")}</th>
-          <th>${t("keys.colCreated")}</th><th class="num"></th>
+          <th>${t("keys.colPolicy")}</th><th>${t("keys.colCreated")}</th><th class="num"></th>
         </tr></thead>
         <tbody>${keys.map(keyRow).join("")}</tbody>
       </table></div>`;
+      keyCache = new Map(keys.map((k) => [String(k.id), k]));
       $("keys-table").querySelectorAll("[data-action]").forEach((btn) => {
         btn.addEventListener("click", () => onKeyAction(btn));
       });
@@ -2014,6 +2065,84 @@
       </tr>`;
     }
 
+    let keyCache = new Map();
+
+    function policySummary(row) {
+      const parts = [];
+      if (Array.isArray(row.allowed_models)) parts.push(`models: ${row.allowed_models.length ? row.allowed_models.join(", ") : "∅"}`);
+      if (row.allow_max_mode === true || row.allow_max_mode === false) parts.push(`max: ${row.allow_max_mode ? "on" : "off"}`);
+      const u = row.usage_current || {};
+      if (row.quota_requests !== null && row.quota_requests !== undefined) parts.push(`req ${fmtNum(u.requests ?? 0)}/${fmtNum(row.quota_requests)}`);
+      if (row.quota_tokens !== null && row.quota_tokens !== undefined) parts.push(`tok ${fmtNum(u.tokens ?? 0)}/${fmtNum(row.quota_tokens)}`);
+      if ((row.quota_requests ?? null) !== null || (row.quota_tokens ?? null) !== null) parts.push(String(row.quota_period ?? "total"));
+      if (row.max_concurrent !== null && row.max_concurrent !== undefined) parts.push(`conc ${fmtNum(u.in_flight ?? 0)}/${fmtNum(row.max_concurrent)}`);
+      return parts.length ? escapeHtml(parts.join(" · ")) : t("keys.unrestricted");
+    }
+
+    function numOrNull(value) {
+      const v = String(value ?? "").trim();
+      return v === "" ? null : Number(v);
+    }
+
+    function openPolicyEditor(id) {
+      const row = keyCache.get(id);
+      if (!row) return;
+      document.querySelectorAll(".policy-editor").forEach((el) => el.remove());
+      const tr = $("keys-table").querySelector(`button[data-action="policy"][data-id="${CSS.escape(id)}"]`)?.closest("tr");
+      if (!tr) return;
+      const max = row.allow_max_mode === true ? "true" : row.allow_max_mode === false ? "false" : "inherit";
+      const period = String(row.quota_period ?? "total");
+      const u = row.usage_current || {};
+      const ed = document.createElement("tr");
+      ed.className = "policy-editor";
+      ed.innerHTML = `<td colspan="9"><div class="stack">
+        <strong>${t("keys.policyTitle")}</strong>
+        <label>${t("keys.allowedModels")}<textarea data-f="allowed_models" rows="3">${escapeHtml(Array.isArray(row.allowed_models) ? row.allowed_models.join("\n") : "")}</textarea></label>
+        <label>${t("keys.allowMax")} <select data-f="allow_max_mode">
+          <option value="inherit"${max === "inherit" ? " selected" : ""}>${t("keys.allowMaxInherit")}</option>
+          <option value="true"${max === "true" ? " selected" : ""}>${t("keys.allowMaxYes")}</option>
+          <option value="false"${max === "false" ? " selected" : ""}>${t("keys.allowMaxNo")}</option></select>
+          <span class="muted" data-info="effective_max">${t("keys.allowMaxEffective")}: ${row.effective_allow_max_mode === false ? t("keys.allowMaxNo") : t("keys.allowMaxYes")}${row.allow_max_mode === true && row.effective_allow_max_mode === false ? ` (${t("keys.allowMaxCeiling")})` : ""}</span></label>
+        <label>${t("keys.quotaRequests")} <input data-f="quota_requests" type="number" min="0" value="${row.quota_requests ?? ""}"></label>
+        <label>${t("keys.quotaTokens")} <input data-f="quota_tokens" type="number" min="0" value="${row.quota_tokens ?? ""}"></label>
+        <label>${t("keys.quotaPeriod")} <select data-f="quota_period">
+          ${["total", "daily", "monthly"].map((p) => `<option value="${p}"${p === period ? " selected" : ""}>${t("keys.period" + p[0].toUpperCase() + p.slice(1))}</option>`).join("")}</select></label>
+        <label>${t("keys.quotaTz")} <input data-f="quota_tz" type="text" value="${escapeHtml(String(row.quota_tz ?? "UTC"))}"></label>
+        <label>${t("keys.cacheWeight")} <input data-f="quota_cache_read_weight" type="number" min="0" max="1" step="0.05" value="${row.quota_cache_read_weight ?? ""}"></label>
+        <label>${t("keys.maxConcurrent")} <input data-f="max_concurrent" type="number" min="1" value="${row.max_concurrent ?? ""}"></label>
+        <span class="muted">${escapeHtml(t("keys.usageNow").replace("{period}", String(u.period_start ?? "total")).replace("{req}", fmtNum(u.requests ?? 0)).replace("{tok}", fmtNum(u.tokens ?? 0)))}</span>
+        <div class="row">
+          <button class="btn btn-primary btn-small" type="button" data-pe="save">${t("keys.save")}</button>
+          <button class="btn btn-secondary btn-small" type="button" data-pe="reset">${t("keys.resetUsage")}</button>
+          <button class="btn btn-secondary btn-small" type="button" data-pe="cancel">${t("keys.cancel")}</button>
+        </div></div></td>`;
+      tr.after(ed);
+      const f = (name) => ed.querySelector(`[data-f="${name}"]`);
+      ed.querySelector('[data-pe="cancel"]').addEventListener("click", () => ed.remove());
+      ed.querySelector('[data-pe="reset"]').addEventListener("click", async () => {
+        hide("keys-error");
+        await adminApi("POST", `/admin/api/keys/${encodeURIComponent(id)}/usage/reset`, {}, "keys-error");
+        await loadKeys();
+      });
+      ed.querySelector('[data-pe="save"]').addEventListener("click", async () => {
+        hide("keys-error");
+        const models = String(f("allowed_models").value).split(/\r?\n|,/).map((m) => m.trim()).filter(Boolean);
+        const maxValue = f("allow_max_mode").value;
+        const body = {
+          allowed_models: models.length ? models : null,
+          allow_max_mode: maxValue === "inherit" ? null : maxValue === "true",
+          quota_requests: numOrNull(f("quota_requests").value),
+          quota_tokens: numOrNull(f("quota_tokens").value),
+          quota_period: f("quota_period").value,
+          quota_tz: String(f("quota_tz").value).trim() || "UTC",
+          max_concurrent: numOrNull(f("max_concurrent").value),
+          quota_cache_read_weight: numOrNull(f("quota_cache_read_weight").value),
+        };
+        const ok = await adminApi("PATCH", `/admin/api/keys/${encodeURIComponent(id)}`, body, "keys-error");
+        if (ok) await loadKeys();
+      });
+    }
+
     function keyRow(row) {
       const id = escapeHtml(String(row.id ?? ""));
       const disabled = row.enabled === 0 || row.enabled === false;
@@ -2024,8 +2153,10 @@
         <td class="num">${fmtNum(row.request_count ?? 0)}</td>
         <td class="num">${fmtNum(row.total_tokens ?? 0)}</td>
         <td class="num">${fmtNum(row.cache_read_tokens ?? 0)}</td>
+        <td class="muted">${policySummary(row)}</td>
         <td class="muted">${escapeHtml(formatTime(row.created_at))}</td>
         <td class="num nowrap">
+          <button class="btn btn-secondary btn-small" type="button" data-action="policy" data-id="${id}">${t("keys.policy")}</button>
           ${disabled
             ? `<button class="btn btn-secondary btn-small" type="button" data-action="enable" data-id="${id}">${t("keys.enable")}</button>`
             : `<button class="btn btn-danger btn-small" type="button" data-action="disable" data-id="${id}">${t("keys.disable")}</button>`}
@@ -2038,6 +2169,10 @@
       const id = btn.getAttribute("data-id");
       const action = btn.getAttribute("data-action");
       if (!id || !action) return;
+      if (action === "policy") {
+        openPolicyEditor(id);
+        return;
+      }
       if ((action === "disable" || action === "delete") && btn.dataset.confirm !== "1") {
         btn.dataset.confirm = "1";
         const prev = btn.textContent;

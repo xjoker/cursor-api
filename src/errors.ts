@@ -4,6 +4,10 @@ export class GatewayError extends Error {
   readonly openaiType: string;
   /** Seconds for a `Retry-After` header (429 responses). */
   retryAfterSeconds?: number;
+  /** OpenAI `error.param` (e.g. "model"); `null` when not tied to one field. */
+  param?: string;
+  /** Set on a max-mode block raised after a max-mode run was already sent upstream (logged as max_mode=1). */
+  maxModeDispatched?: boolean;
 
   constructor(httpStatus: number, code: string, message: string, openaiType: string) {
     super(message);
@@ -34,6 +38,18 @@ export function modelNotFound(id: string): GatewayError {
   );
 }
 
+export function maxModeNotAllowed(id: string, options?: { dispatched?: boolean }): GatewayError {
+  const error = new GatewayError(
+    403,
+    "max_mode_not_allowed",
+    `The model '${id}' with the requested parameters only runs in Cursor max mode, which is not allowed here (allow_max_mode=false). Pick a non-max variant or params (see is_max_mode in GET /v1/models).`,
+    "permission_error",
+  );
+  error.param = "model";
+  if (options?.dispatched) error.maxModeDispatched = true;
+  return error;
+}
+
 export function conversationBusyError(): GatewayError {
   return new GatewayError(
     409,
@@ -49,6 +65,35 @@ export function authenticationError(message = "Invalid API key"): GatewayError {
 
 export function permissionError(message: string): GatewayError {
   return new GatewayError(403, "permission_error", message, "permission_error");
+}
+
+export function modelNotAllowed(id: string, detail?: string): GatewayError {
+  const error = new GatewayError(
+    403,
+    "model_not_allowed",
+    detail ?? `The model '${id}' is not allowed for this API key`,
+    "permission_error",
+  );
+  error.param = "model";
+  return error;
+}
+
+/** OpenAI-style quota exhaustion: 429 + `insufficient_quota` (OpenAI SDKs do not auto-retry it). */
+export function quotaExceeded(message: string, retryAfterSeconds?: number): GatewayError {
+  const error = new GatewayError(429, "insufficient_quota", message, "insufficient_quota");
+  if (retryAfterSeconds !== undefined) error.retryAfterSeconds = retryAfterSeconds;
+  return error;
+}
+
+export function concurrencyLimitExceeded(limit: number): GatewayError {
+  const error = new GatewayError(
+    429,
+    "concurrency_limit_exceeded",
+    `Too many concurrent requests for this API key (limit ${String(limit)})`,
+    "rate_limit_error",
+  );
+  error.retryAfterSeconds = 1;
+  return error;
 }
 
 export function rateLimitError(message: string): GatewayError {
@@ -89,7 +134,7 @@ export function serverError(message = "Internal server error"): GatewayError {
 }
 
 export function toOpenAiErrorBody(error: unknown, requestId?: string): {
-  error: { message: string; type: string; code: string; param: null };
+  error: { message: string; type: string; code: string; param: string | null };
   code: string;
 } {
   const mapped = error instanceof GatewayError ? error : serverError();
@@ -98,7 +143,7 @@ export function toOpenAiErrorBody(error: unknown, requestId?: string): {
       message: mapped.message,
       type: mapped.openaiType,
       code: mapped.code,
-      param: null,
+      param: mapped.param ?? null,
     },
     code: mapped.code,
     ...(requestId ? { request_id: requestId } : {}),

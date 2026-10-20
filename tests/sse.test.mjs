@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { beginSse, configureSse, writeSse } from "../dist/http.js";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -21,8 +21,8 @@ async function withServer(handler, fn) {
   }
 }
 
-test("sse_keepalive_ms defaults to 15s, accepts 0 to disable, and is bounded", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-api-sse-"));
+test("sse_keepalive_ms defaults to 15s, accepts 0 to disable, and is bounded", (context) => {
+  const root = makeTempDir(context, "cursor-api-sse-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   const file = join(root, "data", "config", "gateway.toml");
   const base = ['cursor_api_key = "c"', 'admin_access_key = "a"', 'api_key_pepper = "p"'];
