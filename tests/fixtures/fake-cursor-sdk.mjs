@@ -207,7 +207,7 @@ function makeAgent(apiKey, agentId, model) {
             status,
             result: status === "finished" ? text : undefined,
             ...(runError ? { error: runError } : {}),
-            usage: { inputTokens: 11, outputTokens: 2, totalTokens: 13, cacheReadTokens: 3, cacheWriteTokens: 0 },
+            usage: { inputTokens: 11, outputTokens: 2, totalTokens: 16, cacheReadTokens: 3, cacheWriteTokens: 0 },
           };
         },
       };

@@ -303,6 +303,13 @@ function parsePolicyFields(body: unknown): Partial<ApiKeyPolicyFields> {
     }
     out.max_concurrent = value;
   }
+  if (body.quota_cache_read_weight !== undefined) {
+    const weight = body.quota_cache_read_weight;
+    if (weight !== null && (typeof weight !== "number" || !Number.isFinite(weight) || weight < 0 || weight > 1)) {
+      throw invalidRequest("quota_cache_read_weight must be a number between 0 and 1, or null (inherit)");
+    }
+    out.quota_cache_read_weight = weight;
+  }
   if (body.quota_period !== undefined) {
     if (body.quota_period !== "total" && body.quota_period !== "daily" && body.quota_period !== "monthly") {
       throw invalidRequest("quota_period must be 'total', 'daily' or 'monthly'");

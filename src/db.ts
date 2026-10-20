@@ -26,8 +26,8 @@ export const DEFAULT_LOG_POLICY: LogPolicy = {
 /** Per-row cap for the client-controlled `model` column (UTF-8 bytes). */
 export const MAX_LOG_MODEL_BYTES = 256;
 
-/** 9: request_logs.max_mode. 10: per-key model / quota policy + api_key_usage. */
-export const SCHEMA_VERSION = 10;
+/** 9: request_logs.max_mode. 10: per-key model / quota policy + api_key_usage. 11: api_keys.quota_cache_read_weight. */
+export const SCHEMA_VERSION = 11;
 const MAX_CONVERSATIONS_PER_KEY = 1_000;
 
 const logPolicies = new WeakMap<DatabaseSync, LogPolicy>();
@@ -136,6 +136,7 @@ export type ApiKeyPolicyFields = Pick<
   | "quota_period"
   | "quota_tz"
   | "max_concurrent"
+  | "quota_cache_read_weight"
 >;
 
 export const DEFAULT_KEY_POLICY: ApiKeyPolicyFields = {
@@ -146,6 +147,7 @@ export const DEFAULT_KEY_POLICY: ApiKeyPolicyFields = {
   quota_period: "total",
   quota_tz: "UTC",
   max_concurrent: null,
+  quota_cache_read_weight: null,
 };
 
 export function insertApiKey(
@@ -158,8 +160,9 @@ export function insertApiKey(
   db.prepare(
     `INSERT INTO api_keys (
       id, name, key_prefix, key_digest, enabled, request_limit, used_requests, created_at, updated_at,
-      allowed_models, allow_max_mode, quota_requests, quota_tokens, quota_period, quota_tz, max_concurrent
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      allowed_models, allow_max_mode, quota_requests, quota_tokens, quota_period, quota_tz, max_concurrent,
+      quota_cache_read_weight
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.name,
@@ -186,7 +189,7 @@ export function updateApiKeyPolicy(
   db.prepare(
     `UPDATE api_keys SET
        name = ?, allowed_models = ?, allow_max_mode = ?, quota_requests = ?, quota_tokens = ?,
-       quota_period = ?, quota_tz = ?, max_concurrent = ?, updated_at = ?
+       quota_period = ?, quota_tz = ?, max_concurrent = ?, quota_cache_read_weight = ?, updated_at = ?
      WHERE id = ?`,
   ).run(patch.name ?? existing.name, ...policyColumns(merged), new Date().toISOString(), id);
   return getApiKeyById(db, id);
@@ -209,6 +212,7 @@ function policyColumns(policy: ApiKeyPolicyFields): Array<string | number | null
     policy.quota_period,
     policy.quota_tz,
     policy.max_concurrent,
+    policy.quota_cache_read_weight,
   ];
 }
 
@@ -721,6 +725,7 @@ function migrateApiKeyPolicy(db: DatabaseSync): void {
     ["quota_period", "TEXT NOT NULL DEFAULT 'total'"],
     ["quota_tz", "TEXT NOT NULL DEFAULT 'UTC'"],
     ["max_concurrent", "INTEGER"],
+    ["quota_cache_read_weight", "REAL"],
   ];
   for (const [name, type] of added) {
     if (!columns.has(name)) db.exec(`ALTER TABLE api_keys ADD COLUMN ${name} ${type}`);
@@ -949,6 +954,7 @@ function mapApiKey(row: Record<string, unknown>): ApiKeyRow {
     quota_period: parseQuotaPeriod(row.quota_period),
     quota_tz: asNullableString(row.quota_tz) ?? "UTC",
     max_concurrent: asNullableNumber(row.max_concurrent),
+    quota_cache_read_weight: asNullableNumber(row.quota_cache_read_weight),
   };
 }
 

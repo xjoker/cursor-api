@@ -348,11 +348,7 @@ export function resolveChatParams(
     }
   }
 
-  applyNamedParam(model, request.model, merged, request.reasoning_effort, {
-    field: "reasoning_effort",
-    ids: ["reasoning_effort", "effort", "reasoning"],
-    displayName: /effort|reasoning|thinking/i,
-  });
+  applyReasoningEffort(model, request.model, merged, request.reasoning_effort);
   if (request.reasoning_effort === undefined && request.reasoning_effort_hint !== undefined && model) {
     applyEffortHint(model, merged, request.reasoning_effort_hint);
   }
@@ -504,6 +500,44 @@ function applyNamedParam(
 }
 
 const EFFORT_RANK = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_OFF = new Set(["none", "off", "minimal"]);
+
+/**
+ * OpenAI `reasoning_effort` (Chat Completions, Responses top level, Messages extension).
+ * A value the model lists is used as is (explicit choice, so max-mode rules still apply);
+ * a standard level the model lacks maps to the nearest one; a model without an effort
+ * control ignores it. Only values that are neither listed nor a standard level are 400.
+ */
+function applyReasoningEffort(
+  model: ModelListItem | undefined,
+  requestedId: string,
+  merged: Map<string, string>,
+  raw: string | undefined,
+): void {
+  if (raw === undefined) return;
+  if (!model) {
+    throw invalidRequest(`Cannot map 'reasoning_effort' because model '${requestedId}' is not in the catalog`);
+  }
+  const wanted = foldKey(raw);
+  const parameter = findParameter(model, { ids: ["reasoning_effort", "effort", "reasoning"], displayName: /effort|reasoning|thinking/i });
+  const exact = parameter?.values.find((value) => foldKey(value.value) === wanted || foldKey(value.displayName ?? "") === wanted);
+  if (parameter && exact) {
+    merged.set(parameter.id, exact.value);
+    return;
+  }
+  if (!EFFORT_RANK.includes(wanted)) {
+    const allowed = parameter ? parameter.values.map((item) => item.value).join(", ") : EFFORT_RANK.join(", ");
+    throw invalidRequest(`Invalid reasoning_effort='${raw}'. Allowed: ${allowed}`);
+  }
+  if (!parameter) return;
+  if (isBooleanParam(parameter)) {
+    const on = !EFFORT_OFF.has(wanted);
+    const value = parameter.values.find((item) => foldKey(item.value) === String(on));
+    if (value) merged.set(parameter.id, value.value);
+    return;
+  }
+  applyEffortHint(model, merged, raw);
+}
 
 export function applyEffortHint(model: ModelListItem, merged: Map<string, string>, hint: string): void {
   const parameter = findParameter(model, { ids: ["reasoning_effort", "effort", "reasoning"], displayName: /effort|reasoning|thinking/i });
@@ -607,17 +641,28 @@ async function readBilledUsage(agent: SDKAgent): Promise<AgentUsage | undefined>
   }
 }
 
+function nonNegative(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
 function toUsage(usage: TokenUsage | undefined): Usage {
   if (!usage) {
     return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   }
+  // SDK `inputTokens` excludes cache reads/writes (its totalTokens = input + output + cacheRead +
+  // cacheWrite). OpenAI's `prompt_tokens` includes cached tokens, so fold them in and keep
+  // total = prompt + completion. Anthropic encoders subtract the cache parts again.
+  const cacheRead = nonNegative(usage.cacheReadTokens);
+  const cacheWrite = nonNegative(usage.cacheWriteTokens);
+  const prompt = nonNegative(usage.inputTokens) + cacheRead + cacheWrite;
+  const completion = nonNegative(usage.outputTokens);
   return {
-    prompt_tokens: usage.inputTokens,
-    completion_tokens: usage.outputTokens,
-    total_tokens: usage.totalTokens,
-    cache_read_tokens: usage.cacheReadTokens,
-    cache_write_tokens: usage.cacheWriteTokens,
-    reasoning_tokens: usage.reasoningTokens,
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    cache_read_tokens: cacheRead,
+    cache_write_tokens: cacheWrite,
+    ...(usage.reasoningTokens !== undefined ? { reasoning_tokens: nonNegative(usage.reasoningTokens) } : {}),
   };
 }
 

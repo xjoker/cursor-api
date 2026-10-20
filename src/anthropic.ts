@@ -401,7 +401,8 @@ export function anthropicStopReason(finishReason: string | undefined): Anthropic
 
 export function encodeAnthropicUsage(usage: Usage | null): Record<string, number> {
   return {
-    input_tokens: usage?.prompt_tokens ?? 0,
+    // Anthropic `input_tokens` excludes cache reads / writes (reported separately below).
+    input_tokens: Math.max(0, (usage?.prompt_tokens ?? 0) - (usage?.cache_read_tokens ?? 0) - (usage?.cache_write_tokens ?? 0)),
     output_tokens: usage?.completion_tokens ?? 0,
     cache_creation_input_tokens: usage?.cache_write_tokens ?? 0,
     cache_read_input_tokens: usage?.cache_read_tokens ?? 0,

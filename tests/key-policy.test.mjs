@@ -312,7 +312,7 @@ test("e2e: request quota, no overspend under parallel load, 429 with Retry-After
     assert.equal((await rejected.json()).error.code, "insufficient_quota");
     usage = await (await c.admin("GET", "/admin/api/keys/it-key/usage")).json();
     assert.equal(usage.current.requests, 3);
-    assert.equal(usage.current.tokens, 39, "13 tokens per fake run, run-scoped");
+    assert.equal(usage.current.tokens, 48, "16 tokens per fake run (11 in + 3 cache read + 2 out), run-scoped");
     assert.equal(usage.current.remaining_requests, 0);
     assert.ok(usage.current.resets_at.endsWith("T16:00:00.000Z"), "Singapore midnight");
 

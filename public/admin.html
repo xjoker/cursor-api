@@ -1289,6 +1289,7 @@
       "keys.periodMonthly": "每月",
       "keys.quotaTz": "时区（IANA）",
       "keys.maxConcurrent": "并发上限（留空=不限）",
+      "keys.cacheWeight": "缓存读 Token 计入权重 0–1（留空=继承全局）",
       "keys.save": "保存",
       "keys.cancel": "取消",
       "keys.resetUsage": "重置本期用量",
@@ -1502,6 +1503,7 @@
       "keys.periodMonthly": "Monthly",
       "keys.quotaTz": "Time zone (IANA)",
       "keys.maxConcurrent": "Max concurrent (empty = unlimited)",
+      "keys.cacheWeight": "Cache-read token weight 0–1 (empty = inherit global)",
       "keys.save": "Save",
       "keys.cancel": "Cancel",
       "keys.resetUsage": "Reset current usage",
@@ -2101,6 +2103,7 @@
         <label>${t("keys.quotaPeriod")} <select data-f="quota_period">
           ${["total", "daily", "monthly"].map((p) => `<option value="${p}"${p === period ? " selected" : ""}>${t("keys.period" + p[0].toUpperCase() + p.slice(1))}</option>`).join("")}</select></label>
         <label>${t("keys.quotaTz")} <input data-f="quota_tz" type="text" value="${escapeHtml(String(row.quota_tz ?? "UTC"))}"></label>
+        <label>${t("keys.cacheWeight")} <input data-f="quota_cache_read_weight" type="number" min="0" max="1" step="0.05" value="${row.quota_cache_read_weight ?? ""}"></label>
         <label>${t("keys.maxConcurrent")} <input data-f="max_concurrent" type="number" min="1" value="${row.max_concurrent ?? ""}"></label>
         <span class="muted">${escapeHtml(t("keys.usageNow").replace("{period}", String(u.period_start ?? "total")).replace("{req}", fmtNum(u.requests ?? 0)).replace("{tok}", fmtNum(u.tokens ?? 0)))}</span>
         <div class="row">
@@ -2128,6 +2131,7 @@
           quota_period: f("quota_period").value,
           quota_tz: String(f("quota_tz").value).trim() || "UTC",
           max_concurrent: numOrNull(f("max_concurrent").value),
+          quota_cache_read_weight: numOrNull(f("quota_cache_read_weight").value),
         };
         const ok = await adminApi("PATCH", `/admin/api/keys/${encodeURIComponent(id)}`, body, "keys-error");
         if (ok) await loadKeys();

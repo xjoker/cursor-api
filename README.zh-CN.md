@@ -117,6 +117,7 @@ detailed = false
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
 | `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数而不返回 400（默认 **false**） |
 | `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params`/`reasoning_effort` 指向 max 变体）返回 `403 max_mode_not_allowed`。Anthropic 的 `output_config.effort` 属于软提示，会被丢弃而不是报错。每条请求日志都会记录 `max_mode` |
+| `quota_cache_read_weight` | 缓存读 Token 计入按 Key `quota_tokens` 的权重（0–1，环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 **1.0**）；Key 自己的 `quota_cache_read_weight` 优先 |
 | `sse_keepalive_ms` | 空闲流式响应发送 `: keepalive` 注释的间隔（默认 **15000**；`0` 关闭） |
 | `cors_allow_origins` | 浏览器跨域来源，默认 `"*"`；用逗号分隔精确来源（如 `"https://app.example.com,http://localhost:5173"`），空字符串关闭 CORS。环境变量 `CORS_ALLOW_ORIGINS` 可覆盖，包括空值 |
 | `auth_failure_limit` | 每个客户端地址在任意 60 秒滑动窗口内允许的认证失败次数（默认 **20**，最大 1000；`0` 关闭）。管理密钥和客户端 Key 分开计数。**管理端：**达到上限后，该地址的所有管理请求（包括正确密钥）都返回 `429` 和 `Retry-After`，直到窗口内的失败数回落。**客户端 Key：**正确的 Key 永远不会被限流，只有继续使用错误 Key 的请求会返回 `429` + `Retry-After`（代替 `401`）。不带任何 Key 的请求不计数。IPv6 按 /64 合并计数 |
@@ -180,7 +181,9 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/messages` | Anthropic SDK、兼容 Claude 的客户端 |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
 
-支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent；ID 最多 512 个 UTF-8 字节，每个客户端 Key 保留最近 1000 条映射。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
+支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`reasoning_effort` 按尽力而为处理：精确匹配模型取值，否则取最接近档位；模型没有 effort 参数时忽略（布尔型思考开关：`none`/`minimal` 映射为关）。
+
+Usage 按 OpenAI 语义：`prompt_tokens` 包含缓存 Token（`prompt_tokens_details.cached_tokens` = 缓存读；缓存写另外以 `cache_write_tokens` 返回），模型上报时带 `completion_tokens_details.reasoning_tokens`，`total_tokens = prompt_tokens + completion_tokens`。请求日志的 `input_tokens` 也按此口径（本次改动之前写入的行是不含缓存的 input）。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent；ID 最多 512 个 UTF-8 字节，每个客户端 Key 保留最近 1000 条映射。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
 
 Cursor SDK 每轮接收的是单个 prompt，并不原生接收 OpenAI 角色消息。本项目会把 `system` / `developer` / `user` 角色序列化进 transcript 文本；因此应用传入的 `system` 或 `developer` 消息只能作为上下文，不能充当抵御恶意用户内容的硬安全边界。
 
@@ -199,7 +202,7 @@ ANTHROPIC_API_KEY=<你的 cgk_ 客户端 key>      # 以 x-api-key 发送
 - 忽略：`temperature`、`top_p`、`top_k`、`thinking`、`output_config`、`context_management`、`service_tier`。未知顶层字段也会忽略。拒绝：非空 `stop_sequences`、`document` 块。
 - Cursor 参数（`params`、`variant`、`reasoning_effort`、`verbosity`、`fast`、`optimize_for`）以及 `conversation_id` / `metadata.conversation_id` 与 Chat Completions 一致。
 - 错误为 Anthropic 格式：`{"type":"error","error":{"type":"invalid_request_error","message":"…"}}`。
-- `usage` 的 `input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` 来自 Cursor token 用量；非流式响应附带 `cursor.cost`。
+- `usage` 的 `input_tokens`（不含缓存，Anthropic 语义）/ `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` 来自 Cursor token 用量；非流式响应附带 `cursor.cost`。
 - `POST /v1/messages/count_tokens` 返回粗略估算（见下方 Claude Code）。
 
 ### Claude Code
@@ -228,7 +231,7 @@ claude -p "Reply with PONG"
 
 把 Codex 指到本网关的 `/v1`。压缩（`/compact`）请求可被接受：Responses 接受 `parallel_tool_calls: false` 和 `tools: []`（该开关会被忽略，Cursor 不区分）。Chat Completions 对 `parallel_tool_calls: false` 仍 400。
 
-Responses 还会收下并忽略采样参数（`temperature`、`top_p` 等）以及未知顶层字段（`client_metadata`、`include` 等）。Codex 的 `custom` 工具（`apply_patch`）往返发 `custom_tool_call` 和自由格式 `input`。嵌套 `namespace` 工具摊平成 function。没有 name 的 hosted 工具（`web_search` 等）直接丢掉。上一轮的 assistant 正文和 `function_call` 会并成一条消息，避免工具结果 400。`previous_response_id` 续同一个 Cursor Agent。`reasoning.effort` 按尽力而为处理：模型有 effort 参数时映射过去（精确匹配，否则取最接近的档位，如 `xhigh` → `high`、`minimal` → `low`），模型没有该参数时忽略，所以 Codex 的默认请求不会 400。顶层 `reasoning_effort` 仍与 Chat Completions 一样严格校验。
+Responses 还会收下并忽略采样参数（`temperature`、`top_p` 等）以及未知顶层字段（`client_metadata`、`include` 等）。Codex 的 `custom` 工具（`apply_patch`）往返发 `custom_tool_call` 和自由格式 `input`。嵌套 `namespace` 工具摊平成 function。没有 name 的 hosted 工具（`web_search` 等）直接丢掉。上一轮的 assistant 正文和 `function_call` 会并成一条消息，避免工具结果 400。`previous_response_id` 续同一个 Cursor Agent。`reasoning.effort` 按尽力而为处理：模型有 effort 参数时映射过去（精确匹配，否则取最接近的档位，如 `xhigh` → `high`、`minimal` → `low`），模型没有该参数时忽略，所以 Codex 的默认请求不会 400。顶层 `reasoning_effort`（Responses 和 Chat Completions）规则相同：只有既不是模型的取值、也不是标准档位（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`）的值才返回 400。模型本身列出的值视为显式选择，所以 `allow_max_mode` 规则照常生效。
 
 ### OpenCode
 
@@ -284,6 +287,7 @@ print(client.chat.completions.create(
 | `quota_period` | `total`（默认，永不重置）、`daily`、`monthly`。 |
 | `quota_tz` | 计算周期边界用的 IANA 时区（默认 `UTC`），例如 `Asia/Singapore`。 |
 | `max_concurrent` | 该 Key 同时进行中的最大请求数（按网关进程计）。 |
+| `quota_cache_read_weight` | `null` = 继承网关 `quota_cache_read_weight`（环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 `1.0`）。0 到 1 的数字：每个缓存读 Token 在 `quota_tokens` 中按多少计（例如 `0.1` 约等于缓存读的价格比例）。 |
 
 超出配额返回 `429 insufficient_quota`，带 `Retry-After`（距下个周期的秒数；`total` 不带）。超出并发上限返回 `429 concurrency_limit_exceeded`，`Retry-After: 1`。模型检查在配额之前，所以不允许的模型得到 403/404 而不是 429，也不扣次数。
 

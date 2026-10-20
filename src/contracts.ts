@@ -38,6 +38,8 @@ export interface AppConfig {
    * automatically for those). When false the gateway picks a non-max variant or rejects.
    */
   allowMaxMode: boolean;
+  /** Weight (0..1) of cache-read tokens in per-key token quotas; per-key value overrides. */
+  quotaCacheReadWeight: number;
   /** SSE comment heartbeat interval while a stream is open; 0 disables it. */
   sseKeepaliveMs: number;
   /** Failed authentication attempts allowed per address each minute; 0 disables throttling. */
@@ -84,6 +86,8 @@ export interface ApiKeyRow {
   quota_tz: string;
   /** Max in-flight requests for this key. `null` = unlimited. */
   max_concurrent: number | null;
+  /** Weight (0..1) of cache-read tokens in `quota_tokens`; `null` = gateway `quota_cache_read_weight`. */
+  quota_cache_read_weight: number | null;
 }
 
 export type QuotaPeriod = "total" | "daily" | "monthly";

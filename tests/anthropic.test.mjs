@@ -130,8 +130,9 @@ test("anthropic non-stream encoding maps blocks, stop_reason and usage", () => {
     { type: "text", text: "Calling." },
     { type: "tool_use", id: "call_1", name: "get_weather", input: { city: "SG" } },
   ]);
+  // Gateway usage follows OpenAI (prompt includes cached); Anthropic input_tokens excludes it.
   assert.deepEqual(body.usage, {
-    input_tokens: 10,
+    input_tokens: 4,
     output_tokens: 4,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 6,

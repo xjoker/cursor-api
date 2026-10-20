@@ -201,13 +201,21 @@ export function periodResetsAt(period: QuotaPeriod, tz: string, now = Date.now()
  * (`run.wait().usage`); cumulative agent totals would double count resumed conversations.
  * Swap it with `setQuotaUsageSource` (e.g. for a future official per-run usage API).
  */
-export type QuotaUsageSource = (result: CursorChatResult) => number | null;
+export type QuotaUsageSource = (result: CursorChatResult, options: { cacheReadWeight: number }) => number | null;
 
-export const runScopedUsageSource: QuotaUsageSource = (result) => {
+/** Run-scoped total, with cache-read tokens counted at `cacheReadWeight` (1 = full weight). */
+export const runScopedUsageSource: QuotaUsageSource = (result, options) => {
   if (!result.usageKnown) return null;
   if (result.usageScope !== undefined && result.usageScope !== "run") return null;
-  return result.usage.total_tokens;
+  const cacheRead = Math.min(result.usage.cache_read_tokens ?? 0, result.usage.total_tokens);
+  return Math.ceil(result.usage.total_tokens - cacheRead + cacheRead * options.cacheReadWeight);
 };
+
+let gatewayCacheReadWeight = 1;
+
+export function configureQuota(options: { cacheReadWeight: number }): void {
+  gatewayCacheReadWeight = options.cacheReadWeight;
+}
 
 let usageSource: QuotaUsageSource = runScopedUsageSource;
 
@@ -286,7 +294,8 @@ export function admitKeyRequest(db: DatabaseSync, key: ApiKeyRow, now = Date.now
         refundKeyRequest(db, key.id, period);
         return;
       }
-      const tokens = result ? usageSource(result) : null;
+      const cacheReadWeight = key.quota_cache_read_weight ?? gatewayCacheReadWeight;
+      const tokens = result ? usageSource(result, { cacheReadWeight }) : null;
       if (tokens !== null && tokens > 0) {
         addKeyTokens(db, key.id, period, tokens);
       } else if (result && result.usageKnown && result.usageScope === "agent_total") {

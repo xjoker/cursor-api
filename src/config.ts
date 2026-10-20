@@ -41,6 +41,7 @@ api_key_pepper = ""
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
 # allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
+# quota_cache_read_weight = 1.0  # 0..1: how much a cache-read token counts toward per-key token quotas
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
 # auth_failure_limit = 20        # failed auth attempts per address per minute; 0 = off
 # cors_allow_origins = "*"       # comma-separated HTTP origins; empty disables CORS
@@ -170,6 +171,10 @@ export function loadConfig(
     allowMaxMode: parseBoolean(
       pickConfigured(env, "ALLOW_MAX_MODE", boolToString(tomlBool(toml, "allow_max_mode")), "allow_max_mode"),
       true,
+    ),
+    quotaCacheReadWeight: parseWeight(
+      pickConfigured(env, "QUOTA_CACHE_READ_WEIGHT", tomlString(toml, "quota_cache_read_weight"), "quota_cache_read_weight"),
+      1,
     ),
     sseKeepaliveMs: parseOptionalInterval(
       pickConfigured(env, "SSE_KEEPALIVE_MS", intToString(tomlInt(toml, "sse_keepalive_ms")), "sse_keepalive_ms"),
@@ -400,6 +405,17 @@ function parseOptionalInterval(
   return parseBoundedInt(configured, fallback, bounds);
 }
 
+/** A decimal weight in [0, 1]. */
+function parseWeight(configured: { value: string | undefined; source: string }, fallback: number): number {
+  const trimmed = optionalTrimmed(configured.value);
+  if (trimmed === undefined) return fallback;
+  const parsed = /^\d+(\.\d+)?$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error(`${configured.source} must be a number between 0 and 1 (got ${JSON.stringify(trimmed)})`);
+  }
+  return parsed;
+}
+
 function parseBoolean(
   configured: { value: string | undefined; source: string },
   fallback: boolean,
@@ -589,6 +605,10 @@ function parseTomlScalar(raw: string, source: string, lineNo: string | number): 
     return raw.slice(1, -1);
   }
   if (/^[1-9]\d*$|^0$/.test(raw)) {
+    return Number(raw);
+  }
+  // Plain decimal floats (e.g. quota_cache_read_weight = 0.1).
+  if (/^(0|[1-9]\d*)\.\d+$/.test(raw)) {
     return Number(raw);
   }
   throw new Error(`Invalid TOML value in ${source}:${lineNo}`);

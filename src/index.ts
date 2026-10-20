@@ -6,6 +6,7 @@ import { handleAdminRequest } from "./admin.js";
 import { requireClientKey } from "./auth.js";
 import {
   admitKeyRequest,
+  configureQuota,
   isListedModelAllowed,
   keyModelPolicy,
   needsModelPrecheck,
@@ -82,6 +83,7 @@ try {
 
 configureSse({ keepaliveMs: config.sseKeepaliveMs });
 configureMaxMode({ allowMaxMode: config.allowMaxMode });
+configureQuota({ cacheReadWeight: config.quotaCacheReadWeight });
 try {
   configureAuthThrottle(config.authFailureLimit, { trustedProxies: config.trustedProxies });
 } catch (error) {
