@@ -88,6 +88,16 @@ function sdkMaxMode(model) {
   return matching.length > 0 && matching.every((variant) => variant.isMaxMode === true);
 }
 
+/**
+ * What the real SDK exposes as `agent.model` / `run.model`: the selection resolved against ITS
+ * catalog. FAKE_SDK_FORCE_MAX=agent|run simulates an SDK catalog that disagrees with the gateway.
+ */
+function resolvedModel(model, stage) {
+  if (!model) return undefined;
+  const forced = process.env.FAKE_SDK_FORCE_MAX === stage;
+  return forced || sdkMaxMode(model) ? { ...model, maxMode: true } : model;
+}
+
 function catalogForKey(apiKey) {
   if (apiKey.startsWith("model-a-")) return [{ ...CATALOG[0], id: "fake-model-a", aliases: [] }];
   if (apiKey.startsWith("model-b-")) return [{ ...CATALOG[0], id: "fake-model-b", aliases: [] }];
@@ -127,6 +137,9 @@ function makeAgent(apiKey, agentId, model) {
   return {
     agentId,
     apiKey,
+    get model() {
+      return resolvedModel(model, "agent");
+    },
     async send(message, options = {}) {
       checkKey(apiKey);
       const prompt = typeof message === "string" ? message : message.text;
@@ -170,6 +183,12 @@ function makeAgent(apiKey, agentId, model) {
           await emit({ type: "text-delta", text });
           return;
         }
+        // Fake keys only (never real ones): lets e2e tests assert which pool key served the run.
+        if (prompt.includes("ECHO_KEY")) {
+          text = apiKey;
+          await emit({ type: "text-delta", text });
+          return;
+        }
         if (prompt.includes("ECHO_AGENT")) {
           text = agentId;
           await emit({ type: "text-delta", text });
@@ -197,9 +216,11 @@ function makeAgent(apiKey, agentId, model) {
         }
       })();
       return {
+        model: resolvedModel(model, "run"),
         supports: () => true,
         async cancel() {
           status = "cancelled";
+          calls.cancelled = (calls.cancelled ?? 0) + 1;
         },
         async wait() {
           await work;
@@ -234,6 +255,9 @@ export const Agent = {
     const owner = agentOwners.get(agentId);
     if (owner !== undefined && owner !== options.apiKey) {
       throw new AuthenticationError("agent belongs to another Cursor key");
+    }
+    if (process.env.FAKE_SDK_FAIL_RESUME === "1") {
+      throw new NetworkError("resume failed", { isRetryable: true, requestId: "req-resume-1" });
     }
     calls.resume.push({ agentId, model: options.model, sdkMaxMode: sdkMaxMode(options.model) });
     return makeAgent(options.apiKey, agentId, options.model);

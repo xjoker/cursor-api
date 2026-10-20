@@ -28,7 +28,8 @@ test("HTTP smoke covers health and client/admin authentication boundaries", { ti
   db.close();
 
   const port = await reservePort();
-  const child = spawn(process.execPath, ["dist/index.js"], {
+  // Fake SDK: the smoke test must never reach api.cursor.com / api2.cursor.sh (startup warm-up).
+  const child = spawn(process.execPath, ["--import", join(import.meta.dirname, "fixtures", "register-fake-sdk.mjs"), "dist/index.js"], {
     cwd: join(import.meta.dirname, ".."),
     env: {
       ...process.env,

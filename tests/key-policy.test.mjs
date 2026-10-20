@@ -433,3 +433,23 @@ test("e2e admin API: auth, validation, create with policy, PATCH, usage, reset",
     await gateway.stop();
   }
 });
+
+test("e2e: per-key allow_max_mode also governs the SDK-resolved max-mode check", { timeout: 30_000 }, async () => {
+  let gateway = await startFakeGateway({ ALLOW_MAX_MODE: "false", FAKE_SDK_FORCE_MAX: "agent" }, { keyPolicy: { allow_max_mode: true } });
+  try {
+    assert.equal((await api(gateway).chat({ model: "fake-model" })).status, 200, "key opts in: SDK max allowed");
+  } finally {
+    await gateway.stop();
+  }
+  gateway = await startFakeGateway({ FAKE_SDK_FORCE_MAX: "run" }, { keyPolicy: { allow_max_mode: false, quota_requests: 5 } });
+  try {
+    const c = api(gateway);
+    const res = await c.chat({ model: "fake-model" });
+    assert.equal(res.status, 403, "key opts out although the gateway allows max mode");
+    assert.equal((await res.json()).error.code, "max_mode_not_allowed");
+    const usage = await (await c.admin("GET", "/admin/api/keys/it-key/usage")).json();
+    assert.equal(usage.current.requests, 1, "the run reached upstream before it was cancelled, so it counts");
+  } finally {
+    await gateway.stop();
+  }
+});
