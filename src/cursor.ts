@@ -32,7 +32,7 @@ import {
   upstreamTimeout,
   upstreamUnavailable,
 } from "./errors.js";
-import { logError, logInfo, logWarn, scrubSecrets } from "./log.js";
+import { logError, logInfo, logWarn, redactLogText } from "./log.js";
 import { isCatalogModelAllowed } from "./key-policy.js";
 
 const CATALOG_TTL_MS = 60_000;
@@ -307,7 +307,6 @@ export function wasHintSoftened(request: ParsedChatRequest): boolean {
   return softenedHints.has(request);
 }
 
-/** True when max mode may be sent: the per-key override when set, else the gateway flag. */
 /**
  * Effective max-mode permission: the gateway `allow_max_mode` is a hard ceiling and a key's
  * `allow_max_mode` can only restrict further (effective = global AND key; key `null` = inherit).
@@ -320,7 +319,11 @@ export function maxModeAllowedFor(options?: ModelSelectionOptions): boolean {
 export function maxOnlyParamValues(model: ModelListItem, params: ModelParameterValue[] | undefined): ModelParameterValue[] {
   const variants = model.variants ?? [];
   return (params ?? []).filter((param) => {
-    const carrying = variants.filter((variant) => variantContains(variant, [param]));
+    // Case-insensitive on purpose (second line of defence behind canonical values, C1).
+    const folded = (value: string): string => value.trim().toLowerCase();
+    const carrying = variants.filter((variant) =>
+      variant.params.some((own) => own.id.trim() === param.id.trim() && folded(own.value) === folded(param.value)),
+    );
     return carrying.length > 0 && carrying.every((variant) => variant.isMaxMode === true);
   });
 }
@@ -425,8 +428,9 @@ export function resolveChatParams(
   }
   if (request.params) {
     for (const param of request.params) {
-      if (model) assertAllowedParam(model, param);
-      merged.set(param.id, param.value);
+      // Forward the catalog's canonical value only (C1): `1M` / a display name like "1m context"
+      // must not slip past the case-sensitive max-only checks and the SDK rule.
+      merged.set(param.id, model ? assertAllowedParam(model, param) : param.value);
     }
   }
 
@@ -619,13 +623,14 @@ function findParameter(
   );
 }
 
-function assertAllowedParam(model: ModelListItem, param: ModelParam): void {
+/** Validates `param` against the catalog and returns its canonical value. */
+function assertAllowedParam(model: ModelListItem, param: ModelParam): string {
   const parameter = model.parameters?.find((item) => item.id === param.id);
   if (!parameter) {
     const allowed = (model.parameters ?? []).map((item) => item.id).join(", ") || "(none)";
     throw invalidRequest(`Unknown param '${param.id}' for model '${model.id}'. Allowed: ${allowed}`);
   }
-  matchParamValue(parameter, param.value);
+  return matchParamValue(parameter, param.value);
 }
 
 function matchParamValue(parameter: ModelParameterDefinition, raw: string): string {
@@ -764,7 +769,7 @@ export function runFailureError(failure: { message: string; code?: string } | un
   if (!failure) return upstreamError();
   logError("cursor run failed", {
     ...(failure.code ? { upstream_code: failure.code } : {}),
-    upstream_message: scrubSecrets(failure.message).slice(0, 300),
+    upstream_message: redactLogText(failure.message).slice(0, 300),
   });
   const text = `${failure.code ?? ""} ${failure.message}`;
   if (/rate.?limit|resource.?exhausted|quota|usage.?limit|too.?many.?requests/i.test(text)) return rateLimitError(withUpstreamDetail("Cursor usage limit exceeded", failure.message));
@@ -775,6 +780,6 @@ export function runFailureError(failure: { message: string; code?: string } | un
 }
 
 function withUpstreamDetail(summary: string, detail: string | undefined): string {
-  const trimmed = detail ? scrubSecrets(detail).trim() : undefined;
+  const trimmed = detail ? redactLogText(detail).trim() : undefined;
   return !trimmed || trimmed === summary ? summary : `${summary}: ${trimmed.slice(0, 300)}`;
 }

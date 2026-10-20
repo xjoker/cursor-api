@@ -28,7 +28,7 @@ import {
 } from "./db.js";
 import { GatewayError, invalidRequest } from "./errors.js";
 import { readJsonBody, sendJson, sendSimpleError } from "./http.js";
-import { listCursorModels, peekCursorAccount } from "./cursor.js";
+import { listCursorModels, maxModeAllowedFor, peekCursorAccount } from "./cursor.js";
 import { sessionStats } from "./session.js";
 import {
   inFlightRequests,
@@ -278,10 +278,25 @@ async function dispatch(
   throw notFound("Not found");
 }
 
-function publicKey(row: ApiKeyRow): Omit<ApiKeyRow, "key_digest" | "request_limit" | "used_requests"> {
+type PublicKey = Omit<ApiKeyRow, "key_digest" | "request_limit" | "used_requests"> & {
+  /** Max mode actually allowed for this key: gateway `allow_max_mode` AND key `allow_max_mode`. */
+  effective_allow_max_mode: boolean;
+  warnings?: string[];
+};
+
+function publicKey(row: ApiKeyRow): PublicKey {
   const { key_digest: _digest, request_limit: _limit, used_requests: _used, ...rest } = row;
-  return rest;
+  const effective = maxModeAllowedFor({ allowMaxMode: row.allow_max_mode });
+  const capped = row.allow_max_mode === true && !effective;
+  return {
+    ...rest,
+    effective_allow_max_mode: effective,
+    ...(capped ? { warnings: [MAX_CEILING_WARNING] } : {}),
+  };
 }
+
+const MAX_CEILING_WARNING =
+  "allow_max_mode=true has no effect: the gateway allow_max_mode is false, which is a hard ceiling (effective = gateway AND key)";
 
 /** Validates the optional per-key policy fields shared by POST /keys and PATCH /keys/{id}. */
 function parsePolicyFields(body: unknown): Partial<ApiKeyPolicyFields> {
