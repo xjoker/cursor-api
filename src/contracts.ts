@@ -312,4 +312,12 @@ export interface CursorChatResult {
    * `agent_total` = cumulative `agent.getUsage()` fallback (may include earlier turns).
    */
   usageScope?: "run" | "agent_total";
+  /**
+   * Gateway estimate (~4 chars/token) of this HTTP turn's tokens: input sent upstream plus streamed
+   * text, thinking and tool-call arguments. Charged to `quota_tokens` when no run-scoped usage is
+   * known (client abort, tool-call suspension, cumulative-only usage).
+   */
+  quota_estimate_tokens?: number;
+  /** Tokens already charged for earlier tool-call rounds of the same run (subtracted from run usage). */
+  quota_precharged_tokens?: number;
 }

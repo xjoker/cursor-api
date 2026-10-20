@@ -29,6 +29,16 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 - **Usage 口径对齐 OpenAI**：SDK 的 `inputTokens` 不含缓存，现在 `prompt_tokens = input + cacheRead + cacheWrite`，`total_tokens = prompt + completion`（之前 `prompt + completion ≠ total`）。`prompt_tokens_details.cached_tokens` = 缓存读，`completion_tokens_details.reasoning_tokens` 在模型上报时返回。Responses 同口径；Anthropic `input_tokens` 仍不含缓存。请求日志 `input_tokens` 从此含缓存。
 - **`reasoning_effort` 改为软提示**（Chat Completions / Responses 顶层 / Messages）：模型取值精确匹配优先，否则映射到最接近档位，模型没有 effort 参数时忽略（之前 400）；只有非标准且模型也没有的值才 400。
 - `quota_cache_read_weight`（全局 `QUOTA_CACHE_READ_WEIGHT`，默认 1.0，与之前一致；Key 级同名字段可覆盖）：缓存读 Token 计入 Token 配额的权重。schema 版本 11。gateway.toml 现支持小数。
+- SAF-95 审查第 1 轮返工（Elliot）：
+  - 客户端中断：run 启动后中断按 run 用量计 Token，拿不到用量时按估算计。
+  - `quota_tokens` 准入时预留估算值，结束后多退少补，并发不再能成倍超额。
+  - 挂起的工具轮在挂起时按估算计费，并占用 `max_concurrent` 槽直到续轮或超时。
+  - 午夜夏令时时区的 `resets_at` 不再早 1 小时。
+  - 删 Key 后在途请求不再写回孤儿 usage 行。
+  - `quota_tz` 存规范 IANA 名，拒绝 UTC 偏移，读时回退 UTC。
+  - 准入预检不再计入上游 Key 统计，也不推进轮转。
+  - `PRAGMA user_version` 写入 schema 版本，迁移容忍并发的 duplicate column。
+  - **全局 `ALLOW_MAX_MODE=false` 是硬上限**，按 Key 的 `allow_max_mode` 只能进一步收紧（实际生效 = 全局 AND Key）。
 - 已知限制：以客户端工具调用结束的轮次可能少计 Token；暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。
 
 ---
