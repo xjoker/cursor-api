@@ -1,10 +1,9 @@
 // SAF-95: per client key model allowlist, max-mode override, request / token quotas and concurrency.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { configureMaxMode, maxModeAllowedFor, resolveCatalogModelSelection } from "../dist/cursor.js";
 import {
   addKeyTokens,
@@ -31,7 +30,7 @@ import { CLIENT_KEY, startFakeGateway } from "./fixtures/gateway-harness.mjs";
 const ADMIN = { authorization: "Bearer it-admin-key", "content-type": "application/json" };
 
 function freshDb() {
-  return openDb(mkdtempSync(join(tmpdir(), "key-policy-")));
+  return openDb(makeTempDir({ after }, "key-policy-"));
 }
 
 function seed(db, id, policy = {}) {
@@ -204,7 +203,7 @@ test("token quota is a soft cap: admitted while below, rejected once reached", (
 });
 
 test("concurrency cap and no overspend across connections to the same database", () => {
-  const dir = mkdtempSync(join(tmpdir(), "key-policy-multi-"));
+  const dir = makeTempDir({ after }, "key-policy-multi-");
   const db = openDb(dir);
   const key = seed(db, "k4", { max_concurrent: 2 });
   const a = admitKeyRequest(db, key);
@@ -243,7 +242,7 @@ test("keys without quota or concurrency limits never touch api_key_usage", () =>
 // --- Migration ----------------------------------------------------------------------------------
 
 test("migration: pre-SAF-95 keys come up unrestricted, and corrupt allowlists fail closed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "key-policy-mig-"));
+  const dir = makeTempDir({ after }, "key-policy-mig-");
   const old = new DatabaseSync(join(dir, "cursor-api.sqlite"));
   old.exec(`CREATE TABLE api_keys (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, key_prefix TEXT NOT NULL, key_digest TEXT NOT NULL UNIQUE,

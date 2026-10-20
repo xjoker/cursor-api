@@ -31,9 +31,9 @@ const files = readdirSync(join(root, "tests"))
   .sort();
 
 const privateTmp = mkdtempSync(join(tmpdir(), "test-tmpdir-check-"));
-const run = spawnSync(process.execPath, ["--test", ...files], {
+const run = spawnSync(process.execPath, [join(root, "scripts", "run-tests.mjs"), ...files], {
   cwd: root,
-  env: { ...process.env, TMPDIR: privateTmp, TMP: privateTmp, TEMP: privateTmp },
+  env: { ...process.env, CURSOR_API_TEST_TMPDIR: privateTmp, TMPDIR: privateTmp, TMP: privateTmp, TEMP: privateTmp },
   stdio: "inherit",
 });
 

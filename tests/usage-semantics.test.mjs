@@ -1,10 +1,10 @@
 // OpenAI usage semantics: prompt_tokens includes cache reads/writes; totals are consistent.
 // Per-key token quotas can weight cache-read tokens.
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { toChatUsage } from "../dist/cursor.js";
 import { encodeAnthropicUsage } from "../dist/anthropic.js";
 import { loadConfig } from "../dist/config.js";
@@ -63,7 +63,7 @@ test("cache-read weight: default 1.0 (unchanged), gateway setting, per-key overr
   assert.equal(runScopedUsageSource(result, { cacheReadWeight: 0 }), 20);
   assert.equal(runScopedUsageSource({ ...result, usage: { ...result.usage, cache_read_tokens: 3 } }, { cacheReadWeight: 0.5 }), 119, "rounded up");
 
-  const db = openDb(mkdtempSync(join(tmpdir(), "cache-weight-")));
+  const db = openDb(makeTempDir({ after }, "cache-weight-"));
   const now = new Date().toISOString();
   const seed = (id, extra) => {
     insertApiKey(db, { id, name: id, key_prefix: id, key_digest: `d-${id}`, created_at: now, updated_at: now, quota_tokens: 10_000, ...extra });
@@ -89,7 +89,7 @@ test("cache-read weight: default 1.0 (unchanged), gateway setting, per-key overr
 });
 
 test("quota_cache_read_weight config parses from env and TOML, default 1", () => {
-  const root = mkdtempSync(join(tmpdir(), "cache-weight-cfg-"));
+  const root = makeTempDir({ after }, "cache-weight-cfg-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   const toml = join(root, "data", "config", "gateway.toml");
   const base = ['cursor_api_key = "c"', 'admin_access_key = "a"', 'api_key_pepper = "p"'];

@@ -26,8 +26,10 @@ const allowNetwork = env.CURSOR_API_TEST_ALLOW_NETWORK === "1";
 const logDir = mkdtempSync(join(tmpdir(), "cursor-api-netguard-"));
 const log = join(logDir, "blocked.log");
 // Every temp dir the tests create lands in this run-scoped TMPDIR, removed when the run ends.
-env.TMPDIR = join(logDir, "tmp");
-mkdirSync(env.TMPDIR);
+env.TMPDIR = env.CURSOR_API_TEST_TMPDIR ?? join(logDir, "tmp");
+mkdirSync(env.TMPDIR, { recursive: true });
+env.TMP = env.TMPDIR;
+env.TEMP = env.TMPDIR;
 if (!allowNetwork) {
   const guard = pathToFileURL(join(root, "tests", "fixtures", "no-network.mjs")).href;
   env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ""} --import=${guard}`.trim();

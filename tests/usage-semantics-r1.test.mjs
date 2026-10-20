@@ -1,10 +1,10 @@
 // Elliot #41 round 1: N1 (no silent max via non-exact effort), N2 (soft effort when max is off),
 // N3 (weight wiring / rounding / admin bounds), N4 (integer TOML keys reject decimals). Offline.
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { configureMaxMode, highestNonMaxEffort, resolveCatalogModelSelection, resolveChatParams, wasHintSoftened } from "../dist/cursor.js";
 import { loadConfig } from "../dist/config.js";
 import { runScopedUsageSource } from "../dist/key-policy.js";
@@ -146,7 +146,7 @@ test("N3: admin rejects negative and non-numeric weights", { timeout: 20_000 }, 
 });
 
 test("N4: integer TOML keys reject decimals at startup; weight rejects booleans", () => {
-  const root = mkdtempSync(join(tmpdir(), "int-toml-"));
+  const root = makeTempDir({ after }, "int-toml-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   const toml = join(root, "data", "config", "gateway.toml");
   const base = ['cursor_api_key = "c"', 'admin_access_key = "a"', 'api_key_pepper = "p"'];
@@ -165,7 +165,7 @@ test("N4: integer TOML keys reject decimals at startup; weight rejects booleans"
 });
 
 test("N5: upgrading rewrites old request-log input_tokens once, so aggregates use one semantics", () => {
-  const dir = mkdtempSync(join(tmpdir(), "usage-migrate-"));
+  const dir = makeTempDir({ after }, "usage-migrate-");
   let db = openDb(dir);
   const now = new Date().toISOString();
   insertApiKey(db, { id: "k", name: "k", key_prefix: "k", key_digest: "d-k", created_at: now, updated_at: now });

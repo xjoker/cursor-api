@@ -2,11 +2,10 @@
 // F4 DST resets, F5 orphan usage, F6 quota_tz, F7 precheck stats, F8 user_version, mutants
 // K10 / K12 / K20 / K24. Offline (fake SDK).
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { getApiKeyById, getKeyUsageRow, insertApiKey, openDb, SCHEMA_VERSION } from "../dist/db.js";
 import {
   clearRecentRuns,
@@ -33,7 +32,7 @@ const HEADERS = { authorization: `Bearer ${CLIENT_KEY}`, "content-type": "applic
 const TOOLS = [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }];
 
 function freshDb() {
-  return openDb(mkdtempSync(join(tmpdir(), "key-policy-r1-")));
+  return openDb(makeTempDir({ after }, "key-policy-r1-"));
 }
 
 function seed(db, id, policy = {}) {

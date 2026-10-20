@@ -2,10 +2,10 @@
 // send-stage block (C2), max_mode logged for send-stage blocks (C3), and the two visible
 // mutants (C5): streaming create-stage 403 must stay JSON, no text before the run.model check.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { configureMaxMode, maxOnlyParamValues, resolveCatalogModelSelection, resolveChatParams } from "../dist/cursor.js";
 import { parseChatCompletionsRequest } from "../dist/openai.js";
 import { CLIENT_KEY, parseSse, startFakeGateway } from "./fixtures/gateway-harness.mjs";
@@ -63,7 +63,7 @@ const readLedger = (file) => {
     return [];
   }
 };
-const ledgerFile = () => join(mkdtempSync(join(tmpdir(), "fake-ledger-")), "ledger.jsonl");
+const ledgerFile = () => join(makeTempDir({ after }, "fake-ledger-"), "ledger.jsonl");
 
 test("C1 e2e: params context=1M / '1m context' never reach upstream when max mode is off", { timeout: 20_000 }, async () => {
   const file = ledgerFile();

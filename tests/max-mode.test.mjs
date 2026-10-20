@@ -1,7 +1,8 @@
 // Max-mode guard: @cursor/sdk >= 1.0.38 turns max mode on by itself (params non-empty and every
 // matching catalog variant isMaxMode). These tests pin what the gateway hands to the SDK.
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 import { configureMaxMode, resolveCatalogModelSelection, sdkWouldUseMaxMode } from "../dist/cursor.js";
 import { parseChatCompletionsRequest } from "../dist/openai.js";
 import { parseAnthropicMessagesRequest } from "../dist/anthropic.js";
@@ -113,10 +114,9 @@ test("per-request allowMaxMode=false overrides the gateway default; Anthropic ef
 });
 
 test("allow_max_mode config parses from env and TOML, default true", async () => {
-  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
   const { join } = await import("node:path");
-  const root = mkdtempSync(join(tmpdir(), "maxmode-cfg-"));
+  const root = makeTempDir({ after }, "maxmode-cfg-");
   mkdirSync(join(root, "data", "config"), { recursive: true });
   const toml = join(root, "data", "config", "gateway.toml");
   const base = ['cursor_api_key = "c"', 'admin_access_key = "a"', 'api_key_pepper = "p"'];
@@ -242,11 +242,9 @@ test("default (allow_max_mode=true): bare default-max model runs in max mode and
 });
 
 test("request_logs gains a nullable max_mode column on existing databases", async () => {
-  const { mkdtempSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { DatabaseSync } = await import("node:sqlite");
-  const dir = mkdtempSync(join(tmpdir(), "maxmode-mig-"));
+  const dir = makeTempDir({ after }, "maxmode-mig-");
   const legacy = new DatabaseSync(join(dir, "cursor-api.sqlite"));
   legacy.exec(`CREATE TABLE request_logs (id TEXT PRIMARY KEY, api_key_id TEXT NOT NULL, model TEXT NOT NULL,
     stream INTEGER NOT NULL, http_status INTEGER NOT NULL, duration_ms INTEGER NOT NULL, input_tokens INTEGER,

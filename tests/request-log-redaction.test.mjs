@@ -3,10 +3,9 @@
 // (openDb/insertRequestLog/getRequestLogById, logInfo/setSystemLogWriter) so the same file can be
 // run against older trees to show the gap.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { makeTempDir } from "./fixtures/temp-dir.mjs";
 
 const FAKE_API_KEY = "supersecret999";
 const FAKE_BEARER = "abcdefghijklmnop";
@@ -14,7 +13,7 @@ const FAKE_MODEL_KEY = "sk-fakeABCDEFGHIJKLMNOPQRSTUV0123";
 
 async function freshDb() {
   const { openDb, insertApiKey } = await import("../dist/db.js");
-  const db = openDb(mkdtempSync(join(tmpdir(), "cursor-api-redact-")), {
+  const db = openDb(makeTempDir({ after }, "cursor-api-redact-"), {
     retentionDays: 30,
     maxRows: 100,
     maxDetailBytes: 1_048_576,
