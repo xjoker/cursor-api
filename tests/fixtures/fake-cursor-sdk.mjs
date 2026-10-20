@@ -189,6 +189,24 @@ function makeAgent(apiKey, agentId, model) {
           await emit({ type: "text-delta", text });
           return;
         }
+        // `SAY<<text>>` streams `text` in 3-char deltas and stops once the run is cancelled.
+        const say = /SAY<<([\s\S]*?)>>/.exec(prompt);
+        if (say) {
+          for (let index = 0; index < say[1].length; index += 3) {
+            if (status === "cancelled") return;
+            const part = say[1].slice(index, index + 3);
+            text += part;
+            await emit({ type: "text-delta", text: part });
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          return;
+        }
+        // Echoes the end of the prompt actually sent upstream (e.g. the JSON-mode instruction).
+        if (prompt.includes("ECHO_PROMPT_TAIL")) {
+          text = prompt.slice(-600);
+          await emit({ type: "text-delta", text });
+          return;
+        }
         if (prompt.includes("ECHO_AGENT")) {
           text = agentId;
           await emit({ type: "text-delta", text });

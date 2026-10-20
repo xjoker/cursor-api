@@ -40,6 +40,7 @@ api_key_pepper = ""
 # max_live_sessions = 256        # running + parked Cursor sessions kept in memory
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
+# enforce_output_limits = false  # true: enforce max_tokens / stop at the gateway (cut + cancel the run)
 # allow_max_mode = true          # false: never run Cursor max-mode variants (pick non-max or reject)
 # quota_cache_read_weight = 1.0  # 0..1: how much a cache-read token counts toward per-key token quotas
 # sse_keepalive_ms = 15000       # 0 disables SSE comment heartbeats
@@ -166,6 +167,10 @@ export function loadConfig(
     ),
     ignoreSamplingParams: parseBoolean(
       pickConfigured(env, "IGNORE_SAMPLING_PARAMS", boolToString(tomlBool(toml, "ignore_sampling_params")), "ignore_sampling_params"),
+      false,
+    ),
+    enforceOutputLimits: parseBoolean(
+      pickConfigured(env, "ENFORCE_OUTPUT_LIMITS", boolToString(tomlBool(toml, "enforce_output_limits")), "enforce_output_limits"),
       false,
     ),
     allowMaxMode: parseBoolean(

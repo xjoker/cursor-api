@@ -32,6 +32,13 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 - 已知限制：以客户端工具调用结束的轮次可能少计 Token；暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。
 
 ---
+- **OpenAI 兼容补全**（SAF-95 PR B）：
+  - Chat Completions 接受 OpenRouter 风格 `reasoning: { effort, max_tokens, enabled, exclude }`（软提示，不 400；`exclude: true` 不返回思考文本）。
+  - 思考文本同时以 `reasoning_content` 和 `reasoning` 返回（非流式 `message`、流式 `delta`）。
+  - `enforce_output_limits`（`ENFORCE_OUTPUT_LIMITS`，默认 `false` = 行为不变）：网关执行 `max_tokens` / `max_completion_tokens` / `max_output_tokens` / Messages `max_tokens` 与 `stop` / `stop_sequences`，截断并取消 run，返回 `length`（Responses `incomplete`、Messages `max_tokens`）或 `stop`（Messages `stop_sequence`）。Token 按 4 字符估算。
+  - `ignore_sampling_params` 额外忽略 OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`；`stream_options.include_obfuscation` 接受并忽略。
+  - `response_format` `json_object` / `json_schema` 与 Responses `text.format` 尽力而为：上游 prompt 附加 JSON 指令，非流式去掉外层代码块，非法 JSON 写日志。
+  - `GET /v1/responses/{id}`：内存保存已完成的 Response（按 Key、1 小时、最多 1000 条，`store: false` 不保存）。
 
 ## [20261020.1] — 2026-10-20
 

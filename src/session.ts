@@ -32,6 +32,7 @@ import { conversationBusyError, GatewayError, invalidRequest, maxModeNotAllowed 
 import { logError, logInfo, logWarn } from "./log.js";
 import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
+import { normalizeJsonReply, OutputLimiter, outputFormatInstruction } from "./output-limits.js";
 
 const DEFAULT_PARK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -80,6 +81,14 @@ interface LiveSession {
   allowMaxMode: boolean;
   /** Deltas held back until the run's SDK-resolved model passed the max-mode check. */
   heldDeltas?: InteractionUpdate[];
+  /** Per-turn output shaping from the request that started (or continued) the run. */
+  output?: {
+    limiter?: OutputLimiter;
+    limits?: { stop?: string[]; maxTokens?: number };
+    excludeReasoning: boolean;
+    format?: ParsedChatRequest["output_format"];
+    stream: boolean;
+  };
   text: string;
   thinking: string;
   sink: ChatTurnSink | undefined;
@@ -766,6 +775,7 @@ async function sendOnSession(
   session.sink = options.sink;
   session.lastRequestMessages = options.request.messages;
   session.lastActiveAt = Date.now();
+  session.output = outputShapingFor(options.request);
   liveSessions.add(session);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   const images = imagesOfLastUser(options.request.messages);
@@ -775,7 +785,9 @@ async function sendOnSession(
   // run.model max-mode check. (Allowed: nothing to check, stream directly.)
   session.heldDeltas = session.allowMaxMode ? undefined : [];
   try {
-    run = await session.agent.send(images && images.length > 0 ? { text: prompt, images } : prompt, {
+    // JSON-mode instruction goes to the upstream prompt only (stored messages / hashes unchanged).
+    const text = prompt + outputFormatInstruction(options.request.output_format);
+    run = await session.agent.send(images && images.length > 0 ? { text, images } : text, {
       local: { ...(customTools ? { customTools } : {}), force: true },
       onDelta: async ({ update }) => {
         await emitDelta(session, update);
@@ -805,6 +817,8 @@ async function sendOnSession(
   }
   await releaseHeldDeltas(session);
   session.run = run;
+  // A limit may already have been hit while `send` was resolving.
+  if (session.output?.limiter?.cut) cancelForCut(session);
   session.waitPromise = settleRun(session, options.abortSignal);
   bindAbort(session, options.abortSignal);
   indexSession(session, session.apiKeyId, hashMessages(options.request.messages));
@@ -821,6 +835,8 @@ export async function continueRun(
   session.lastFlushed = [];
   session.batchReady = new Deferred<OpenAiToolCall[]>();
   session.lastActiveAt = Date.now();
+  // Limits count per HTTP turn: restart them for the continued run.
+  if (session.output?.limits) session.output.limiter = new OutputLimiter(session.output.limits.stop, session.output.limits.maxTokens);
   clearParkTimer(session);
   bindAbort(session, abortSignal);
   if (session.batch.length > 0) {
@@ -993,15 +1009,79 @@ async function releaseHeldDeltas(session: LiveSession): Promise<void> {
 
 async function deliverDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
   if (update.type === "thinking-delta") {
-    if (update.text === "") return;
+    if (update.text === "" || session.output?.excludeReasoning) return;
     session.thinking += update.text;
     if (session.sink) await session.sink.onThinking(update.text);
     return;
   }
   if (update.type !== "text-delta") return;
   if (update.text === "") return;
-  session.text += update.text;
-  if (session.sink) await session.sink.onText(update.text);
+  const limiter = session.output?.limiter;
+  const visible = limiter ? limiter.push(update.text) : update.text;
+  await appendText(session, visible);
+  if (limiter?.cut) cancelForCut(session);
+}
+
+async function appendText(session: LiveSession, text: string): Promise<void> {
+  if (text === "") return;
+  session.text += text;
+  if (session.sink) await session.sink.onText(text);
+}
+
+function outputShapingFor(request: ParsedChatRequest): LiveSession["output"] {
+  const limits =
+    request.stop !== undefined || request.max_output_tokens !== undefined
+      ? { ...(request.stop ? { stop: request.stop } : {}), ...(request.max_output_tokens !== undefined ? { maxTokens: request.max_output_tokens } : {}) }
+      : undefined;
+  return {
+    ...(limits ? { limits, limiter: new OutputLimiter(limits.stop, limits.maxTokens) } : {}),
+    excludeReasoning: request.reasoning_exclude === true,
+    ...(request.output_format ? { format: request.output_format } : {}),
+    stream: request.stream,
+  };
+}
+
+/** Output limit hit: stop the upstream run (the cut text is already final). */
+function cancelForCut(session: LiveSession): void {
+  const run = session.run;
+  if (!run || session.parks.size > 0) return;
+  if (run.supports("cancel")) void run.cancel().catch(() => undefined);
+}
+
+/** Final text plus finish details for limits and JSON mode (successful or limit-cancelled runs). */
+async function finishOutput(
+  session: LiveSession,
+  upstreamText: string | undefined,
+): Promise<Pick<CursorChatResult, "text" | "finish_reason" | "json_valid" | "stop_sequence">> {
+  const limiter = session.output?.limiter;
+  let text = upstreamText ?? session.text;
+  let finish: CursorChatResult["finish_reason"] = "stop";
+  let stopSequence: string | undefined;
+  if (limiter) {
+    await appendText(session, limiter.flush());
+    text = session.text;
+    const cut = limiter.cut;
+    if (cut?.reason === "length") finish = "length";
+    if (cut?.reason === "stop") stopSequence = cut.sequence;
+  }
+  let jsonValid: boolean | undefined;
+  if (session.output?.format) {
+    const normalized = normalizeJsonReply(text, !session.output.stream);
+    text = normalized.text;
+    jsonValid = normalized.valid;
+    if (!jsonValid) {
+      logWarn("json output requested but the reply is not valid JSON", {
+        api_key_id: session.apiKeyId,
+        format: session.output.format.type,
+      });
+    }
+  }
+  return {
+    text,
+    finish_reason: finish,
+    ...(jsonValid !== undefined ? { json_valid: jsonValid } : {}),
+    ...(stopSequence !== undefined ? { stop_sequence: stopSequence } : {}),
+  };
 }
 
 function withThinking(session: LiveSession, result: CursorChatResult): CursorChatResult {
@@ -1028,6 +1108,18 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
     const billed = await billedUsageOf(session.agent);
     const rawUsage = result.usage ?? billed?.usage;
     const usageScope = result.usage ? ("run" as const) : billed?.usage ? ("agent_total" as const) : undefined;
+    if (result.status === "cancelled" && session.output?.limiter?.cut && !abortSignal.aborted) {
+      // Cancelled by the gateway's own max_tokens / stop cut: a normal, truncated completion.
+      return {
+        usage: toChatUsage(rawUsage),
+        usageKnown: rawUsage !== undefined,
+        ...(usageScope ? { usageScope } : {}),
+        params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        status: "finished",
+        ...(await finishOutput(session, undefined)),
+      };
+    }
     if (result.status === "cancelled") {
       return {
         text: session.text,
@@ -1053,7 +1145,6 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
       };
     }
     return {
-      text: result.result ?? session.text,
       usage: toChatUsage(rawUsage),
       usageKnown: rawUsage !== undefined,
       ...(usageScope ? { usageScope } : {}),
@@ -1063,9 +1154,19 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
       params: session.modelParams,
       ...(session.maxMode ? { max_mode: true } : {}),
       status: "finished",
-      finish_reason: "stop",
+      ...(await finishOutput(session, result.result)),
     };
   } catch (error) {
+    if (session.output?.limiter?.cut && !abortSignal.aborted) {
+      return {
+        usage: toChatUsage(undefined),
+        usageKnown: false,
+        params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        status: "finished",
+        ...(await finishOutput(session, undefined)),
+      };
+    }
     if (abortSignal.aborted) {
       return {
         text: session.text,

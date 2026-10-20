@@ -54,6 +54,8 @@ import {
   parseResponsesRequest,
   ResponsesStreamWriter,
 } from "./responses.js";
+import { getStoredResponse, storeResponse } from "./response-store.js";
+import { clientFinishReason } from "./output-limits.js";
 import {
   configureMaxMode,
   getCursorModel,
@@ -176,6 +178,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           base_url: "/v1",
           chat_completions: "POST /v1/chat/completions",
           responses: "POST /v1/responses",
+          response: "GET /v1/responses/{id} (in-memory, 1h)",
           messages: "POST /v1/messages (Anthropic)",
           count_tokens: "POST /v1/messages/count_tokens (estimate)",
           models: "GET /v1/models",
@@ -268,6 +271,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
+    if (req.method === "GET" && url.pathname.startsWith("/v1/responses/")) {
+      const key = requireClientKey(req, db, config.apiKeyPepper);
+      const id = decodeURIComponent(url.pathname.slice("/v1/responses/".length));
+      const stored = id === "" || id.includes("/") ? undefined : getStoredResponse(key.id, id);
+      if (!stored) {
+        throw new GatewayError(404, "not_found", `Response '${id}' not found`, "invalid_request_error");
+      }
+      sendJson(res, 200, stored, cors);
+      return;
+    }
+
     sendJson(res, 404, { error: "Not found", code: "not_found" }, cors);
   } catch (error) {
     logError("request failed", { path: url.pathname, code: error instanceof GatewayError ? error.code : "server_error" });
@@ -308,7 +322,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
-    const parsed = parseChatCompletionsRequest(body, { ignoreSamplingParams: config.ignoreSamplingParams });
+    const parsed = parseChatCompletionsRequest(body, {
+      ignoreSamplingParams: config.ignoreSamplingParams,
+      enforceOutputLimits: config.enforceOutputLimits,
+    });
     parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
@@ -446,7 +463,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
 
       const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+      const finishReason = clientFinishReason(result);
 
       if (parsed.stream) {
         await writeSse(
@@ -601,7 +618,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
-    const parsed = parseAnthropicMessagesRequest(body);
+    const parsed = parseAnthropicMessagesRequest(body, { enforceOutputLimits: config.enforceOutputLimits });
     parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
@@ -684,13 +701,14 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       }
 
       const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+      const finishReason = clientFinishReason(result);
 
       if (parsed.stream) {
         await writer?.complete({
           content: result.text,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
           finish_reason: finishReason,
+          ...(result.stop_sequence !== undefined ? { stop_sequence: result.stop_sequence } : {}),
           usage: result.usageKnown ? result.usage : null,
         });
         res.end();
@@ -707,6 +725,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
             params: result.params,
             tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
             finish_reason: finishReason,
+            ...(result.stop_sequence !== undefined ? { stop_sequence: result.stop_sequence } : {}),
             ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
           }),
           { "x-request-id": requestId, "request-id": requestId, ...headers },
@@ -797,7 +816,8 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
     const body = await readJsonBody(req, config.maxBodyBytes);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
-    const parsed = parseResponsesRequest(body);
+    const parsed = parseResponsesRequest(body, { enforceOutputLimits: config.enforceOutputLimits });
+    const keepResponse = !(typeof body === "object" && body !== null && (body as { store?: unknown }).store === false);
     parsed.model = resolveModelAlias(config.modelAliases, parsed.model);
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
@@ -907,10 +927,10 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       }
 
       const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = result.finish_reason === "tool_calls" ? "tool_calls" : "stop";
+      const finishReason = clientFinishReason(result);
 
       if (parsed.stream) {
-        await writer?.complete({
+        const final = await writer?.complete({
           content: result.text,
           usage: result.usageKnown ? result.usage : null,
           cost: result.cost,
@@ -919,26 +939,24 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
           reasoning_content: result.reasoning,
           finish_reason: finishReason,
         });
+        if (final && keepResponse) storeResponse(key.id, final);
         res.end();
       } else {
-        sendJson(
-          res,
-          200,
-          encodeNonStreamResponse({
-            id: requestId,
-            created,
-            model: parsed.model,
-            content: result.text,
-            usage: result.usageKnown ? result.usage : null,
-            cost: result.cost,
-            params: result.params,
-            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-            finish_reason: finishReason,
-            customToolNames,
-            ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
-          }),
-          { "x-request-id": requestId, ...headers },
-        );
+        const final = encodeNonStreamResponse({
+          id: requestId,
+          created,
+          model: parsed.model,
+          content: result.text,
+          usage: result.usageKnown ? result.usage : null,
+          cost: result.cost,
+          params: result.params,
+          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+          finish_reason: finishReason,
+          customToolNames,
+          ...(result.reasoning ? { reasoning_content: result.reasoning } : {}),
+        });
+        if (keepResponse) storeResponse(key.id, final);
+        sendJson(res, 200, final, { "x-request-id": requestId, ...headers });
       }
     } finally {
       req.off("close", onClose);

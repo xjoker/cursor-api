@@ -33,6 +33,8 @@ export interface AppConfig {
   parkTimeoutMs: number;
   /** Unsupported Chat Completions sampling knobs are dropped instead of rejected. */
   ignoreSamplingParams: boolean;
+  /** Enforce `max_tokens` / `stop` at the gateway (cut + cancel); false = accept-and-ignore / 400. */
+  enforceOutputLimits: boolean;
   /**
    * Allow requests that resolve to a Cursor max-mode variant (SDK >= 1.0.38 turns max mode on
    * automatically for those). When false the gateway picks a non-max variant or rejects.
@@ -249,7 +251,19 @@ export interface ParsedChatRequest {
   conversation_id?: string;
   /** The gateway assigned the conversation ID, so transcript matching remains valid. */
   conversation_id_generated?: boolean;
+  /** OpenRouter `reasoning.exclude`: do not return thinking text (the model still reasons). */
+  reasoning_exclude?: boolean;
+  /** Gateway-enforced stop sequences (`enforce_output_limits`). */
+  stop?: string[];
+  /** Gateway-enforced output cap in estimated tokens (`enforce_output_limits`). */
+  max_output_tokens?: number;
+  /** Best-effort structured output (`response_format` / Responses `text.format`). */
+  output_format?: OutputFormat;
 }
+
+export type OutputFormat =
+  | { type: "json_object" }
+  | { type: "json_schema"; name?: string; schema?: unknown; strict?: boolean };
 
 export interface OpenAiModel {
   id: string;
@@ -281,7 +295,12 @@ export interface CursorChatResult {
   cost?: CursorCost | null;
   params?: ModelParam[];
   status: "finished" | "error" | "cancelled";
-  finish_reason: "stop" | "tool_calls" | "cancelled" | "error";
+  /** `length` / `stop` (via `stop_sequence`) only when the gateway cut the output (`enforce_output_limits`). */
+  finish_reason: "stop" | "tool_calls" | "cancelled" | "error" | "length";
+  /** Set when `output_format` asked for JSON: whether the final text parsed as JSON. */
+  json_valid?: boolean;
+  /** The stop sequence that cut the output (`enforce_output_limits`). */
+  stop_sequence?: string;
   error?: { message: string; code?: string };
   tool_calls?: OpenAiToolCall[];
   /** Cursor `thinking-delta` text; OpenCode reads this as `reasoning_content`. */

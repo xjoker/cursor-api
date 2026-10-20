@@ -115,7 +115,8 @@ detailed = false
 | `park_timeout_ms` | 工具轮次在内存里保留多久（默认 **300000**）。网关重启后，下一次工具结果按 HTTP transcript 续场 |
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
-| `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数而不返回 400（默认 **false**） |
+| `ignore_sampling_params` | 丢弃 Chat Completions 不支持的采样参数（`temperature`、`top_p`、`top_k`、各类 penalty、`seed`、OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`、`parallel_tool_calls: false`）而不返回 400（默认 **false**）。影响输出形态的字段（`stop`、`logit_bias`、`top_logprobs`）仍然 400 |
+| `enforce_output_limits` | 由**网关**执行 `max_tokens` / `max_completion_tokens`（Chat）、`max_output_tokens`（Responses）、`max_tokens`（Messages）以及 `stop` / `stop_sequences`（环境变量 `ENFORCE_OUTPUT_LIMITS`，默认 **false** = 行为不变：Token 上限照收不管，`stop` / 非空 `stop_sequences` 返回 400）。设为 `true`：网关截断可见文本并取消 Cursor run；结束原因为 `length`（Responses 为 `status: "incomplete"`，Messages 为 `stop_reason: "max_tokens"`）或 `stop`（Messages 为 `stop_reason: "stop_sequence"` 并带 `stop_sequence`）。Token 按每 4 个字符 1 个**估算**；思考文本不计入；Chat 最多 4 个 stop。流式时 stop 序列本身不会发给客户端（末尾几个字符会暂缓，直到确定不会组成 stop）。usage 仍是 Cursor 实际计费的用量 |
 | `allow_max_mode` | 是否允许 Cursor **max mode**（环境变量 `ALLOW_MAX_MODE`，默认 **true**）。当前锁定的 `@cursor/sdk` 会在「与解析出的参数匹配的目录变体全部是 max-only」时自动开启 max mode，按更高费率计费。网关以模型的默认变体为基础参数，所以默认变体是 max-only 的模型（例如默认长上下文）只写模型名就会走 max。设为 `false`：网关会换成保留客户端显式选择的最接近的非 max 变体；只有 max 变体能满足的请求（max-only 模型，或 `variant`/`params`/`reasoning_effort` 指向 max 变体）返回 `403 max_mode_not_allowed`。软提示（Anthropic 的 `output_config.effort` / `thinking.budget_tokens`、Responses 的 `reasoning.effort`）会被丢弃而不是报错，并写日志（`max mode disallowed: using non-max variant`，字段 `softened_hint`）。只在 max 变体里出现的参数值（如 `context=1m`）即使和其他参数混用也不会被发出。`Agent.create` / `resume` / `send` 之后，网关还会检查 SDK 实际解析出的模型（`agent.model` / `run.model`，可能和网关目录不一致）；如果是 max mode，就释放 agent 或取消 run，返回 `403`（流式时是一条 SSE 错误帧，并且在检查通过前不会输出任何模型文本）。每条请求日志记录的是**实际**的 `max_mode` |
 | `quota_cache_read_weight` | 缓存读 Token 计入按 Key `quota_tokens` 的权重（0–1，环境变量 `QUOTA_CACHE_READ_WEIGHT`，默认 **1.0**）；Key 自己的 `quota_cache_read_weight` 优先 |
 | `sse_keepalive_ms` | 空闲流式响应发送 `: keepalive` 注释的间隔（默认 **15000**；`0` 关闭） |
@@ -180,8 +181,11 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
 | `POST` | `/v1/messages` | Anthropic SDK、兼容 Claude 的客户端 |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
+| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，最多最近 1000 条；`store: false` 不保存；重启丢失） |
 
-支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`reasoning_effort` 按尽力而为处理：精确匹配模型取值，否则取最接近档位；模型没有 effort 参数时忽略（布尔型思考开关：`none`/`minimal` 映射为关）。
+支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`，同时以 `delta.reasoning` / `message.reasoning` 再给一份，兼容 OpenRouter 风格客户端）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`reasoning_effort` 按尽力而为处理：精确匹配模型取值，否则取最接近档位；模型没有 effort 参数时忽略（布尔型思考开关：`none`/`minimal` 映射为关）。
+
+Chat Completions 接受 OpenRouter 风格的 `reasoning: { effort, max_tokens, enabled, exclude }`，作为软提示（不会 400）：`effort` 取最接近档位，`max_tokens` 按预算选档（<4096 low，<16384 medium，否则 high），`enabled: false` 取最低档，`exclude: true` 不返回思考文本。顶层 `reasoning_effort` 优先。`response_format` 的 `json_object` / `json_schema`（以及 Responses 的 `text.format`）是**尽力而为**：Cursor 没有约束解码，网关会在发给上游的 prompt 末尾附加 JSON 指令（含 schema），非流式回复会去掉外层 ```` ```json ```` 代码块；仍不是合法 JSON 时原样返回并写日志（`json output requested but the reply is not valid JSON`）。不校验 schema。`max_tokens` / `stop` 见 `enforce_output_limits`。
 
 Usage 按 OpenAI 语义：`prompt_tokens` 包含缓存 Token（`prompt_tokens_details.cached_tokens` = 缓存读；缓存写另外以 `cache_write_tokens` 返回），模型上报时带 `completion_tokens_details.reasoning_tokens`，`total_tokens = prompt_tokens + completion_tokens`。请求日志的 `input_tokens` 也按此口径（本次改动之前写入的行是不含缓存的 input）。`conversation_id`（或 `metadata.conversation_id`）按客户端 Key 续同一个 Cursor Agent；ID 最多 512 个 UTF-8 字节，每个客户端 Key 保留最近 1000 条映射。工具停车超时为 `park_timeout_ms`（默认 300000）；网关重启后，工具结果按 HTTP transcript 续场。
 
@@ -199,7 +203,7 @@ ANTHROPIC_API_KEY=<你的 cgk_ 客户端 key>      # 以 x-api-key 发送
 - 支持 `system`（字符串或 text 块）、`text` / `image`（base64 或 URL）块、`stream: true`（`message_start` → `content_block_*` → `message_delta` → `message_stop`），思考内容以 `thinking` 块输出。
 - 客户端工具：`tools[].input_schema` → `tool_use` 块 + `stop_reason: "tool_use"`；下一轮 user 消息里回传 `tool_result`（`is_error: true` 会作为错误结果交给模型）。与 `tool_result` 同时出现的额外文本会附加到最后一个结果上。没有 `input_schema` 的服务端工具（`web_search_…`、`bash_…`）会被忽略。
 - `tool_choice`：`auto`、`tool`、`none`；`any` 退化为 `auto`（Cursor 无法强制调用工具）。
-- 忽略：`temperature`、`top_p`、`top_k`、`thinking`、`output_config`、`context_management`、`service_tier`。未知顶层字段也会忽略。拒绝：非空 `stop_sequences`、`document` 块。
+- 忽略：`temperature`、`top_p`、`top_k`、`thinking`、`output_config`、`context_management`、`service_tier`。未知顶层字段也会忽略。拒绝：非空 `stop_sequences`（开启 `enforce_output_limits` 后接受并执行）、`document` 块。
 - Cursor 参数（`params`、`variant`、`reasoning_effort`、`verbosity`、`fast`、`optimize_for`）以及 `conversation_id` / `metadata.conversation_id` 与 Chat Completions 一致。
 - 错误为 Anthropic 格式：`{"type":"error","error":{"type":"invalid_request_error","message":"…"}}`。
 - `usage` 的 `input_tokens`（不含缓存，Anthropic 语义）/ `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` 来自 Cursor token 用量；非流式响应附带 `cursor.cost`。
