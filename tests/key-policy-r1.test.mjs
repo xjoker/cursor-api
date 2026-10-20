@@ -340,3 +340,31 @@ test("F8: PRAGMA user_version records the schema version", () => {
   assert.equal(db.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
   db.close();
 });
+
+test("P3: admin returns the effective max-mode permission and warns when the gateway ceiling wins", { timeout: 20_000 }, async () => {
+  const patch = (gateway, body) =>
+    fetch(`${gateway.baseUrl}/admin/api/keys/it-key`, { method: "PATCH", headers: { ...ADMIN, "content-type": "application/json" }, body: JSON.stringify(body) });
+  let gateway = await startFakeGateway({ ALLOW_MAX_MODE: "false" });
+  try {
+    let body = await (await patch(gateway, { allow_max_mode: true })).json();
+    assert.equal(body.allow_max_mode, true);
+    assert.equal(body.effective_allow_max_mode, false);
+    assert.match(body.warnings?.[0] ?? "", /hard ceiling/);
+    const listed = (await (await fetch(`${gateway.baseUrl}/admin/api/keys`, { headers: ADMIN })).json()).keys.find((k) => k.id === "it-key");
+    assert.equal(listed.effective_allow_max_mode, false);
+    body = await (await patch(gateway, { allow_max_mode: null })).json();
+    assert.equal(body.effective_allow_max_mode, false);
+    assert.equal(body.warnings, undefined, "inherit is not a misconfiguration");
+  } finally {
+    await gateway.stop();
+  }
+  gateway = await startFakeGateway();
+  try {
+    let body = await (await patch(gateway, { allow_max_mode: false })).json();
+    assert.deepEqual([body.effective_allow_max_mode, body.warnings], [false, undefined]);
+    body = await (await patch(gateway, { allow_max_mode: true })).json();
+    assert.deepEqual([body.effective_allow_max_mode, body.warnings], [true, undefined]);
+  } finally {
+    await gateway.stop();
+  }
+});

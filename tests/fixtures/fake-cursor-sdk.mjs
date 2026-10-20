@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 // In-process stand-in for @cursor/sdk used by the HTTP integration tests.
 // Behavior is driven by markers in the prompt text so tests need no Cursor credentials.
 
@@ -92,9 +93,10 @@ function sdkMaxMode(model) {
  * What the real SDK exposes as `agent.model` / `run.model`: the selection resolved against ITS
  * catalog. FAKE_SDK_FORCE_MAX=agent|run simulates an SDK catalog that disagrees with the gateway.
  */
-function resolvedModel(model, stage) {
+function resolvedModel(model, stage, resumed = false) {
   if (!model) return undefined;
-  const forced = process.env.FAKE_SDK_FORCE_MAX === stage;
+  // FAKE_SDK_FORCE_MAX=run-resumed: only runs of resumed agents flip to max (resume-path recheck).
+  const forced = process.env.FAKE_SDK_FORCE_MAX === stage || (process.env.FAKE_SDK_FORCE_MAX === "run-resumed" && stage === "run" && resumed);
   return forced || sdkMaxMode(model) ? { ...model, maxMode: true } : model;
 }
 
@@ -117,6 +119,11 @@ function checkKey(apiKey) {
 export const calls = { create: [], resume: [], send: [], disposed: [] };
 globalThis.__fakeCursorCalls = calls;
 
+/** FAKE_SDK_LEDGER=<file>: one JSON line per create / resume / dispatch / cancel / dispose (cross-process asserts). */
+function ledger(event) {
+  if (process.env.FAKE_SDK_LEDGER) appendFileSync(process.env.FAKE_SDK_LEDGER, `${JSON.stringify(event)}\n`);
+}
+
 export const Cursor = {
   models: {
     async list({ apiKey }) {
@@ -133,7 +140,7 @@ export const Cursor = {
 let agentSeq = 0;
 const agentOwners = new Map();
 
-function makeAgent(apiKey, agentId, model) {
+function makeAgent(apiKey, agentId, model, resumed = false) {
   return {
     agentId,
     apiKey,
@@ -160,6 +167,10 @@ function makeAgent(apiKey, agentId, model) {
       const emit = async (update) => {
         await options.onDelta?.({ update });
       };
+      const runModel = resolvedModel(model, "run", resumed);
+      ledger({ event: "dispatch", agentId, maxMode: runModel?.maxMode === true });
+      // FAKE_SDK_EARLY_DELTA=1: like the real SDK, text can arrive before `send` returns the Run.
+      if (process.env.FAKE_SDK_EARLY_DELTA === "1") await emit({ type: "text-delta", text: "EARLY_LEAK" });
       const work = (async () => {
         await emit({ type: "thinking-delta", text: "pondering" });
         const tools = options.local?.customTools ?? {};
@@ -226,11 +237,12 @@ function makeAgent(apiKey, agentId, model) {
         }
       })();
       return {
-        model: resolvedModel(model, "run"),
+        model: runModel,
         supports: () => true,
         async cancel() {
           status = "cancelled";
           calls.cancelled = (calls.cancelled ?? 0) + 1;
+          ledger({ event: "cancel", agentId });
         },
         async wait() {
           await work;
@@ -249,8 +261,8 @@ function makeAgent(apiKey, agentId, model) {
     async getUsage() {
       return undefined;
     },
-    close() { calls.disposed.push(agentId); },
-    async [Symbol.asyncDispose]() { calls.disposed.push(agentId); },
+    close() { calls.disposed.push(agentId); ledger({ event: "dispose", agentId }); },
+    async [Symbol.asyncDispose]() { calls.disposed.push(agentId); ledger({ event: "dispose", agentId }); },
   };
 }
 
@@ -261,6 +273,7 @@ export const Agent = {
     calls.create.push({ apiKey: options.apiKey, model: options.model, sdkMaxMode: sdkMaxMode(options.model) });
     const agentId = `agent-${String(agentSeq)}`;
     agentOwners.set(agentId, options.apiKey);
+    ledger({ event: "create", agentId });
     return makeAgent(options.apiKey, agentId, options.model);
   },
   async resume(agentId, options) {
@@ -273,6 +286,7 @@ export const Agent = {
       throw new NetworkError("resume failed", { isRetryable: true, requestId: "req-resume-1" });
     }
     calls.resume.push({ agentId, model: options.model, sdkMaxMode: sdkMaxMode(options.model) });
-    return makeAgent(options.apiKey, agentId, options.model);
+    ledger({ event: "resume", agentId });
+    return makeAgent(options.apiKey, agentId, options.model, true);
   },
 };
