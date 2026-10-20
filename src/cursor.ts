@@ -29,7 +29,7 @@ import {
   upstreamTimeout,
   upstreamUnavailable,
 } from "./errors.js";
-import { logError, scrubSecrets } from "./log.js";
+import { logError, redactLogText } from "./log.js";
 
 const CATALOG_TTL_MS = 60_000;
 const ACCOUNT_TTL_MS = 10 * 60 * 1000;
@@ -559,7 +559,7 @@ export function runFailureError(failure: { message: string; code?: string } | un
   if (!failure) return upstreamError();
   logError("cursor run failed", {
     ...(failure.code ? { upstream_code: failure.code } : {}),
-    upstream_message: scrubSecrets(failure.message).slice(0, 300),
+    upstream_message: redactLogText(failure.message).slice(0, 300),
   });
   const text = `${failure.code ?? ""} ${failure.message}`;
   if (/rate.?limit|resource.?exhausted|quota|usage.?limit|too.?many.?requests/i.test(text)) return rateLimitError(withUpstreamDetail("Cursor usage limit exceeded", failure.message));
@@ -570,6 +570,6 @@ export function runFailureError(failure: { message: string; code?: string } | un
 }
 
 function withUpstreamDetail(summary: string, detail: string | undefined): string {
-  const trimmed = detail ? scrubSecrets(detail).trim() : undefined;
+  const trimmed = detail ? redactLogText(detail).trim() : undefined;
   return !trimmed || trimmed === summary ? summary : `${summary}: ${trimmed.slice(0, 300)}`;
 }
