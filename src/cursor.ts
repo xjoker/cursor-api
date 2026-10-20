@@ -32,7 +32,7 @@ import {
   upstreamTimeout,
   upstreamUnavailable,
 } from "./errors.js";
-import { logError, logInfo, logWarn, scrubSecrets } from "./log.js";
+import { logError, logInfo, logWarn, redactLogText } from "./log.js";
 import { isCatalogModelAllowed } from "./key-policy.js";
 
 const CATALOG_TTL_MS = 60_000;
@@ -246,8 +246,9 @@ async function resolveModelSelection(
  *   1. keep the client's explicit choices (`params`, `variant`, `reasoning_effort`, `fast`, …),
  *   2. replace the default-variant base with the closest non-max variant consistent with them,
  *   3. reject with 403 `max_mode_not_allowed` when no such variant exists (max-only models, or the
- *      client explicitly asked for a max-only variant). Anthropic effort hints are soft: a hint
- *      that only matches max variants is dropped instead of rejecting.
+ *      client explicitly asked for a max-only variant via `variant` / `params`). Effort (chat
+ *      `reasoning_effort` and Responses / Anthropic hints) is soft: it degrades to the highest
+ *      non-max level, then to the default variant, instead of rejecting.
  * When the rule fires and max mode is allowed, the selection carries `maxMode: true` explicitly
  * (same as what the SDK would send) so logs and responses can report it.
  */
@@ -276,8 +277,15 @@ export function resolveCatalogModelSelection(
   // Max-only combination, or a mix (e.g. max-only context + low effort) that matches no variant:
   // rebuild from the closest non-max variant instead of guessing how upstream bills it.
   // Anthropic `output_config.effort` / thinking budgets are soft hints: drop them before rejecting.
-  const candidates =
-    request.reasoning_effort_hint !== undefined ? [request, { ...request, reasoning_effort_hint: undefined }] : [request];
+  // Effort (chat `reasoning_effort` and Responses / Anthropic hints alike) is soft here (N2):
+  // degrade to the highest non-max effort level, then drop it, before rejecting.
+  const hasEffort = request.reasoning_effort !== undefined || request.reasoning_effort_hint !== undefined;
+  const top = hasEffort ? highestNonMaxEffort(item) : undefined;
+  const candidates: ParsedChatRequest[] = [request];
+  if (hasEffort) {
+    if (top !== undefined) candidates.push({ ...request, reasoning_effort: undefined, reasoning_effort_hint: top });
+    candidates.push({ ...request, reasoning_effort: undefined, reasoning_effort_hint: undefined });
+  }
   for (const [index, candidate] of candidates.entries()) {
     const fallback = nonMaxParams(item, candidate);
     if (fallback && !sdkWouldUseMaxMode(item, fallback) && maxOnlyParamValues(item, fallback).length === 0) {
@@ -285,7 +293,7 @@ export function resolveCatalogModelSelection(
         model: item.id,
         requested_params: params ?? [],
         params: fallback,
-        ...(index > 0 ? { softened_hint: request.reasoning_effort_hint } : {}),
+        ...(index > 0 ? { softened_effort: request.reasoning_effort ?? request.reasoning_effort_hint, effort: candidate.reasoning_effort_hint ?? null } : {}),
       });
       if (index > 0) softenedHints.add(request);
       return { id: item.id, params: fallback };
@@ -307,7 +315,6 @@ export function wasHintSoftened(request: ParsedChatRequest): boolean {
   return softenedHints.has(request);
 }
 
-/** True when max mode may be sent: the per-key override when set, else the gateway flag. */
 /**
  * Effective max-mode permission: the gateway `allow_max_mode` is a hard ceiling and a key's
  * `allow_max_mode` can only restrict further (effective = global AND key; key `null` = inherit).
@@ -320,7 +327,11 @@ export function maxModeAllowedFor(options?: ModelSelectionOptions): boolean {
 export function maxOnlyParamValues(model: ModelListItem, params: ModelParameterValue[] | undefined): ModelParameterValue[] {
   const variants = model.variants ?? [];
   return (params ?? []).filter((param) => {
-    const carrying = variants.filter((variant) => variantContains(variant, [param]));
+    // Case-insensitive on purpose (second line of defence behind canonical values, C1).
+    const folded = (value: string): string => value.trim().toLowerCase();
+    const carrying = variants.filter((variant) =>
+      variant.params.some((own) => own.id.trim() === param.id.trim() && folded(own.value) === folded(param.value)),
+    );
     return carrying.length > 0 && carrying.every((variant) => variant.isMaxMode === true);
   });
 }
@@ -425,8 +436,9 @@ export function resolveChatParams(
   }
   if (request.params) {
     for (const param of request.params) {
-      if (model) assertAllowedParam(model, param);
-      merged.set(param.id, param.value);
+      // Forward the catalog's canonical value only (C1): `1M` / a display name like "1m context"
+      // must not slip past the case-sensitive max-only checks and the SDK rule.
+      merged.set(param.id, model ? assertAllowedParam(model, param) : param.value);
     }
   }
 
@@ -615,10 +627,33 @@ function applyReasoningEffort(
   if (isBooleanParam(parameter)) {
     const on = !EFFORT_OFF.has(wanted);
     const value = parameter.values.find((item) => foldKey(item.value) === String(on));
-    if (value) merged.set(parameter.id, value.value);
+    // Non-exact mapping never selects a value only max variants carry (N1): only an exact,
+    // explicit request may reach max mode.
+    if (value && !isMaxOnlyValue(model, parameter.id, value.value)) merged.set(parameter.id, value.value);
     return;
   }
   applyEffortHint(model, merged, raw);
+}
+
+/** True when `(id, value)` appears in at least one variant and only in max variants. */
+function isMaxOnlyValue(model: ModelListItem, id: string, value: string): boolean {
+  return maxOnlyParamValues(model, [{ id, value }]).length > 0;
+}
+
+/**
+ * Highest ranked effort value of the model that is not max-only (used when max mode is off and
+ * an effort request would need a max variant), or undefined when there is none.
+ */
+export function highestNonMaxEffort(model: ModelListItem): string | undefined {
+  const parameter = findParameter(model, { ids: ["reasoning_effort", "effort", "reasoning"], displayName: /effort|reasoning|thinking/i });
+  if (!parameter || isBooleanParam(parameter)) return undefined;
+  let best: { value: string; rank: number } | undefined;
+  for (const value of parameter.values) {
+    const rank = EFFORT_RANK.indexOf(foldKey(value.value));
+    if (rank < 0 || isMaxOnlyValue(model, parameter.id, value.value)) continue;
+    if (!best || rank > best.rank) best = { value: value.value, rank };
+  }
+  return best?.value;
 }
 
 export function applyEffortHint(model: ModelListItem, merged: Map<string, string>, hint: string): void {
@@ -635,7 +670,8 @@ export function applyEffortHint(model: ModelListItem, merged: Map<string, string
   let best: { value: string; distance: number; rank: number } | undefined;
   for (const value of parameter.values) {
     const rank = EFFORT_RANK.indexOf(foldKey(value.value));
-    if (rank < 0) continue;
+    // Nearest match skips values only max variants carry (N1).
+    if (rank < 0 || isMaxOnlyValue(model, parameter.id, value.value)) continue;
     const distance = Math.abs(rank - target);
     if (!best || distance < best.distance || (distance === best.distance && rank < best.rank)) best = { value: value.value, distance, rank };
   }
@@ -653,13 +689,14 @@ function findParameter(
   );
 }
 
-function assertAllowedParam(model: ModelListItem, param: ModelParam): void {
+/** Validates `param` against the catalog and returns its canonical value. */
+function assertAllowedParam(model: ModelListItem, param: ModelParam): string {
   const parameter = model.parameters?.find((item) => item.id === param.id);
   if (!parameter) {
     const allowed = (model.parameters ?? []).map((item) => item.id).join(", ") || "(none)";
     throw invalidRequest(`Unknown param '${param.id}' for model '${model.id}'. Allowed: ${allowed}`);
   }
-  matchParamValue(parameter, param.value);
+  return matchParamValue(parameter, param.value);
 }
 
 function matchParamValue(parameter: ModelParameterDefinition, raw: string): string {
@@ -809,7 +846,7 @@ export function runFailureError(failure: { message: string; code?: string } | un
   if (!failure) return upstreamError();
   logError("cursor run failed", {
     ...(failure.code ? { upstream_code: failure.code } : {}),
-    upstream_message: scrubSecrets(failure.message).slice(0, 300),
+    upstream_message: redactLogText(failure.message).slice(0, 300),
   });
   const text = `${failure.code ?? ""} ${failure.message}`;
   if (/rate.?limit|resource.?exhausted|quota|usage.?limit|too.?many.?requests/i.test(text)) return rateLimitError(withUpstreamDetail("Cursor usage limit exceeded", failure.message));
@@ -820,6 +857,6 @@ export function runFailureError(failure: { message: string; code?: string } | un
 }
 
 function withUpstreamDetail(summary: string, detail: string | undefined): string {
-  const trimmed = detail ? scrubSecrets(detail).trim() : undefined;
+  const trimmed = detail ? redactLogText(detail).trim() : undefined;
   return !trimmed || trimmed === summary ? summary : `${summary}: ${trimmed.slice(0, 300)}`;
 }

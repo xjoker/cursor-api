@@ -17,18 +17,31 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 - **Max mode 计费提示**：新版 SDK 只要「与 params 匹配的目录变体全部是 max-only」就会自动以 max mode 发送；调用方显式传 `maxMode: false` 会被 SDK 覆盖。网关以默认变体参数为基础，所以默认变体是 max-only 的模型只写模型名也会走 max（默认行为保持不变）。
 - 1.0.38 每次 send 都会按目录解析模型；目录暂时不可用时抛出的可重试 `ConfigurationError` 现在映射为 `503 upstream_unavailable`（原来是 400）。
 
+### Changed (BREAKING)
+
+- **BREAKING：Usage 口径对齐 OpenAI**：SDK 的 `inputTokens` 不含缓存，现在 `prompt_tokens = input + cacheRead + cacheWrite`，`total_tokens = prompt + completion`（之前 `prompt + completion ≠ total`）。`prompt_tokens_details.cached_tokens` = 缓存读，`completion_tokens_details.reasoning_tokens` 在模型上报时返回。Responses 同口径；Anthropic `input_tokens` 仍不含缓存。请求日志 `input_tokens` 从此含缓存。
+  - 下游需要调整：自行计算 `prompt_tokens + cached_tokens` 的客户端会重复计数；按 `prompt_tokens` 对账或计价的数字会变大。
+  - 升级时，请求日志里旧行的 `input_tokens` 会一次性改写为含缓存的口径（以 `user_version` < 11 为条件），管理台的汇总不会混用两种口径。回滚到旧版本后，这些行仍然是新口径。
+
 ### Added
 
 - `allow_max_mode`（`ALLOW_MAX_MODE`，默认 `true`）：设为 `false` 时网关按 SDK 的同一规则检测 max mode，自动换成非 max 变体，无法换时返回 `403 max_mode_not_allowed`（覆盖 `params`、`variant`、`reasoning_effort`、Anthropic `output_config.effort`、模型别名、续会话和换 Key 重试）。
 - `allow_max_mode=false` 加固（Elliot 第 2 轮审查）：只在 max 变体里出现的参数值（如 `context=1m` 混搭 `reasoning_effort=low`）一律 `403`，不再原样放行；`Agent.create`/`resume`/`send` 后检查 SDK 实际解析的 `agent.model` / `run.model`，是 max 就释放 agent / 取消 run 并 403（禁用时流式输出会等这一步检查完再开始）；回退变体同分时按参数字典序决定，不依赖目录顺序；软提示被丢弃时写日志；设置了 `CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON` 时启动告警。
+- Max mode 第 4 轮（Elliot 第 3 轮审查）：
+  - `params` 按目录规范值转发（`1M`、`"1m context"` → `1m`），max-only 检查也不区分大小写。
+  - resume 路径上 send 阶段被拦不再重放（避免 max 请求发 2 次）。
+  - send 阶段被拦的请求日志记 `max_mode=1`；文档写明 send 阶段只能「发出后取消」。
 - 请求日志新增 `max_mode` 列（记录 SDK 实际解析值）（1/0，未跑到 run 时为空），`GET /admin/api/logs` 返回该字段；系统日志 `chat/messages/responses completed` 带 `max_mode`。
 - `/v1/models` 的 `variants[]` 对仅支持 max mode 的变体返回 `is_max_mode: true`。
 - **按 Key 的模型策略与配额**（SAF-95）：客户端 Key 新增 `allowed_models`（精确 / `*` 通配，别名无法绕过，`/v1/models` 按 Key 过滤，`403 model_not_allowed`）、`allow_max_mode`（`null` 继承全局，`true/false` 覆盖）、`quota_requests` / `quota_tokens`（`total` / `daily` / `monthly`，按 `quota_tz` 时区；请求数原子预扣、run 未启动则退还；Token 为软上限，结束后按单次 run 用量累加）、`max_concurrent`。超额返回 `429 insufficient_quota`（带 `Retry-After`），超并发返回 `429 concurrency_limit_exceeded`。
 - 管理 API：`PATCH /admin/api/keys/{id}`、`GET /admin/api/keys/{id}/usage`、`POST /admin/api/keys/{id}/usage/reset`；`POST /admin/api/keys` 与 `GET /admin/api/keys` 支持 / 返回策略字段与本周期用量。管理台「客户端 Key」新增策略编辑。
 - 数据库：`api_keys` 新增策略列、新表 `api_key_usage`，schema 版本 10（与 max_mode 的 9 合并升级）。旧 Key 迁移后不受限制。
-- **Usage 口径对齐 OpenAI**：SDK 的 `inputTokens` 不含缓存，现在 `prompt_tokens = input + cacheRead + cacheWrite`，`total_tokens = prompt + completion`（之前 `prompt + completion ≠ total`）。`prompt_tokens_details.cached_tokens` = 缓存读，`completion_tokens_details.reasoning_tokens` 在模型上报时返回。Responses 同口径；Anthropic `input_tokens` 仍不含缓存。请求日志 `input_tokens` 从此含缓存。
 - **`reasoning_effort` 改为软提示**（Chat Completions / Responses 顶层 / Messages）：模型取值精确匹配优先，否则映射到最接近档位，模型没有 effort 参数时忽略（之前 400）；只有非标准且模型也没有的值才 400。
 - `quota_cache_read_weight`（全局 `QUOTA_CACHE_READ_WEIGHT`，默认 1.0，与之前一致；Key 级同名字段可覆盖）：缓存读 Token 计入 Token 配额的权重。schema 版本 11。gateway.toml 现支持小数。
+- #41 审查第 1 轮返工（Elliot）：
+  - 「最接近档位」映射和布尔思考开关不再选只在 max 变体里出现的取值（即使允许 max），只有精确的显式取值才可能走 max。
+  - 关闭 max 时，Chat `reasoning_effort` 与 Responses / Anthropic 的 effort 行为一致：降到最高的非 max 档位，不再 403；显式的 `variant` / `params` 仍然 403。
+  - TOML 整数键写成小数（如 `auth_failure_limit = 0.5`、`5.0`）启动时直接报错；`quota_cache_read_weight = true` 也报错。
 - SAF-95 审查第 1 轮返工（Elliot）：
   - 客户端中断：run 启动后中断按 run 用量计 Token，拿不到用量时按估算计。
   - `quota_tokens` 准入时预留估算值，结束后多退少补，并发不再能成倍超额。
@@ -39,6 +52,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
   - 准入预检不再计入上游 Key 统计，也不推进轮转。
   - `PRAGMA user_version` 写入 schema 版本，迁移容忍并发的 duplicate column。
   - **全局 `ALLOW_MAX_MODE=false` 是硬上限**，按 Key 的 `allow_max_mode` 只能进一步收紧（实际生效 = 全局 AND Key）。
+  - 管理接口返回 `effective_allow_max_mode`，Key 设为 `true` 但被全局上限压住时带 `warnings`；管理台显示实际生效值。
 - 已知限制：以客户端工具调用结束的轮次可能少计 Token；暂不支持费用配额（本地 Agent 无单次费用数据，后续可按价格表估算）。
 
 ---
@@ -72,7 +86,7 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ### Changed
 
-- **Log redaction (stdout/stderr and the admin system log).** Now readable: token counts (`input_tokens`, `output_tokens`, `max_tokens`, `inputTokens`, `*_token_count`), credential identifiers (`api_key_id`, `key_prefix`), and error text that only mentions token counts (`max_tokens must be …`). Still masked: any field whose name contains `token`, `secret`, `password`, `api_key`, `authorization`, `cookie`, `pepper`, `credential` (camelCase included, e.g. `accessToken`, `WorkosCursorSessionToken`), whatever the value type; string values that still mention one of those words after masking. New: the log message is scrubbed too — `Bearer …`, `Basic <base64>`, `cgk_…`, `sk-…`, Cursor session tokens (`user_…::…`), `Authorization: <scheme> …` and `name=value` / `"name":"value"` forms such as `access_token=`, `client_secret:` or `password=` are masked in place.
+- **Log redaction (stdout/stderr and the admin system log).** Now readable: token counts under the exact count field names (`input_tokens`, `output_tokens`, `total_tokens`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `cached_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `max_tokens`, `max_output_tokens`, `max_completion_tokens`, `budget_tokens`, `token_count`, `prompt_token_count`, in snake_case, camelCase or kebab-case) when the value is a number or null, and the `*_tokens_details` usage objects when they are plain objects (walked, so their own credential fields are still masked; an array or string there is masked); `api_key_id` and `api_key_name`. The names `key_prefix` and `api_key_prefix` are not treated as credentials, but their values are still scrubbed, so a real 12-character `cgk_…` key prefix is shown as `[redacted]`. Error text whose only credential word is an exact count phrase stays readable only when the phrase is followed by the end of the text, a number or `null` (optionally after `:`/`=`, quotes or closing punctuation, and again followed by one of these), or one of the words `must`, `should`, `cannot`, `exceed(s/ed)`, `limit`, `of`, `maximum`, `is too` (`max_tokens must be …`, `max_tokens: 4096`, `210000 tokens > 200000 maximum`); anything else after the phrase (`max_tokens=9abc`, `max_tokens: 1 abc`, `max_tokens is abc`, a newline, `->`, `(`, `/`) masks the value whole. Still masked: any other field whose name contains `token`, `secret`, `password`, `passwd`, `api_key`, `access_key`, `private_key`, `authorization`, `cookie`, `pepper`, `credential`, `bearer` or `jwt` (camelCase, kebab-case and plural included, e.g. `accessToken`, `refresh_tokens`, `idTokens`), whatever the value type; a count field name with a non-numeric value; string values whose raw text contains `token`, `secret`, `password`, `passwd`, `api_key`, `authorization`, `pepper`, `cookie` or `credential` outside such a count phrase (and a count phrase does not excuse a value that also contains a 16+ character letter-and-digit run). New: the log message is scrubbed too — `Bearer …`, `Basic <base64>`, `cgk_…`, `sk-…`, Cursor session tokens (`user_…::…`), `Authorization: <scheme> …` and `name=value` / `"name":"value"` forms such as `access_token=`, `client_secret:` or `password=` are masked in place. Log messages and string field values longer than 16 384 characters are cut (at a word break, marked `…[truncated]`) before redaction; a cut field value is masked whole when its full original text contains one of the credential words above anywhere, including past the cut (no count-phrase exception). The redaction work is linear in the input size and does not throw on multi-megabyte input. Upstream Cursor error text (`upstream_message` in `cursor run failed`, and the detail appended to gateway error messages, which is also logged as `error_message`) gets the same raw-text check before it is logged or returned: if it contains a credential word, the detail is replaced by `[redacted]`, so clients now see e.g. `Cursor request failed: [redacted]` instead of the scrubbed upstream text. A log line that cannot be serialized (BigInt, circular or throwing fields) is written as `{"message":"[redacted]","log_format_error":true}` instead of throwing.
 
 ---
 

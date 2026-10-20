@@ -87,6 +87,31 @@ CREATE INDEX IF NOT EXISTS idx_conversations_api_key_updated_at
   ON conversations(api_key_id, updated_at DESC);
 `;
 
+/**
+ * v11 changed `request_logs.input_tokens` to OpenAI semantics (cache reads and writes included).
+ * Rows written by older builds hold uncached input; rewrite them once so admin aggregates
+ * (`SUM(input_tokens)`) never mix the two. `total_tokens` was already cache-inclusive.
+ */
+function migrateUsageSemantics(db: DatabaseSync): void {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
+    const previous = Number(row?.user_version ?? 0);
+    if (previous < 11) {
+      db.exec(
+        `UPDATE request_logs
+            SET input_tokens = input_tokens + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
+          WHERE input_tokens IS NOT NULL`,
+      );
+    }
+    if (previous < SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)}`);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY): DatabaseSync {
   fs.mkdirSync(dataDir, { recursive: true });
   const dbPath = path.join(dataDir, "cursor-api.sqlite");
@@ -98,9 +123,10 @@ export function openDb(dataDir: string, policy: LogPolicy = DEFAULT_LOG_POLICY):
   migrateSystemLogs(db);
   migrateConversations(db);
   migrateApiKeyPolicy(db);
-  // Informational only: migrations probe columns. Rolling back to a build older than v10 ignores
-  // the policy columns, i.e. every client key becomes unrestricted again.
-  db.exec(`PRAGMA user_version = ${String(SCHEMA_VERSION)}`);
+  // Migrations probe columns; user_version additionally gates the one-shot data migration below.
+  // Rolling back to a build older than v10 ignores the policy columns, i.e. every client key
+  // becomes unrestricted again.
+  migrateUsageSemantics(db);
   logPolicies.set(db, policy);
   pruneRequestLogs(db);
   pruneSystemLogs(db);

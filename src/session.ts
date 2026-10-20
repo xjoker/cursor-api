@@ -619,6 +619,9 @@ async function resumeUserTurn(
     );
   } catch (error) {
     if (turn.stem.length === 0 || emitted || options.abortSignal.aborted) throw error;
+    // A policy block (e.g. the send-stage max-mode recheck) is final: replaying would send the
+    // same max request upstream a second time (C2).
+    if (error instanceof GatewayError && error.httpStatus === 403) throw error;
     logInfo("conversation resume failed, replaying full transcript", {
       api_key_id: options.apiKeyId,
       conversation_id: options.request.conversation_id ?? null,
@@ -870,7 +873,7 @@ async function sendOnSession(
       session.heldDeltas = [];
       if (run.supports("cancel")) await run.cancel().catch(() => undefined);
       await dropSession(session);
-      throw maxModeNotAllowed(run.model.id);
+      throw maxModeNotAllowed(run.model.id, { dispatched: true });
     }
   }
   await releaseHeldDeltas(session);

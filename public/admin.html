@@ -1281,6 +1281,8 @@
       "keys.allowMaxInherit": "继承全局",
       "keys.allowMaxYes": "允许",
       "keys.allowMaxNo": "禁止",
+      "keys.allowMaxEffective": "实际生效",
+      "keys.allowMaxCeiling": "全局 allow_max_mode=false 是上限，Key 设为允许不会生效",
       "keys.quotaRequests": "请求配额（留空=不限）",
       "keys.quotaTokens": "Token 配额（软上限，留空=不限）",
       "keys.quotaPeriod": "周期",
@@ -1495,6 +1497,8 @@
       "keys.allowMaxInherit": "Inherit global",
       "keys.allowMaxYes": "Allow",
       "keys.allowMaxNo": "Deny",
+      "keys.allowMaxEffective": "Effective",
+      "keys.allowMaxCeiling": "the gateway allow_max_mode=false is a hard ceiling; Allow has no effect",
       "keys.quotaRequests": "Request quota (empty = unlimited)",
       "keys.quotaTokens": "Token quota (soft cap, empty = unlimited)",
       "keys.quotaPeriod": "Period",
@@ -2097,7 +2101,8 @@
         <label>${t("keys.allowMax")} <select data-f="allow_max_mode">
           <option value="inherit"${max === "inherit" ? " selected" : ""}>${t("keys.allowMaxInherit")}</option>
           <option value="true"${max === "true" ? " selected" : ""}>${t("keys.allowMaxYes")}</option>
-          <option value="false"${max === "false" ? " selected" : ""}>${t("keys.allowMaxNo")}</option></select></label>
+          <option value="false"${max === "false" ? " selected" : ""}>${t("keys.allowMaxNo")}</option></select>
+          <span class="muted" data-info="effective_max">${t("keys.allowMaxEffective")}: ${row.effective_allow_max_mode === false ? t("keys.allowMaxNo") : t("keys.allowMaxYes")}${row.allow_max_mode === true && row.effective_allow_max_mode === false ? ` (${t("keys.allowMaxCeiling")})` : ""}</span></label>
         <label>${t("keys.quotaRequests")} <input data-f="quota_requests" type="number" min="0" value="${row.quota_requests ?? ""}"></label>
         <label>${t("keys.quotaTokens")} <input data-f="quota_tokens" type="number" min="0" value="${row.quota_tokens ?? ""}"></label>
         <label>${t("keys.quotaPeriod")} <select data-f="quota_period">

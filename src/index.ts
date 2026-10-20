@@ -321,6 +321,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
   let ticket: KeyTicket | undefined;
+  let maxDispatched = false;
 
   try {
     const body = await readJsonBody(req, config.maxBodyBytes);
@@ -520,6 +521,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
     errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
@@ -560,7 +562,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
-      max_mode: maxModeOf(chatResult),
+      max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("chat completed", {
       request_id: requestId,
@@ -576,7 +578,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
-      max_mode: maxModeOf(chatResult) === 1,
+      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -616,6 +618,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
   let ticket: KeyTicket | undefined;
+  let maxDispatched = false;
   let writer: AnthropicStreamWriter | undefined;
 
   try {
@@ -742,6 +745,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
     errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendAnthropicError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
@@ -774,7 +778,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
-      max_mode: maxModeOf(chatResult),
+      max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("messages completed", {
       request_id: requestId,
@@ -790,7 +794,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
-      max_mode: maxModeOf(chatResult) === 1,
+      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -814,6 +818,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   let responseDetail: string | null = null;
   let chatResult: CursorChatResult | null = null;
   let ticket: KeyTicket | undefined;
+  let maxDispatched = false;
   let writer: ResponsesStreamWriter | undefined;
 
   try {
@@ -969,6 +974,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   } catch (error) {
     httpStatus = httpStatusOf(error);
     errorCode = error instanceof GatewayError ? error.code : "server_error";
+    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
     errorMessage = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       sendOpenAiError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
@@ -1006,7 +1012,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       gateway_ms: gatewayMs,
       request_detail: requestDetail,
       response_detail: responseDetail,
-      max_mode: maxModeOf(chatResult),
+      max_mode: maxModeOf(chatResult, maxDispatched),
     });
     logInfo("responses completed", {
       request_id: requestId,
@@ -1022,7 +1028,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       total_tokens: usage?.total_tokens ?? null,
       cache_read_tokens: usage?.cache_read_tokens ?? null,
       cache_write_tokens: usage?.cache_write_tokens ?? null,
-      max_mode: maxModeOf(chatResult) === 1,
+      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
       error_code: errorCode,
       ...(errorMessage ? { error_message: errorMessage } : {}),
     });
@@ -1114,8 +1120,12 @@ async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<Ke
   });
 }
 
-/** 1 / 0 when a run happened, null when the request never reached a run. */
-function maxModeOf(result: CursorChatResult | null): number | null {
+/**
+ * 1 / 0 when a run happened, null when the request never reached a run. A send-stage max-mode
+ * block (the max run was already sent, then cancelled) logs 1.
+ */
+function maxModeOf(result: CursorChatResult | null, dispatched = false): number | null {
+  if (dispatched) return 1;
   if (!result) return null;
   return result.max_mode === true ? 1 : 0;
 }
