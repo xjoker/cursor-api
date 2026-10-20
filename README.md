@@ -104,7 +104,7 @@ detailed = false
 | `api_key_pepper` | Random string used to hash client keys |
 | `[logs].retention_days` | Drop request logs older than N days (1–3650), default **7** |
 | `[logs].max_rows` | Cap SQLite request log rows; oldest deleted first (1k–10M) |
-| `[logs].detailed` | Store request/response JSON for admin modal (default **false**). Stores prompts in **plaintext** under `./data` — keep the volume private |
+| `[logs].detailed` | Store request/response JSON for admin modal (default **false**). Stores prompts in **plaintext** under `./data` — keep the volume private. Credential-looking values (`Bearer …`, `api_key=…`, `cgk_…`, fields such as `authorization`/`accessToken`) are masked before storage, as in stdout and system logs; everything else is kept verbatim |
 | `[logs].detailed_max_bytes` | Per-field cap for request/response JSON (4KiB–1MiB, default 64KiB) |
 | `[logs].max_detail_bytes` | Cap total UTF-8 bytes of `model` + detail columns (default 256MiB); oldest rows dropped first |
 | `cursor_api_keys` | Optional extra Cursor keys, comma-separated (env `CURSOR_API_KEYS`). Together with `cursor_api_key` they form a pool: new agents rotate round-robin across healthy keys, and a key that returns an upstream auth or rate-limit error is cooled down while the request fails over to the next key. Failover stops once any output has been streamed to the client. Pending tool rounds continue on the agent (and key) that started them |

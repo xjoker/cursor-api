@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { redactStoredText, scrubMessage } from "./log.js";
 import type {
   ApiKeyRow,
   KeyTokenRow,
@@ -411,6 +412,10 @@ function mapKeyUsage(row: Record<string, unknown>): KeyUsageRow {
   };
 }
 
+/**
+ * Request logs are shown in the admin UI, so they get the same secret masking as stdout and
+ * system_logs. Callers should redact before truncating (see index.ts); this is the last line.
+ */
 export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
   db.prepare(
     `INSERT INTO request_logs (
@@ -424,7 +429,7 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.id,
     row.api_key_id,
     row.path,
-    limitUtf8(row.model, MAX_LOG_MODEL_BYTES),
+    limitUtf8(scrubMessage(row.model), MAX_LOG_MODEL_BYTES),
     row.stream,
     row.http_status,
     row.duration_ms,
@@ -438,8 +443,8 @@ export function insertRequestLog(db: DatabaseSync, row: RequestLogRow): void {
     row.created_at,
     row.upstream_ms,
     row.gateway_ms,
-    row.request_detail,
-    row.response_detail,
+    row.request_detail === null ? null : redactStoredText(row.request_detail),
+    row.response_detail === null ? null : redactStoredText(row.response_detail),
     row.max_mode ?? null,
   );
   pruneRequestLogs(db);

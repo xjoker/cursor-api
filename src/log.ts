@@ -4,7 +4,8 @@
  * `WorkosCursorSessionToken`, `token_hash`, `client_secret_name`). The only carve-out is the exact
  * COUNT_KEYS list below, and only for numeric values.
  */
-const SENSITIVE_KEY = /api[_-]?key|access[_-]?key|private[_-]?key|authorization|cookie|pepper|secret|token|password|passwd|credential|bearer|jwt/i;
+const SENSITIVE_KEY =
+  /api[_-]?key|access[_-]?key|private[_-]?key|authorization|cookie|pepper|secret|token|password|passwd|passphrase|credential|bearer|jwt|(^|_)key$/i;
 
 /**
  * Token-count field names (normalized to snake_case) that are logged and shown as numbers. Exact
@@ -41,7 +42,21 @@ const COUNT_DETAIL_KEYS = new Set([
 ]);
 
 /** Names that only identify a credential. Exact names only; no generic suffix exemption. */
-const IDENTIFIER_KEYS = new Set(["api_key_id", "api_key_ids", "key_id", "key_prefix", "api_key_prefix", "api_key_name"]);
+const IDENTIFIER_KEYS = new Set([
+  "api_key_id",
+  "api_key_ids",
+  "key_id",
+  "key_prefix",
+  "api_key_prefix",
+  "api_key_name",
+  // OpenAI request fields that end in `_key` but are not credentials.
+  "prompt_cache_key",
+  "cache_key",
+  "idempotency_key",
+  // Pagination cursors.
+  "page_token",
+  "next_page_token",
+]);
 
 /** Field names longer than this are treated as credentials without being normalized (keeps it O(1)). */
 const MAX_KEY_CHARS = 256;
@@ -70,20 +85,40 @@ const REDACTED = "[redacted]";
 
 /** Separator after a field-style name: `=`, `:`, with optional (JSON-escaped) quotes. */
 const SEP = String.raw`(\\?["']?\s*[:=]\s*\\?["']?)`;
-/** A value: anything up to whitespace, a quote, a backslash or a list/query separator. */
-const VALUE = String.raw`(?!\[redacted\])(?!(?:null|true|false)\b)(?!\d+\s+tokens\b)[^\s"',;&\\]+`;
+/** Where a VALUE ends: whitespace, a quote, a backslash, a list/query separator or the end. */
+const VALUE_END = String.raw`(?=$|[\s"',;&\\])`;
+/**
+ * A value: anything up to whitespace, a quote, a backslash or a list/query separator. A bare
+ * `null`/`true`/`false` or an already-masked `[redacted]` is skipped only when it is the whole
+ * value, so `token=true-S`, `password=null.S` and `token=[redacted].S` are still masked.
+ */
+const VALUE = String.raw`(?!\[redacted\]${VALUE_END})(?!(?:null|true|false)${VALUE_END})(?!\d+\s+tokens\b)[^\s"',;&\\]+`;
+/** Whitespace between a scheme and its value, including JSON-escaped `\n`, `\r`, `\t`. */
+const SCHEME_SPACE = String.raw`(?:[ \t\r\n]|\\[nrt])+`;
 
 type Rule = { pattern: RegExp; replace: (match: string, ...args: string[]) => string };
 
 /**
  * Credential-looking substrings inside free text, masked in place so the rest stays readable.
  * Each rule has its own replacer and only reads its own capture groups, so a pattern without a
- * group can never pick up String.replace's offset/input arguments.
+ * group can never pick up String.replace's offset/input arguments. Every pattern starts at a
+ * literal or a left-bounded run and uses bounded or run-consuming quantifiers, so the total work
+ * stays linear in the input (see tests/log-count-exemption.test.mjs and request-log-redaction).
  */
 const SECRET_RULES: Rule[] = [
-  // `Authorization: Token abc`, `proxy-authorization=Basic abc`: mask the scheme and value.
+  // `Authorization: Token abc`, `HTTP_AUTHORIZATION: Bearer\nabc`, `proxy-authorization=Basic abc`,
+  // `X-Management-Key: v`: mask the scheme and value. The left boundary allows `_` so prefixed
+  // names (`HTTP_AUTHORIZATION`, `x_authorization`) are covered.
   {
-    pattern: new RegExp(String.raw`\b((?:proxy[_-])?authorization)${SEP}(?!\[redacted\])(?:[A-Za-z]+[ \t]+)?[^\s"',;&\\]+`, "gi"),
+    pattern: new RegExp(
+      String.raw`(?<![A-Za-z0-9])((?:proxy[_-])?authorization|x[_-]management[_-]key)${SEP}(?!\[redacted\]${VALUE_END})(?:[A-Za-z]+${SCHEME_SPACE})?[^\s"',;&\\]+`,
+      "gi",
+    ),
+    replace: (_match, name, sep) => `${name}${sep}${REDACTED}`,
+  },
+  // `Cookie: a=b; session=S` / `Set-Cookie: ...`: the whole header value up to the line end.
+  {
+    pattern: /(?<![A-Za-z0-9])((?:set-)?cookie)([ \t]*:[ \t]*)(?!\[redacted\](?:$|[\r\n"\\]))[^\r\n"\\]+/gi,
     replace: (_match, name, sep) => `${name}${sep}${REDACTED}`,
   },
   // Cursor session token `user_xxx::<jwt>` (also URL-encoded `%3A%3A`): mask the whole thing.
@@ -91,26 +126,55 @@ const SECRET_RULES: Rule[] = [
     pattern: /\buser_[A-Za-z0-9]+(?:::|%3A%3A)[A-Za-z0-9._~+/=-]+/gi,
     replace: () => REDACTED,
   },
-  // `Bearer <value>` (any 8+ chars) and `Basic <base64>` (needs base64 shape, so prose like
-  // "Basic authentication" stays readable).
+  // `Bearer <value>`: any 8+ chars, or a shorter value with a digit, symbol or inner capital
+  // (`Bearer abc1234`); plain words ("Bearer token") stay readable. No `i` flag on purpose: the
+  // inner-capital alternative is case-sensitive. JSON-escaped `\n`/`\t` count as whitespace.
   // Minimum lengths are written `X{n}X*`, not `X{n,}`: on Node 22 these `{n,}` loops threw
   // RangeError (regex stack) on 8 MiB runs, the `X{n}X*` form handles 32 MiB (r3 review R3-4).
   // scrubSecrets also fails closed if the engine still throws.
   {
-    pattern: /\b(Bearer)(\s+)(?!\[redacted\])[A-Za-z0-9._~+/=-]{8}[A-Za-z0-9._~+/=-]*/gi,
+    pattern:
+      /\b([Bb][Ee][Aa][Rr][Ee][Rr])((?:\s|\\[nrt])+)(?!\[redacted\])(?:[A-Za-z0-9._~+/=-]{8}[A-Za-z0-9._~+/=-]*|[A-Za-z0-9._~+/=-]*[0-9_~+/=-][A-Za-z0-9._~+/=-]*|[A-Za-z][a-z]*[A-Z][A-Za-z]*)(?![A-Za-z0-9._~+/=-])/g,
     replace: (_match, scheme, space) => `${scheme}${space}${REDACTED}`,
   },
+  // `Basic <base64>`: 8+ base64 chars with a digit or symbol, 20+ of any, or `=` padding, so prose
+  // like "Basic authentication" or "Basic Auth0 setup" stays readable.
   {
-    pattern: /\b(Basic)(\s+)(?!\[redacted\])(?:[A-Za-z0-9+/]{20}[A-Za-z0-9+/]*={0,2}|(?=[A-Za-z0-9+/]*[0-9+/])[A-Za-z0-9+/]{4}[A-Za-z0-9+/]*={0,2}|[A-Za-z0-9+/]{2}[A-Za-z0-9+/]*={1,2})(?![A-Za-z0-9+/=])/g,
+    pattern: /\b(Basic)((?:\s|\\[nrt])+)(?!\[redacted\])(?:[A-Za-z0-9+/]{20}[A-Za-z0-9+/]*={0,2}|(?=[A-Za-z0-9+/]*[0-9+/])[A-Za-z0-9+/]{8}[A-Za-z0-9+/]*={0,2}|[A-Za-z0-9+/]{2}[A-Za-z0-9+/]*={1,2})(?![A-Za-z0-9+/=])/g,
     replace: (_match, scheme, space) => `${scheme}${space}${REDACTED}`,
   },
   { pattern: /\bcgk_[A-Za-z0-9_-]{6}[A-Za-z0-9_-]*/g, replace: () => REDACTED },
   { pattern: /\b(?:sk|key|crsr|cursor)[-_][A-Za-z0-9_-]{20}[A-Za-z0-9_-]*/g, replace: () => REDACTED },
-  // `api_key=…`, `access_token=…`, `client_secret: …`, `"refresh_token":"…"`, `password=abc12`.
-  // No left word boundary: `_` is a word character, so `\btoken` would miss `access_token`.
+  // Standalone JWTs (only from the start of a base64url run, so `eyJ-eyJ-...` stays linear),
+  // GitHub tokens, AWS access key ids. Same `X{n}X*` form as above.
+  {
+    pattern: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5}[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{5}[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+/g,
+    replace: () => REDACTED,
+  },
+  { pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{30}[A-Za-z0-9]*|github_pat_[A-Za-z0-9_]{20}[A-Za-z0-9_]*)/g, replace: () => REDACTED },
+  { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replace: () => REDACTED },
+  // URL userinfo `scheme://user:password@host`: keep the user, drop the password. Bounded parts.
+  {
+    pattern: /(\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^/\s:@]{1,256}:)(?!\[redacted\]@)[^@\s/]{1,512}@/g,
+    replace: (_match, prefix) => `${prefix}${REDACTED}@`,
+  },
+  // `api_key=…`, `access_token=…`, `client_secret: …`, `"refresh_token":"…"`, `password=abc12`,
+  // `tokens=…`. No left word boundary: `_` is a word character, so `\btoken` would miss
+  // `access_token`. Pagination cursors (`page_token`, `pageToken`) are not secrets.
   {
     pattern: new RegExp(
-      String.raw`(api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd|pepper|credential|cookie)${SEP}${VALUE}`,
+      String.raw`(api[_-]?keys?|access[_-]?keys?|private[_-]?keys?|(?:admin|cursor|client|management)[_-]?keys?|(?<!page[_-]?)token|secrets?|passwords?|passwd|passphrase|pepper|credentials?|cookies?)${SEP}${VALUE}`,
+      "gi",
+    ),
+    replace: (_match, name, sep) => `${name}${sep}${REDACTED}`,
+  },
+  // Plural `tokens=…` / `refresh_tokens: …` is a credential too, but a plain number (or `null`) after
+  // a plural name is a count (`max_tokens: 4096`, `tokens=120`, `{"max_tokens":4096}`,
+  // `max_tokens=-1`), so it stays readable. Only closing brackets may sit between the number and
+  // the end of the value: `tokens=4096}S` or `tokens=4096-S` is masked.
+  {
+    pattern: new RegExp(
+      String.raw`((?<!page[_-]?)tokens)${SEP}(?!(?:-?\d+(?:\.\d+)?|null)[}\])]*${VALUE_END})${VALUE}`,
       "gi",
     ),
     replace: (_match, name, sep) => `${name}${sep}${REDACTED}`,
@@ -328,8 +392,8 @@ export function redactLogText(text: string): string {
   return sanitizeString(text);
 }
 
-/** Log messages: in-place masking only (no whole-value fallback), after the same length cap. */
-function scrubMessage(message: string): string {
+/** Log messages (and the request_logs `model` column): in-place masking only, after the same length cap. */
+export function scrubMessage(message: string): string {
   return scrubSecrets(capLogString(message));
 }
 
@@ -414,12 +478,98 @@ function isMaskedField(kind: KeyClass, value: unknown): boolean {
   }
 }
 
-export function sanitizeFields(fields: Record<string, unknown>): Record<string, unknown> {
-  const safe: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(fields)) {
-    safe[key] = isMaskedField(classifyKey(key), value) ? REDACTED : sanitizeValue(value);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Field names. A real field name never carries a credential shape, so a name that any in-place rule
+ * would touch is replaced whole, as is a name with whitespace that the string-value check would
+ * mask (`password <secret>`). In-place masking alone would keep the secret in the R3-3 shape
+ * (`Bearer token_abc <secret>` -> `Bearer [redacted] <secret>`). Ordinary credential names
+ * (`access_token`, `password`) keep their text; their values are masked by isMaskedField.
+ */
+function redactKey(key: string): string {
+  if (scrubSecrets(key) !== key) return REDACTED;
+  return /\s/.test(key) && sanitizeString(key) === REDACTED ? REDACTED : key;
+}
+
+/** Nested objects deeper than this are replaced rather than walked (system log / stored bodies). */
+const MAX_LOG_FIELD_DEPTH = 8;
+const MAX_BODY_DEPTH = 64;
+
+/**
+ * Deep copy with credentials removed. Field names go through classifyKey/isMaskedField (exact
+ * count names exempt only for numbers); strings go through `scrubString`; arrays and objects are
+ * walked by their own enumerable properties (depth-capped, cycle-safe). Dates and binary views
+ * carry no names to redact and are passed through so they serialize as before.
+ */
+function redactNode(
+  value: unknown,
+  scrubString: (text: string) => string,
+  depth: number,
+  maxDepth: number,
+  seen: WeakSet<object>,
+): unknown {
+  if (typeof value === "string") return scrubString(value);
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Date || ArrayBuffer.isView(value)) return value;
+  if (seen.has(value)) return "[circular]";
+  if (depth >= maxDepth) return "[truncated]";
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((item) => redactNode(item, scrubString, depth + 1, maxDepth, seen));
+    const safe: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      // Names can be client-controlled too (an unknown request field, a metadata key). Two names
+      // that mask to the same text collapse.
+      safe[redactKey(key)] = isMaskedField(classifyKey(key), item)
+        ? REDACTED
+        : redactNode(item, scrubString, depth + 1, maxDepth, seen);
+    }
+    return safe;
+  } finally {
+    seen.delete(value);
   }
-  return safe;
+}
+
+export function sanitizeFields(fields: Record<string, unknown>): Record<string, unknown> {
+  return redactNode(fields, sanitizeString, 0, MAX_LOG_FIELD_DEPTH, new WeakSet<object>()) as Record<string, unknown>;
+}
+
+/**
+ * Redaction for stored request/response bodies (request_logs). Same name rules and in-place masking
+ * as the system log, but without the whole-value fallback or the 16 KiB string cap: these columns
+ * exist to show prompts, so a message that merely mentions "token" keeps its text. The in-place
+ * rules are linear, so long prompts and data URLs stay cheap.
+ */
+export function redactValue(value: unknown): unknown {
+  return redactNode(value, scrubSecrets, 0, MAX_BODY_DEPTH, new WeakSet<object>());
+}
+
+/**
+ * Stored request/response bodies (request_logs columns): JSON is redacted structurally with
+ * `redactValue`; anything else (including JSON cut by truncation) is scrubbed in place. Not to be
+ * confused with `redactLogText`, which is for upstream error text and masks the whole value.
+ */
+export function redactStoredText(text: string): string {
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      const safe = redactValue(parsed);
+      // A top-level `error_message` (response_detail) is error text, often from upstream: it gets
+      // the raw-text check of redactLogText, not in-place masking only (r3 review R3-3 shape:
+      // `Bearer token_abc <secret>`, `password <secret>`).
+      if (isRecord(parsed) && isRecord(safe) && typeof parsed.error_message === "string") {
+        safe.error_message = redactLogText(parsed.error_message);
+      }
+      return JSON.stringify(safe);
+    } catch {
+      // Not valid JSON (for example truncated); fall through to text scrubbing.
+    }
+  }
+  return scrubSecrets(text);
 }
 
 function format(level: string, message: string, fields?: Record<string, unknown>): string {
@@ -431,11 +581,4 @@ function format(level: string, message: string, fields?: Record<string, unknown>
     // Logging must never throw into the caller; drop the content rather than risk leaking it.
     return JSON.stringify({ level, message: REDACTED, ts: new Date().toISOString(), log_format_error: true });
   }
-}
-
-function sanitizeValue(value: unknown): unknown {
-  if (typeof value === "string") return sanitizeString(value);
-  if (Array.isArray(value)) return value.map(sanitizeValue);
-  if (value && typeof value === "object") return sanitizeFields(value as Record<string, unknown>);
-  return value;
 }
