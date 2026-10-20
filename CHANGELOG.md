@@ -9,6 +9,12 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- 测试默认不出网（SAF-102）：`tests/http-smoke.test.mjs` 改用假 SDK（原来会拿假 Key 请求真实 Cursor）；`npm test` 改为 `scripts/run-tests.mjs`，通过 `NODE_OPTIONS` 给所有测试进程和子进程预加载网络守卫，任何非回环连接都会被拦截并让整个测试失败；新增 `npm run test:offline`（Linux，`unshare -rn`）。CI 的 Docker 健康检查改为 `--network none`。
+
 ## [20261020.1] — 2026-10-20
 
 ### Added

@@ -319,7 +319,7 @@ git clone https://github.com/xjoker/cursor-api.git && cd cursor-api
 npm ci && npm run dev
 ```
 
-快速单元测试用 `npm run test:unit`；`npm test` 还会运行回环 HTTP 鉴权冒烟测试。
+快速单元测试用 `npm run test:unit`；`npm test` 还会运行回环 HTTP 鉴权冒烟测试。测试不会访问网络：测试启动的网关都用假 Cursor SDK（`tests/fixtures/fake-cursor-sdk.mjs`）；`scripts/run-tests.mjs` 通过 `NODE_OPTIONS` 预加载守卫 `tests/fixtures/no-network.mjs`（子进程同样生效），拦截所有非回环连接；只要有一次尝试，即使代码吞掉了错误，整个测试也判失败。`CURSOR_API_TEST_ALLOW_NETWORK=1` 可关闭守卫（目前没有测试需要）。Linux 上 `npm run test:offline` 会在空网络命名空间（`unshare -rn`）里、去掉 Cursor 凭据后再跑一遍。
 
 需 Node **22.13+** 与 `data/config/gateway.toml`。本地编译镜像见 [`docker-compose.yml`](./docker-compose.yml)。构建时传入 git SHA，`/health` 的 `git_commit` 才不是 `unknown`：
 

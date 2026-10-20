@@ -28,6 +28,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # scripts/run-tests.mjs: fake SDK everywhere + no-network guard (fails on any outbound attempt).
       - run: npm test
 
   docker:
@@ -46,7 +47,8 @@ jobs:
             GIT_COMMIT=${{ github.sha }}
       - name: Container reports healthy
         run: |
-          docker run -d --name cursor-api-ci -e CURSOR_API_KEY=ci-placeholder -e ADMIN_ACCESS_KEY=ci-admin -e API_KEY_PEPPER=ci-pepper cursor-api:ci
+          # --network none: the placeholder key must not reach Cursor (startup account warm-up); /health is local.
+          docker run -d --name cursor-api-ci --network none -e CURSOR_API_KEY=ci-placeholder -e ADMIN_ACCESS_KEY=ci-admin -e API_KEY_PEPPER=ci-pepper cursor-api:ci
           for i in $(seq 1 45); do
             if [ "$(docker inspect -f '{{.State.Health.Status}}' cursor-api-ci)" = healthy ]; then
               docker exec cursor-api-ci node -e "fetch('http://127.0.0.1:8787/health').then(r=>r.json()).then(b=>process.exit(b.git_commit==='${{ github.sha }}'?0:1))"
