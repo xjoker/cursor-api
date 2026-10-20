@@ -277,7 +277,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     if (req.method === "GET" && url.pathname.startsWith("/v1/responses/")) {
       const key = requireClientKey(req, db, config.apiKeyPepper);
-      const id = decodeURIComponent(url.pathname.slice("/v1/responses/".length));
+      let id: string;
+      try {
+        id = decodeURIComponent(url.pathname.slice("/v1/responses/".length));
+      } catch {
+        throw new GatewayError(400, "invalid_request", "Malformed response id in path", "invalid_request_error");
+      }
       const stored = id === "" || id.includes("/") ? undefined : getStoredResponse(key.id, id);
       if (!stored) {
         throw new GatewayError(404, "not_found", `Response '${id}' not found`, "invalid_request_error");

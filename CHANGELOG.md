@@ -60,14 +60,23 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
   - K10 测试改为断言 404（而不是 429），并检查退款后的状态。
   - 回滚说明补充 3 条：回滚期间的用量不补记；旧版本删除 Key 会留下孤儿行；每次启动都把 schema 版本写成 10。
 
----
 - **OpenAI 兼容补全**（SAF-95 PR B）：
   - Chat Completions 接受 OpenRouter 风格 `reasoning: { effort, max_tokens, enabled, exclude }`（软提示，不 400；`exclude: true` 不返回思考文本）。
   - 思考文本同时以 `reasoning_content` 和 `reasoning` 返回（非流式 `message`、流式 `delta`）。
   - `enforce_output_limits`（`ENFORCE_OUTPUT_LIMITS`，默认 `false` = 行为不变）：网关执行 `max_tokens` / `max_completion_tokens` / `max_output_tokens` / Messages `max_tokens` 与 `stop` / `stop_sequences`，截断并取消 run，返回 `length`（Responses `incomplete`、Messages `max_tokens`）或 `stop`（Messages `stop_sequence`）。Token 按 4 字符估算。
   - `ignore_sampling_params` 额外忽略 OpenRouter 的 `min_p` / `top_a` / `repetition_penalty`；`stream_options.include_obfuscation` 接受并忽略。
   - `response_format` `json_object` / `json_schema` 与 Responses `text.format` 尽力而为：上游 prompt 附加 JSON 指令，非流式去掉外层代码块，非法 JSON 写日志。
-  - `GET /v1/responses/{id}`：内存保存已完成的 Response（按 Key、1 小时、最多 1000 条，`store: false` 不保存）。
+  - `GET /v1/responses/{id}`：内存保存已完成的 Response（按 Key、1 小时、每个 Key 最多 100 条、总共最多 1000 条，`store: false` 不保存）。
+- #42 审查第 1 轮返工（Elliot）：
+  - `reasoning.exclude: true` 只影响返回给客户端的内容，思考文本照常计入配额估算。
+  - JSON 模式附加的指令和 schema 计入配额估算和准入预留。
+  - 工具结果续轮使用本次请求的 `max_tokens` / `stop` / `stream` / 输出格式 / `exclude`，不再沿用首轮。
+  - `GET /v1/responses/{id}` 路径编码错误返回 400（原来 500）。
+  - `stop` 每项最长 256 字符；Messages `stop_sequences` 最多 16 个、每项最长 256 字符。
+  - 同时传 `max_completion_tokens` 和 `max_tokens` 时两者都校验。
+  - Response 存储按 Key 限 100 条；总量满时淘汰条目最多的 Key 的最旧条目，一个 Key 不能挤掉其他 Key 的数据。
+
+---
 
 ## [20261020.1] — 2026-10-20
 

@@ -3,6 +3,7 @@ import type { ApiKeyRow, CursorChatResult, KeyModelPolicy, ParsedChatRequest, Qu
 import { adjustKeyTokens, refundKeyRequest, reserveKeyRequest } from "./db.js";
 import { concurrencyLimitExceeded, invalidRequest, quotaExceeded } from "./errors.js";
 import { logInfo, logWarn } from "./log.js";
+import { outputFormatInstruction } from "./output-limits.js";
 
 export const MAX_ALLOWED_MODEL_PATTERNS = 200;
 export const MAX_ALLOWED_MODEL_PATTERN_LENGTH = 256;
@@ -338,8 +339,9 @@ export function clearRecentRuns(apiKeyId?: string): void {
  * fixed output allowance and the key's recent average actual run usage, so runs that use far more
  * than their visible input (harness prompt, tools, agent context) still reserve realistically.
  */
-export function reservationFor(request: Pick<ParsedChatRequest, "messages">, apiKeyId?: string): number {
-  let chars = 0;
+export function reservationFor(request: Pick<ParsedChatRequest, "messages" | "output_format">, apiKeyId?: string): number {
+  // The JSON-mode instruction (with the full schema) is sent upstream too.
+  let chars = outputFormatInstruction(request.output_format).length;
   for (const message of request.messages) {
     chars += message.content?.length ?? 0;
     for (const call of message.tool_calls ?? []) chars += (call.name?.length ?? 0) + (call.arguments?.length ?? 0);

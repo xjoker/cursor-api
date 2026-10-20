@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { CursorCost, ModelParam, OpenAiToolCall, ParsedChatRequest, Usage } from "./contracts.js";
 import { GatewayError, invalidRequest, serverError } from "./errors.js";
-import { parseChatCompletionsRequest } from "./openai.js";
+import { MAX_STOP_SEQUENCE_CHARS, parseChatCompletionsRequest } from "./openai.js";
+
+/** Messages `stop_sequences` cap (each delta is scanned for every sequence). */
+const MAX_MESSAGES_STOP_SEQUENCES = 16;
 
 /**
  * Anthropic Messages API (`POST /v1/messages`) adapter.
@@ -59,6 +62,12 @@ export function parseAnthropicMessagesRequest(
     }
     if (!body.stop_sequences.every((item) => typeof item === "string" && item !== "")) {
       throw invalidRequest("Field 'stop_sequences' must contain non-empty strings");
+    }
+    if (body.stop_sequences.length > MAX_MESSAGES_STOP_SEQUENCES) {
+      throw invalidRequest(`Field 'stop_sequences' accepts at most ${String(MAX_MESSAGES_STOP_SEQUENCES)} entries`);
+    }
+    if (body.stop_sequences.some((item: string) => item.length > MAX_STOP_SEQUENCE_CHARS)) {
+      throw invalidRequest(`Field 'stop_sequences' entries must be at most ${String(MAX_STOP_SEQUENCE_CHARS)} characters`);
     }
   }
   if (!Array.isArray(body.messages) || body.messages.length === 0) {

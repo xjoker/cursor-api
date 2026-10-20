@@ -172,7 +172,9 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
       // FAKE_SDK_EARLY_DELTA=1: like the real SDK, text can arrive before `send` returns the Run.
       if (process.env.FAKE_SDK_EARLY_DELTA === "1") await emit({ type: "text-delta", text: "EARLY_LEAK" });
       const work = (async () => {
-        await emit({ type: "thinking-delta", text: "pondering" });
+        // `THINK<<N>>` streams N characters of thinking instead of "pondering".
+        const think = /THINK<<(\d+)>>/.exec(prompt);
+        await emit({ type: "thinking-delta", text: think ? "t".repeat(Number(think[1])) : "pondering" });
         const tools = options.local?.customTools ?? {};
         const names = Object.keys(tools);
         // `CALL_TOOL<<Name|{"json":"args"}>>` calls a specific client tool.
@@ -258,12 +260,15 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
         model: runModel,
         supports: () => true,
         async cancel() {
-          status = "cancelled";
+          // `IGNORE_CANCEL`: the run keeps going and finishes normally (cancel raced with the end).
+          if (!prompt.includes("IGNORE_CANCEL")) status = "cancelled";
           calls.cancelled = (calls.cancelled ?? 0) + 1;
           ledger({ event: "cancel", agentId });
         },
         async wait() {
           await work;
+          // `THROW_ON_CANCEL`: wait() rejects once the run was cancelled.
+          if (status === "cancelled" && prompt.includes("THROW_ON_CANCEL")) throw new Error("run stream closed after cancel");
           return {
             status,
             result: status === "finished" ? text : undefined,

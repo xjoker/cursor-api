@@ -82,7 +82,7 @@ interface LiveSession {
   allowMaxMode: boolean;
   /** Deltas held back until the run's SDK-resolved model passed the max-mode check. */
   heldDeltas?: InteractionUpdate[];
-  /** Per-turn output shaping from the request that started (or continued) the run. */
+  /** Per-turn output shaping from the HTTP request that started or continued the run (this turn). */
   output?: {
     limiter?: OutputLimiter;
     limits?: { stop?: string[]; maxTokens?: number };
@@ -91,7 +91,12 @@ interface LiveSession {
     stream: boolean;
   };
   /** Quota bookkeeping for the current run: input chars of this HTTP turn, estimates already charged. */
-  quota: { inputChars: number; precharged: number };
+  /**
+   * Quota bookkeeping for the current run: input chars of this HTTP turn (prompt as sent upstream,
+   * including any JSON-mode instruction), thinking chars streamed (counted even when
+   * `reasoning.exclude` hides them from the client), estimates already charged.
+   */
+  quota: { inputChars: number; thinkingChars?: number; precharged: number };
   /** Release of the `max_concurrent` slot held while suspended on client tool calls (F3). */
   releaseParkedSlot?: () => void;
   text: string;
@@ -523,7 +528,7 @@ async function runClaimedChatTurn(
     indexSession(parked, options.apiKeyId, hashMessages(options.request.messages));
     options.onUpstreamStarted?.();
     const operation = async (): Promise<CursorChatResult> =>
-      ensureSuccessfulRun(await continueRun(parked, options.abortSignal));
+      ensureSuccessfulRun(await continueRun(parked, options.abortSignal, options.request));
     return options.keyPool
       ? await options.keyPool.runForId(parked.cursorKeyId, async () => await operation())
       : await operation();
@@ -804,7 +809,10 @@ async function sendOnSession(
   session.lastRequestMessages = options.request.messages;
   session.lastActiveAt = Date.now();
   session.output = outputShapingFor(options.request);
-  session.quota = { inputChars: prompt.length, precharged: 0 };
+  // JSON-mode instruction goes to the upstream prompt only (stored messages / hashes unchanged),
+  // but it is sent, so it counts toward the quota estimate.
+  const text = prompt + outputFormatInstruction(options.request.output_format);
+  session.quota = { inputChars: text.length, precharged: 0 };
   liveSessions.add(session);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   const images = imagesOfLastUser(options.request.messages);
@@ -814,8 +822,6 @@ async function sendOnSession(
   // run.model max-mode check. (Allowed: nothing to check, stream directly.)
   session.heldDeltas = session.allowMaxMode ? undefined : [];
   try {
-    // JSON-mode instruction goes to the upstream prompt only (stored messages / hashes unchanged).
-    const text = prompt + outputFormatInstruction(options.request.output_format);
     run = await session.agent.send(images && images.length > 0 ? { text, images } : text, {
       local: { ...(customTools ? { customTools } : {}), force: true },
       onDelta: async ({ update }) => {
@@ -857,6 +863,7 @@ async function sendOnSession(
 export async function continueRun(
   session: LiveSession,
   abortSignal: AbortSignal,
+  request?: ParsedChatRequest,
 ): Promise<CursorChatResult> {
   session.text = "";
   session.thinking = "";
@@ -864,8 +871,10 @@ export async function continueRun(
   session.lastFlushed = [];
   session.batchReady = new Deferred<OpenAiToolCall[]>();
   session.lastActiveAt = Date.now();
-  // Limits count per HTTP turn: restart them for the continued run.
-  if (session.output?.limits) session.output.limiter = new OutputLimiter(session.output.limits.stop, session.output.limits.maxTokens);
+  // Output shaping (limits, stream, JSON format, reasoning.exclude) is per HTTP turn: take it from
+  // the continuing request; limits restart for the continued run.
+  if (request) session.output = outputShapingFor(request);
+  else if (session.output?.limits) session.output.limiter = new OutputLimiter(session.output.limits.stop, session.output.limits.maxTokens);
   // No longer suspended: the continuing HTTP request holds its own slot.
   session.releaseParkedSlot?.();
   session.releaseParkedSlot = undefined;
@@ -899,7 +908,7 @@ export async function raceTurn(session: LiveSession): Promise<CursorChatResult> 
     session.lastActiveAt = Date.now();
     // Charge this round now (the client may never resume) and hold a concurrency slot while parked.
     const estimate = segmentEstimate(session, outcome.calls);
-    session.quota = { inputChars: 0, precharged: (session.quota?.precharged ?? 0) + estimate };
+    session.quota = { inputChars: 0, thinkingChars: 0, precharged: (session.quota?.precharged ?? 0) + estimate };
     session.releaseParkedSlot ??= holdParkedSlot(session.apiKeyId);
     armParkTimeout(session);
     indexSession(
@@ -1047,7 +1056,10 @@ async function releaseHeldDeltas(session: LiveSession): Promise<void> {
 
 async function deliverDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
   if (update.type === "thinking-delta") {
-    if (update.text === "" || session.output?.excludeReasoning) return;
+    if (update.text === "") return;
+    // Upstream produced it, so it is charged whether or not the client sees it.
+    if (session.quota) session.quota.thinkingChars = (session.quota.thinkingChars ?? 0) + update.text.length;
+    if (session.output?.excludeReasoning) return;
     session.thinking += update.text;
     if (session.sink) await session.sink.onThinking(update.text);
     return;
@@ -1124,7 +1136,7 @@ async function finishOutput(
 
 /** Estimated tokens of the current HTTP turn (input + everything streamed), ~4 chars per token. */
 function segmentEstimate(session: LiveSession, calls: OpenAiToolCall[] = []): number {
-  let chars = (session.quota?.inputChars ?? 0) + session.text.length + session.thinking.length;
+  let chars = (session.quota?.inputChars ?? 0) + session.text.length + (session.quota?.thinkingChars ?? 0);
   for (const call of calls) chars += (call.name?.length ?? 0) + (call.arguments?.length ?? 0);
   return estimateTokens(chars);
 }
