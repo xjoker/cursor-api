@@ -114,6 +114,7 @@ detailed = false
 | `cursor_key_cooldown_ms` | 限流后的冷却时间（默认 **60000**，1 秒–24 小时），连续失败翻倍，最多 8 倍。认证失败冷却 15 分钟 |
 | `cursor_key_strategy` | `round_robin`（默认）轮流使用各 key；`least_active` 把每个请求发给当前进行中请求最少的健康 key，持平时轮流。`GET /admin/api/cursor-keys` 返回每个 key 的 `active_requests`、`successes`、`failures`、`last_used_at` |
 | `park_timeout_ms` | 工具轮次在内存里保留多久（默认 **300000**）。网关重启后，下一次工具结果按 HTTP transcript 续场 |
+| `admin_request_timeout_ms` | 管理写请求时限（环境变量 `ADMIN_REQUEST_TIMEOUT_MS`），默认 **10000** ms，允许 1–300000；认证后限制 POST / PATCH / DELETE 的正文读取等异步等待，超时返回简单 JSON 错误 `504 request_timeout` 并关闭连接，参与退出清理。与生成请求时限独立 |
 | `request_timeout_ms` | 每次 Chat/Responses 请求的总时限（环境变量 `REQUEST_TIMEOUT_MS`，默认 **300000** 毫秒，`0` 关闭），包括读取正文、模型预检和上游生成。超时返回 `504 request_timeout`；已经开始流式输出时通过错误事件结束。工具调用返回后停止本次计时，工具结果续轮重新计时 |
 | `shutdown_timeout_ms` | 收到 SIGTERM/SIGINT 后等待在途请求正常结束的宽限（环境变量 `SHUTDOWN_TIMEOUT_MS`，默认 **10000** 毫秒）。停止接收新请求，到期取消剩余请求并清理会话；Compose 为进程预留 30 秒退出时间 |
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
@@ -268,7 +269,7 @@ print(client.chat.completions.create(
 
 超出配额返回 `429 insufficient_quota`，带 `Retry-After`（距下个周期的秒数；`total` 不带）。超出并发上限返回 `429 concurrency_limit_exceeded`，`Retry-After: 1`。模型检查在配额之前，所以不允许的模型得到 403/404 而不是 429，也不扣次数。
 
-总览的上游模型目录检查最多等待 1.5 秒，超时仍返回本地运行状态，并标记 `upstream_error_code: "upstream_timeout"`。每个上游 Key 池最多保留一个未结束的总览检查；网页管理请求超过 15 秒会提示超时，写操作不会自动重试。内存 RSS 包含堆和其他进程内存，缓存字节只统计序列化载荷；ArrayBuffer 属于 external 内存，不能再次相加。
+总览的上游模型目录检查最多等待 1.5 秒，超时仍返回本地运行状态，并标记 `upstream_error_code: "upstream_timeout"`。每个上游 Key 池最多保留一个未结束的总览检查；网页管理请求超过 15 秒会提示超时，写操作不会自动重试。 同一资源的读取只展示最新结果；后台轮询未完成时跳过下一轮，读取失败保留已有内容并提示重试。管理写接口另有默认 10 秒的服务端时限；超时或断连后，未读完正文的操作不会迟到入库。时限不能抢占已经开始的同步 SQLite 操作或锁等待，也不会回滚已提交的变更；这不是数据库执行的硬截止时间，结果不确定时先刷新核对。内存 RSS 包含堆和其他进程内存，缓存字节只统计序列化载荷；ArrayBuffer 属于 external 内存，不能再次相加。
 
 管理 API：`POST /admin/api/keys` 接受以上字段；`PATCH /admin/api/keys/{id}` 修改任意字段（以及 `name`；没传的字段不变，传 `null` 表示取消限制）；`GET /admin/api/keys/{id}/usage` 返回本周期用量（`requests`、`tokens`、`remaining_*`、`in_flight`、`resets_at`）和最近几个周期；`POST /admin/api/keys/{id}/usage/reset` 把本周期清零。`GET /admin/api/keys` 会带上每把 Key 的策略和 `usage_current`。管理台在 **客户端 Key → 策略** 中编辑。
 

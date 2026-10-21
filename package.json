@@ -1,6 +1,6 @@
 {
   "name": "cursor-api",
-  "version": "20261021.2",
+  "version": "20261021.3",
   "description": "OpenAI-compatible gateway (Chat Completions and Responses) over the official Cursor SDK.",
   "license": "MIT",
   "type": "module",
