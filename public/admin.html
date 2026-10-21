@@ -1442,6 +1442,8 @@
       "overview.runtime.secondUnit": "秒",
       "overview.setting.requestTimeout": "请求时限",
       "overview.setting.requestTimeoutHint": "网关请求上限；0 = 关闭",
+      "overview.setting.adminRequestTimeout": "管理写请求时限",
+      "overview.setting.adminRequestTimeoutHint": "管理台 POST / PATCH / DELETE 的服务端时限",
       "overview.setting.shutdownTimeout": "退出宽限",
       "overview.setting.shutdownTimeoutHint": "退出时等待进行中会话的时长",
       "overview.upstreamTimeout": "上游超时",
@@ -1762,6 +1764,8 @@
       "overview.runtime.secondUnit": "s",
       "overview.setting.requestTimeout": "Request timeout",
       "overview.setting.requestTimeoutHint": "Gateway request deadline; 0 = off",
+      "overview.setting.adminRequestTimeout": "Admin write timeout",
+      "overview.setting.adminRequestTimeoutHint": "Server deadline for admin POST / PATCH / DELETE",
       "overview.setting.shutdownTimeout": "Shutdown grace",
       "overview.setting.shutdownTimeoutHint": "Time to wait for active sessions during shutdown",
       "overview.upstreamTimeout": "Upstream timeout",
@@ -1998,6 +2002,7 @@
       { name: "max_live_sessions", label: "overview.setting.maxLiveSessions", hint: "overview.setting.maxLiveSessionsHint" },
       { name: "conversation_ttl_days", label: "overview.setting.conversationTtl", hint: "overview.setting.conversationTtlHint" },
       { name: "request_timeout_ms", label: "overview.setting.requestTimeout", hint: "overview.setting.requestTimeoutHint" },
+      { name: "admin_request_timeout_ms", label: "overview.setting.adminRequestTimeout", hint: "overview.setting.adminRequestTimeoutHint" },
       { name: "shutdown_timeout_ms", label: "overview.setting.shutdownTimeout", hint: "overview.setting.shutdownTimeoutHint" },
     ]);
 
@@ -2118,6 +2123,10 @@
     let logModalReturnFocus = null;
     let filterCache = null;
     let logRangePreset = "all";
+    const activeAdminReads = new Map();
+    const adminReadData = new Set();
+    let adminAuthGeneration = 0;
+    let adminViewGeneration = 0;
 
     const $ = (id) => document.getElementById(id);
     const openaiBase = () => `${window.location.origin}/v1`;
@@ -2143,6 +2152,79 @@
     function clearAdminStore() {
       try { localStorage.removeItem(ADMIN_STORE); } catch { /* sandbox */ }
       try { sessionStorage.removeItem(ADMIN_STORE); } catch { /* sandbox */ }
+    }
+
+    function beginAdminRead(resource, viewName, background = false) {
+      const previous = activeAdminReads.get(resource);
+      if (background && previous?.pending) return null;
+      if (previous?.pending) previous.controller.abort("admin-superseded");
+      const state = {
+        resource,
+        viewName,
+        controller: new AbortController(),
+        pending: true,
+        authGeneration: adminAuthGeneration,
+        viewGeneration: adminViewGeneration,
+      };
+      activeAdminReads.set(resource, state);
+      return state;
+    }
+
+    function isCurrentAdminRead(state) {
+      return activeAdminReads.get(state.resource) === state &&
+        state.authGeneration === adminAuthGeneration &&
+        state.viewGeneration === adminViewGeneration;
+    }
+
+    function finishAdminRead(state) {
+      state.pending = false;
+    }
+
+    function cancelAdminRead(resource, reason = "admin-cancelled") {
+      const state = activeAdminReads.get(resource);
+      if (!state) return;
+      activeAdminReads.delete(resource);
+      state.pending = false;
+      state.controller.abort(reason);
+    }
+
+    function cancelAllAdminReads(reason = "admin-cancelled") {
+      for (const state of activeAdminReads.values()) {
+        state.pending = false;
+        state.controller.abort(reason);
+      }
+      activeAdminReads.clear();
+    }
+
+    async function readAdmin(resource, path, errorId, viewName, options = {}) {
+      const state = beginAdminRead(resource, viewName, Boolean(options.background));
+      if (!state) return { current: false, skipped: true, data: null };
+      if (options.loadingId) {
+        const host = $(options.loadingId);
+        const hasExistingContent = adminReadData.has(resource) ||
+          Boolean(host?.innerHTML) && !/\bloading\b/i.test(host.innerHTML);
+        if (hasExistingContent) adminReadData.add(resource);
+        else setLoading(options.loadingId);
+      }
+      try {
+        const data = await adminApi("GET", path, null, errorId, {
+          controller: state.controller,
+          suppressCancelled: true,
+          canShowError: () => isCurrentAdminRead(state),
+        });
+        return {
+          get current() { return isCurrentAdminRead(state); },
+          data,
+        };
+      } finally {
+        finishAdminRead(state);
+      }
+    }
+
+    function clearInitialReadState(resource, id) {
+      if (adminReadData.has(resource)) return;
+      const el = $(id);
+      if (el && /\bloading\b/i.test(el.innerHTML)) el.innerHTML = "";
     }
 
     $("detected-base").textContent = t("login.detected", { origin: window.location.origin });
@@ -2230,15 +2312,23 @@
         showError("login-error", t("login.needKey"));
         return;
       }
-      const data = await adminApi("GET", "/admin/api/overview", null, "login-error");
-      if (!data) {
+      const requestKey = adminKey;
+      const sessionGeneration = adminAuthGeneration;
+      const result = await readAdmin("connect", "/admin/api/overview", "login-error", "login");
+      if (!result.current) return;
+      if (!result.data) {
         if (!silent) return;
-        if (adminApiLastFailure === "auth") {
+        if (adminApiLastFailure === "auth" && sessionGeneration === adminAuthGeneration && adminKey === requestKey) {
           adminKey = "";
           clearAdminStore();
         }
         return;
       }
+      if (sessionGeneration !== adminAuthGeneration || adminKey !== requestKey) {
+        return;
+      }
+      const data = result.data;
+      adminReadData.add("overview");
       writeAdminStore(adminKey);
       $("admin-key").value = "";
       $("login").classList.add("hidden");
@@ -2249,11 +2339,18 @@
 
     async function loadOverview() {
       hide("overview-error");
-      const data = await adminApi("GET", "/admin/api/overview", null, "overview-error");
-      if (data) renderOverview(data);
+      const result = await readAdmin("overview", "/admin/api/overview", "overview-error", "overview");
+      if (result.current && result.data) {
+        adminReadData.add("overview");
+        renderOverview(result.data);
+      }
     }
 
     function logout() {
+      adminAuthGeneration += 1;
+      adminViewGeneration += 1;
+      cancelAllAdminReads("admin-logout");
+      adminReadData.clear();
       adminKey = "";
       clearAdminStore();
       $("app").classList.add("hidden");
@@ -2262,6 +2359,9 @@
     }
 
     function showView(name) {
+      adminViewGeneration += 1;
+      cancelAllAdminReads("admin-view-change");
+      if (name !== "logs") closeLogModal();
       currentView = name;
       document.querySelectorAll("main > section").forEach((el) => el.classList.add("hidden"));
       const view = $(`view-${name}`);
@@ -2295,7 +2395,7 @@
     }
 
     function formatRuntimeSetting(name, value) {
-      if (name === "request_timeout_ms") {
+      if (name === "request_timeout_ms" || name === "admin_request_timeout_ms") {
         const number = runtimeNumber(value);
         if (number === null) return "—";
         return number === 0 ? t("overview.off") : `${fmtNum(number)} ms`;
@@ -2583,11 +2683,19 @@
       await loadKeys();
     }
 
-    async function loadKeys() {
+    async function loadKeys(options = {}) {
       hide("keys-error");
-      setLoading("keys-table");
-      const data = await adminApi("GET", "/admin/api/keys", null, "keys-error");
-      if (!data) return;
+      const result = await readAdmin("keys", "/admin/api/keys", "keys-error", "keys", {
+        ...options,
+        loadingId: "keys-table",
+      });
+      if (!result.current) return;
+      if (!result.data) {
+        clearInitialReadState("keys", "keys-table");
+        return;
+      }
+      adminReadData.add("keys");
+      const data = result.data;
       const keys = Array.isArray(data.keys) ? data.keys : [];
       if (keys.length === 0) {
         $("keys-table").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("keys.empty") + '</div>';
@@ -2608,10 +2716,19 @@
     }
 
     let poolTimer = 0;
-    async function loadPool() {
+    async function loadPool(options = {}) {
       hide("pool-error");
-      const data = await adminApi("GET", "/admin/api/cursor-keys", null, "pool-error");
-      if (!data) return;
+      const result = await readAdmin("pool", "/admin/api/cursor-keys", "pool-error", "pool", {
+        ...options,
+        loadingId: "pool-table",
+      });
+      if (!result.current) return;
+      if (!result.data) {
+        clearInitialReadState("pool", "pool-table");
+        return;
+      }
+      adminReadData.add("pool");
+      const data = result.data;
       const keys = Array.isArray(data.keys) ? data.keys : [];
       const healthy = keys.filter((k) => k.state === "healthy").length;
       const active = keys.reduce((sum, k) => sum + Number(k.active_requests ?? 0), 0);
@@ -3139,18 +3256,25 @@
 
     function fillSelect(id, items, current) {
       const el = $(id);
-      el.innerHTML = `<option value="">${t("common.all")}</option>` + items.map((item) => {
+      const options = items.slice();
+      if (current && !options.some((item) => String(typeof item === "object" ? item.value : item) === String(current))) {
+        options.push({ value: current, label: current });
+      }
+      el.innerHTML = `<option value="">${t("common.all")}</option>` + options.map((item) => {
         const value = typeof item === "string" || typeof item === "number" ? String(item) : item.value;
         const label = typeof item === "string" || typeof item === "number" ? String(item) : item.label;
         return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
       }).join("");
-      if (current && [...el.options].some((opt) => opt.value === current)) el.value = current;
+      if (current) el.value = current;
     }
 
     async function loadLogFilters(force) {
       if (!force && filterCache) return;
-      const data = await adminApi("GET", "/admin/api/logs/filters", null, "logs-error");
-      if (!data) return;
+      hide("logs-error");
+      const result = await readAdmin("log-filters", "/admin/api/logs/filters", "logs-error", "logs");
+      if (!result.current || !result.data) return;
+      adminReadData.add("log-filters");
+      const data = result.data;
       filterCache = data;
       const model = $("log-model").value;
       const key = $("log-key").value;
@@ -3163,11 +3287,18 @@
       fillSelect("log-status", (data.statuses ?? []).map((code) => ({ value: String(code), label: String(code) })), status);
     }
 
-    async function loadLogs() {
+    async function loadLogs(options = {}) {
       hide("logs-error");
-      setLoading("logs-view");
-      const data = await adminApi("GET", `/admin/api/logs?${logQuery()}`, null, "logs-error");
-      if (!data) return;
+      const result = await readAdmin("logs", `/admin/api/logs?${logQuery()}`, "logs-error", "logs", {
+        ...options,
+        loadingId: "logs-view",
+      });
+      if (!result.current) return;
+      if (!result.data) {
+        clearInitialReadState("logs", "logs-view");
+        return;
+      }
+      const data = result.data;
       const logs = Array.isArray(data.logs) ? data.logs : [];
       logTotal = Number(data.total ?? 0);
       const limit = Number(data.limit ?? $("log-page-size").value) || 50;
@@ -3175,10 +3306,11 @@
       if (logPage > pages) {
         logPage = pages;
         if (logTotal > 0) {
-          await loadLogs();
+          await loadLogs(options);
           return;
         }
       }
+      adminReadData.add("logs");
       if (logs.length === 0) {
         $("logs-view").innerHTML = '<div class="empty"><span class="glyph">∅</span>' + t("logs.empty") + '</div>';
         renderPager(limit);
@@ -3267,8 +3399,15 @@
 
     async function showLogDetail(id) {
       hide("logs-error");
-      const data = await adminApi("GET", `/admin/api/logs/${encodeURIComponent(id)}`, null, "logs-error");
-      if (!data) return;
+      const result = await readAdmin(
+        "log-detail",
+        `/admin/api/logs/${encodeURIComponent(id)}`,
+        "logs-error",
+        "logs",
+      );
+      if (!result.current || !result.data) return;
+      adminReadData.add("log-detail");
+      const data = result.data;
       logModalReturnFocus = document.activeElement;
       $("log-modal-title").textContent = t("modal.titleId", { id });
       $("log-modal-body").innerHTML = renderLogDetail(data);
@@ -3402,6 +3541,7 @@
     }
 
     function closeLogModal() {
+      cancelAdminRead("log-detail", "log-detail-closed");
       $("log-modal").classList.add("hidden");
       $("log-modal-body").innerHTML = "";
       setModalCopy(t("common.copy"), "");
@@ -3457,9 +3597,8 @@
 
     let syslogTotal = 0;
 
-    async function loadSyslog() {
+    async function loadSyslog(options = {}) {
       hide("syslog-error");
-      setLoading("syslog-view");
       const limit = Number($("syslog-page-size").value) || 50;
       const level = $("syslog-level").value;
       const qs = new URLSearchParams({
@@ -3467,8 +3606,17 @@
         offset: String((syslogPage - 1) * limit),
       });
       if (level) qs.set("level", level);
-      const data = await adminApi("GET", `/admin/api/system-logs?${qs}`, null, "syslog-error");
-      if (!data) return;
+      const result = await readAdmin("syslog", `/admin/api/system-logs?${qs}`, "syslog-error", "syslog", {
+        ...options,
+        loadingId: "syslog-view",
+      });
+      if (!result.current) return;
+      if (!result.data) {
+        clearInitialReadState("syslog", "syslog-view");
+        return;
+      }
+      adminReadData.add("syslog");
+      const data = result.data;
       const rows = Array.isArray(data.logs) ? data.logs : [];
       syslogTotal = Number(data.total) || 0;
       if (rows.length === 0) {
@@ -3520,10 +3668,19 @@
       $("syslog-next")?.addEventListener("click", () => { if (syslogPage < pages) { syslogPage += 1; loadSyslog(); } });
     }
 
-    async function loadStats() {
-      setLoading("stats-view");
-      const data = await adminApi("GET", "/admin/api/stats", null, "logs-error");
-      if (!data) return;
+    async function loadStats(options = {}) {
+      hide("logs-error");
+      const result = await readAdmin("stats", "/admin/api/stats", "logs-error", "logs", {
+        ...options,
+        loadingId: "stats-view",
+      });
+      if (!result.current) return;
+      if (!result.data) {
+        clearInitialReadState("stats", "stats-view");
+        return;
+      }
+      adminReadData.add("stats");
+      const data = result.data;
       const retention = Number(data.tokens?.retention_days ?? logRetentionDays);
       if (Number.isFinite(retention) && retention > 0) {
         logRetentionDays = retention;
@@ -3560,11 +3717,14 @@
       const label = $("log-auto-label");
       if (currentView === "logs" && $("log-auto").checked) {
         label?.classList.add("auto-on");
-        logsTimer = window.setInterval(() => { loadLogs(); loadStats(); }, 5000);
+        logsTimer = window.setInterval(() => {
+          loadLogs({ background: true });
+          loadStats({ background: true });
+        }, 5000);
       } else {
         label?.classList.remove("auto-on");
       }
-      if (currentView === "pool") poolTimer = window.setInterval(loadPool, 5000);
+      if (currentView === "pool") poolTimer = window.setInterval(() => loadPool({ background: true }), 5000);
     }
     function stopLogTimer() {
       if (logsTimer) window.clearInterval(logsTimer);
@@ -3573,14 +3733,15 @@
       poolTimer = 0;
     }
 
-    async function adminApi(method, path, body, errorId) {
+    async function adminApi(method, path, body, errorId, options = {}) {
       adminApiLastFailure = null;
+      const controller = options.controller ?? new AbortController();
+      const canShowError = typeof options.canShowError === "function" ? options.canShowError : () => true;
       if (!adminKey) {
         adminApiLastFailure = "not_connected";
-        if (errorId) showError(errorId, t("err.notConnected"));
+        if (errorId && canShowError()) showError(errorId, t("err.notConnected"));
         return null;
       }
-      const controller = new AbortController();
       let timedOut = false;
       const timer = window.setTimeout(() => {
         timedOut = true;
@@ -3601,7 +3762,7 @@
         let data = {};
         if (text) {
           if (!contentType.includes("json") && !/^\s*[{[]/.test(text)) {
-            if (errorId) {
+            if (errorId && canShowError()) {
               showError(
                 errorId,
                 /^[\s\S]*<(!doctype|html|head|body)\b/i.test(text)
@@ -3613,14 +3774,14 @@
           }
           try { data = JSON.parse(text); }
           catch {
-            if (errorId) showError(errorId, text.length > 200 ? `${text.slice(0, 200)} …` : (text || `HTTP ${res.status}`));
+            if (errorId && canShowError()) showError(errorId, text.length > 200 ? `${text.slice(0, 200)} …` : (text || `HTTP ${res.status}`));
             return null;
           }
         }
         if (!res.ok) {
           const message = typeof data.error === "string" ? data.error : JSON.stringify(data);
           adminApiLastFailure = message === "Invalid API key" || message === "Invalid ADMIN_ACCESS_KEY" ? "auth" : "http";
-          if (errorId) {
+          if (errorId && canShowError()) {
             showError(
               errorId,
               message === "Invalid API key" || message === "Invalid ADMIN_ACCESS_KEY"
@@ -3634,7 +3795,8 @@
       } catch (err) {
         const aborted = timedOut || controller.signal.aborted || err?.name === "AbortError";
         adminApiLastFailure = timedOut ? "timeout" : aborted ? "cancelled" : "network";
-        if (errorId) {
+        if (options.suppressCancelled && aborted && !timedOut) return null;
+        if (errorId && canShowError()) {
           const message = timedOut
             ? t("err.timeout")
             : aborted
