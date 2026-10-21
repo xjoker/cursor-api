@@ -241,7 +241,7 @@ print(client.chat.completions.create(
 
 ## 管理台
 
-浏览器访问 `/admin/`：总览（含近 7 天调用曲线）、客户端 Key（创建 / 停用 / 恢复 / 删除 / 策略与配额）、请求日志、系统日志。
+浏览器访问 `/admin/`：总览（含近 7 天调用曲线、请求时限、退出宽限期、进程内存、Response 缓存载荷和未完成 SDK 操作）、客户端 Key（创建 / 停用 / 恢复 / 删除 / 策略与配额）、请求日志、系统日志。
 
 总览展示运行中的版本、提交、数据库 schema 和当前生效配置（只读）。请求日志为常见错误码提供中文说明并保留原始码，显示 Max 模式的 Max、普通、未记录三种状态；未记录不能用于判断是否请求过上游或产生费用。
 
@@ -268,16 +268,18 @@ print(client.chat.completions.create(
 
 超出配额返回 `429 insufficient_quota`，带 `Retry-After`（距下个周期的秒数；`total` 不带）。超出并发上限返回 `429 concurrency_limit_exceeded`，`Retry-After: 1`。模型检查在配额之前，所以不允许的模型得到 403/404 而不是 429，也不扣次数。
 
+总览的上游模型目录检查最多等待 1.5 秒，超时仍返回本地运行状态，并标记 `upstream_error_code: "upstream_timeout"`。每个上游 Key 池最多保留一个未结束的总览检查；网页管理请求超过 15 秒会提示超时，写操作不会自动重试。内存 RSS 包含堆和其他进程内存，缓存字节只统计序列化载荷；ArrayBuffer 属于 external 内存，不能再次相加。
+
 管理 API：`POST /admin/api/keys` 接受以上字段；`PATCH /admin/api/keys/{id}` 修改任意字段（以及 `name`；没传的字段不变，传 `null` 表示取消限制）；`GET /admin/api/keys/{id}/usage` 返回本周期用量（`requests`、`tokens`、`remaining_*`、`in_flight`、`resets_at`）和最近几个周期；`POST /admin/api/keys/{id}/usage/reset` 把本周期清零。`GET /admin/api/keys` 会带上每把 Key 的策略和 `usage_current`。管理台在 **客户端 Key → 策略** 中编辑。
 
 Token 计量的限制：
 - 每个请求按以下顺序计费：①SDK 每次 run 的用量（`run.wait().usage`）；run 启动后被中断或失败时，取这个用量和②中估算值的较大者，所以取消后上游报的部分用量或 0 不会导致少计；②没有用量时按保守估算计：发往上游的输入，加上已输出的文本、思考和工具调用参数，约每 4 个字符 1 个 Token（适用于中断后没有用量、只有累计用量的情况）；③什么都拿不到（run 启动后失败）时，准入时的预留就作为计费。Agent 累计总量永远不计入，否则续会话会重复计算。用量来源可插拔，便于以后接入官方的按 run 用量接口。
 - 以客户端工具调用结束的轮次（挂起的 run）在返回响应时先按估算计费，所以放弃的工具轮也不会免费。工具结果送回、run 完成后，再补计「实际用量 − 已计部分」（不会是负数）。
 - run 没有启动的请求（校验错误、send 失败）会退还请求次数和预留。
-- 数据库：`PRAGMA user_version` 记录 schema 版本（11）。回滚到 v10 之前的版本会忽略策略列，也就是**所有客户端 Key 都变成不受限**；再次升级后策略恢复。
+- 数据库：`PRAGMA user_version` 记录 schema 版本（12）。回滚到 v10 之前的版本会忽略策略列，也就是**所有客户端 Key 都变成不受限**；再次升级后策略恢复。
   - 回滚期间产生的用量，再次升级后不会补记到 `api_key_usage`。
   - 在旧版本上删除 Key，会留下它的 `api_key_usage` 行（孤儿行，无害，不计入任何额度）。
-  - 从 schema 11 之前升级时，会一次性把历史 `request_logs.input_tokens` 加上缓存读写，并记录版本 11。升级前使用 SQLite 在线备份，或停服后备份数据目录；回滚代码不会撤销计数转换。
+  - 从 schema 11 之前升级时，会一次性把历史 `request_logs.input_tokens` 加上缓存读写，并记录当前 schema 版本 12。升级前使用 SQLite 在线备份，或停服后备份数据目录；回滚代码不会撤销计数转换。
 - 暂不支持按费用（美元）设配额：本地 SDK Agent 不提供单次请求的费用。
 
 ---
@@ -361,3 +363,11 @@ GIT_COMMIT=$(git rev-parse HEAD) docker compose build
 ## 许可证
 
 [MIT](./LICENSE)。MIT 许可只覆盖本仓库的代码。第三方依赖适用各自的许可；其中 `@cursor/sdk` 及其平台包（如 `@cursor/sdk-linux-x64`）是专有许可（© Anysphere Inc.，保留所有权利），并会被打包进发布的 Docker 镜像。
+
+## 数据备份与恢复
+
+数据库使用 WAL。服务运行时不要只复制 `cursor-api.sqlite`；用 SQLite 在线备份或 `VACUUM INTO` 创建一致快照，目标文件必须不存在或为空，并确认命令成功。`VACUUM INTO` 期间断电或中断可能留下不完整文件，不能把它当作有效备份。备份文件限制为仅拥有者可读写，并放在受保护的位置。
+
+恢复时先停服，将现有数据目录完整保留为恢复点；在新的数据目录放入备份，命名为 `cursor-api.sqlite`，不要混入旧的 `-wal` / `-shm` 文件。配置和数据库需要配套恢复，特别是原有 `api_key_pepper`，否则已有客户端 Key 无法认证；上游 Key 仍需原账号凭据。配置含密钥，应单独安全备份。先对副本运行 `PRAGMA integrity_check` 和 `PRAGMA foreign_key_check`，确认完整性、schema、Key 策略和配额，再用当前版本打开并核对 `/health`，随后恢复流量。失败时停服并切回完整恢复点，不覆盖唯一备份。
+
+Response 缓存和工具停车状态不属于数据库备份，重启后丢失；会话映射恢复也不保证上游 Agent 仍可续接。
