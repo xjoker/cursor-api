@@ -684,22 +684,24 @@ export function requestStats(db: DatabaseSync): {
   tokens: ReturnType<typeof requestTokenStats>;
   tokens_by_key: KeyTokenRow[];
 } {
-  const by_key = db
-    .prepare("SELECT api_key_id, COUNT(*) AS count FROM request_logs GROUP BY api_key_id")
-    .all()
-    .map((row) => ({
-      api_key_id: asString(row.api_key_id),
-      count: asNumber(row.count),
-    }));
-  const by_model = db
-    .prepare("SELECT model, COUNT(*) AS count FROM request_logs GROUP BY model")
-    .all()
-    .map((row) => ({
-      model: asString(row.model),
-      count: asNumber(row.count),
-    }));
+  const tokens = requestTokenStats(db);
+  const tokens_by_key = tokenStatsByKey(db);
+  const by_key = tokens_by_key.map((row) => ({
+    api_key_id: row.api_key_id,
+    count: row.request_count,
+  }));
+  // The token aggregate is ordered for its own API contract. Re-sort a copy with
+  // SQLite BINARY/UTF-8 ordering for the legacy by_model result.
+  const by_model = [...tokens.by_model]
+    .sort((left, right) => compareSqlBinary(left.model, right.model))
+    .map((row) => ({ model: row.model, count: row.request_count }));
   const by_status = db
-    .prepare("SELECT http_status, COUNT(*) AS count FROM request_logs GROUP BY http_status")
+    .prepare(
+      `SELECT http_status, COUNT(*) AS count
+       FROM request_logs
+       GROUP BY http_status
+       ORDER BY http_status ASC`,
+    )
     .all()
     .map((row) => ({
       http_status: asNumber(row.http_status),
@@ -709,8 +711,8 @@ export function requestStats(db: DatabaseSync): {
     by_key,
     by_model,
     by_status,
-    tokens: requestTokenStats(db),
-    tokens_by_key: tokenStatsByKey(db),
+    tokens,
+    tokens_by_key,
   };
 }
 
@@ -752,7 +754,8 @@ export function tokenStatsByKey(db: DatabaseSync): KeyTokenRow[] {
          COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
          COALESCE(SUM(CASE WHEN total_tokens IS NULL THEN 1 ELSE 0 END), 0) AS unknown_usage_count
        FROM request_logs
-       GROUP BY api_key_id`,
+       GROUP BY api_key_id
+       ORDER BY api_key_id ASC`,
     )
     .all()
     .map((row) => ({
@@ -803,6 +806,20 @@ function migrateRequestLogs(db: DatabaseSync): void {
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model)");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id ON request_logs(api_key_id);
+    CREATE INDEX IF NOT EXISTS idx_request_logs_http_status ON request_logs(http_status);
+    CREATE INDEX IF NOT EXISTS idx_request_logs_model_tokens
+      ON request_logs(model, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens);
+    CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_tokens
+      ON request_logs(api_key_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens);
+    CREATE INDEX IF NOT EXISTS idx_request_logs_detail_bytes
+      ON request_logs(
+        COALESCE(length(CAST(model AS BLOB)), 0)
+        + COALESCE(length(CAST(request_detail AS BLOB)), 0)
+        + COALESCE(length(CAST(response_detail AS BLOB)), 0)
+      );
+  `);
 }
 
 /** Two processes opening a fresh v9 file at once may race on ALTER; the loser just continues. */
@@ -1134,6 +1151,10 @@ function mapTokenTotals(row: Record<string, unknown> | undefined): TokenTotals {
     cache_write_tokens: asNumber(row.cache_write_tokens),
     unknown_usage_count: asNumber(row.unknown_usage_count),
   };
+}
+
+function compareSqlBinary(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 function asString(value: unknown): string {

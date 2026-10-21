@@ -93,7 +93,7 @@ test("maxDetailBytes counts UTF-8 bytes and keeps the newest row under the byte 
   }
 });
 
-test("detail pruning batches the byte scan instead of recomputing SUM after every deleted row", async (context) => {
+test("detail pruning keeps UTF-8 byte semantics when length is overridden", async (context) => {
   const { pruneRequestLogs } = await import("../dist/db.js");
   const db = await openWithPolicy(context, {
     retentionDays: 3650,
@@ -112,9 +112,10 @@ test("detail pruning batches the byte scan instead of recomputing SUM after ever
       })),
     );
 
-    let byteLengthCalls = 0;
+    // Keep this override as the semantic UTF-8 cap check. Query-plan/VM assertions
+    // live in log-query-performance.test.mjs because an expression index can bypass
+    // the overridden callback while preserving the same byte-count result.
     db.function("length", (value) => {
-      byteLengthCalls += 1;
       if (value === null || value === undefined) return null;
       if (typeof value === "string") return Buffer.byteLength(value, "utf8");
       if (ArrayBuffer.isView(value)) return value.byteLength;
@@ -122,11 +123,6 @@ test("detail pruning batches the byte scan instead of recomputing SUM after ever
     });
 
     assert.equal(pruneRequestLogs(db), rowCount - 2);
-    assert.ok(byteLengthCalls > 0, "the byte-size SQL path was exercised");
-    assert.ok(
-      byteLengthCalls <= rowCount * 10,
-      `length() calls=${String(byteLengthCalls)} indicate a repeated full-table SUM`,
-    );
     assert.deepEqual(
       db.prepare("SELECT id FROM request_logs ORDER BY rowid").all().map((row) => row.id),
       ["same-time-38", "same-time-39"],

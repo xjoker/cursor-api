@@ -298,6 +298,8 @@ Single file: `data/config/gateway.toml`. Optional overrides: [`.env.example`](./
 
 So in Docker the container listens on `0.0.0.0` unless your `gateway.toml` says otherwise, and outside Docker it listens on `127.0.0.1`. If `GATEWAY_HOST` overrides a different `host` from `gateway.toml`, the gateway logs a `warn` line at startup. Keep the host side of port mappings on loopback (`127.0.0.1:8787:8787`); do not drop the `127.0.0.1:` prefix unless you mean to expose the gateway.
 
+Statistics and log pruning use database indexes. The first startup after upgrading an existing database builds indexes and needs additional startup time and disk space. See the [SQLite optimization results](docs/sqlite-optimization-20261021.md) for measurements and limits.
+
 SQLite and workspace live under `./data`. Request logs and system logs are pruned by `[logs]` limits on each write and at startup. Container stdout is rotated by compose `logging.options` (max ~30 MB).
 
 ---
