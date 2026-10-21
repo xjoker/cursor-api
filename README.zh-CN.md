@@ -188,7 +188,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` | OpenAI SDK、OpenCode `"npm": "@ai-sdk/openai-compatible"` |
 | `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
-| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，每个 Key 最多最近 100 条、总共 1000 条，总量满时淘汰条目最多的 Key 的最旧条目；`store: false` 不保存；重启丢失） |
+| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，每个 Key 最多最近 100 条 / 8 MiB、总共 1000 条 / 32 MiB UTF-8 JSON 载荷；条数满时淘汰条目最多的 Key 的最旧条目，字节满时淘汰载荷最大的 Key 的最旧条目；每次读写先清理全局过期条目；单条超过 8 MiB 时正常返回但不缓存，后续读取为 404；`store: false` 不保存；重启丢失。字节上限不代表整个进程内存上限） |
 
 支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`，同时以 `delta.reasoning` / `message.reasoning` 再给一份，兼容 OpenRouter 风格客户端）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`reasoning_effort` 按尽力而为处理：精确匹配模型取值，否则取最接近档位；模型没有 effort 参数时忽略（布尔型思考开关：`none`/`minimal` 映射为关）。即使允许 max mode，「最接近档位」和思考开关也不会选只在 max 变体里出现的取值；只有精确的显式取值（例如模型列出 `max` 时传 `reasoning_effort: "max"`）才可能走 max mode。
 
