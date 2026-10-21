@@ -206,7 +206,7 @@ test("a started run deadline is 504, settles quota once, and frees the concurren
   const ledger = join(ledgerDir, "events.jsonl");
   const gateway = await startFakeGateway(
     {
-      REQUEST_TIMEOUT_MS: "150",
+      REQUEST_TIMEOUT_MS: "1000",
       FAKE_SDK_LEDGER: ledger,
     },
     { keyPolicy: { quota_tokens: 100_000, max_concurrent: 1 } },
@@ -218,11 +218,11 @@ test("a started run deadline is 504, settles quota once, and frees the concurren
     const row = await waitFor(() => latestRequestLog(gateway), "timeout request log");
     assert.equal(row.http_status, 504);
     assert.equal(row.error_code, "request_timeout");
+    assert.ok(ledgerEvents(ledger).some((event) => event.event === "dispatch"), "the timed-out request reached SDK dispatch");
     assert.ok((currentUsage(gateway)?.tokens ?? 0) > 0, "started request retains a conservative reservation");
 
     const after = await post(gateway, "/v1/chat/completions", bodyFor("/v1/chat/completions", false, "fast"));
     assert.equal(after.status, 200, "timeout must release the HTTP concurrency slot");
-    assert.ok(ledgerEvents(ledger).some((event) => event.event === "dispatch"));
   } finally {
     await gateway.stop();
   }

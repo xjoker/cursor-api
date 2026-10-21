@@ -12,6 +12,8 @@ test("admin overview exposes the effective non-sensitive runtime settings", { ti
     SSE_KEEPALIVE_MS: "2345",
     MAX_LIVE_SESSIONS: "17",
     CONVERSATION_TTL_DAYS: "9",
+    REQUEST_TIMEOUT_MS: "1234",
+    SHUTDOWN_TIMEOUT_MS: "4321",
   });
   try {
     const unauthenticated = await fetch(`${gateway.baseUrl}/admin/api/overview`);
@@ -35,6 +37,8 @@ test("admin overview exposes the effective non-sensitive runtime settings", { ti
       sse_keepalive_ms: 2345,
       max_live_sessions: 17,
       conversation_ttl_days: 9,
+      request_timeout_ms: 1234,
+      shutdown_timeout_ms: 4321,
     });
 
     const serialized = JSON.stringify(overview);

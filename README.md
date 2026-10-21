@@ -247,6 +247,8 @@ The client key list shows remaining requests, remaining tokens, the reset time, 
 
 Request logs store upstream-reported `raw_cost_cents`, `charged_cents`, and `cost_scope` independently of detailed body logging. `cost_scope: "agent_total"` denotes an **Agent cumulative cost snapshot** in float cents. Upstream billing events may arrive late, so snapshots may be incomplete and must not be summed as individual request costs. Unknown costs and pre-upgrade records remain `null`; explicitly reported zero costs remain `0`. Cost metadata follows request log retention, is not a permanent billing ledger, and does not impose a hard monetary limit.
 
+The overview shows request/shutdown deadlines, process memory, cached Response payload bytes and pending SDK operations. Its upstream catalog check waits at most 1.5 seconds; on timeout, local status remains available with `upstream_error_code: "upstream_timeout"`. Each key pool keeps at most one unfinished overview probe. Browser management requests time out after 15 seconds; writes are never automatically replayed. Cache payload bytes are not total process memory; ArrayBuffer memory is already included in external memory.
+
 Admin API: `/admin/api/*` with the same `admin_access_key` (`Authorization: Bearer` or `X-Management-Key`). `DELETE /admin/api/keys/{id}` removes a client key and keeps its request logs. `GET /admin/api/system-logs` lists gateway stdout/stderr events stored in SQLite. `GET /admin/api/cursor-keys` shows the upstream key pool (sha256 fingerprint, `healthy` / `cooling_down`, failure counters; keys are never returned). The overview includes `cursor_keys: {total, healthy}`.
 
 ### Per-key model policy and quotas
@@ -272,10 +274,10 @@ Token accounting limits:
 - Charge per request, in order: (1) the SDK's per-run usage (`run.wait().usage`); for runs that were aborted or failed after starting, the larger of that usage and the estimate in (2), so partial or zero usage reported after a cancel never undercharges; (2) otherwise a conservative estimate: input sent upstream plus streamed text, thinking and tool-call arguments, at ~4 characters per token (client abort without usage, cumulative-only usage); (3) if nothing at all is known (the run failed after starting), the admission reservation stays as the charge. Cumulative agent totals are never charged, because they would double count continued conversations. The source is pluggable for a future per-run usage API.
 - Turns that end in client tool calls (suspended runs) are charged the estimate when the response is sent, so an abandoned tool round is never free. When the tool results come back and the run finishes, the run's actual usage minus what was already charged is added (never negative).
 - A request whose run never started (validation errors, failed send) is refunded: request count and reservation.
-- Database: `PRAGMA user_version` records the schema version (11). Rolling back to a build older than v10 ignores the policy columns, i.e. **every client key becomes unrestricted**; upgrading again restores the policies.
+- Database: `PRAGMA user_version` records the schema version (12). Rolling back to a build older than v10 ignores the policy columns, i.e. **every client key becomes unrestricted**; upgrading again restores the policies.
   - Usage made while rolled back is not back-filled into `api_key_usage` after upgrading again.
   - On the old build, deleting a key leaves its `api_key_usage` rows behind (orphans; harmless, not counted).
-  - Upgrading from a schema below 11 adds cached reads/writes to historical `request_logs.input_tokens` once and records version 11. Back up SQLite using its online backup API, or stop the gateway and back up its data directory before upgrading; rolling back code does not undo these counts.
+  - Upgrading from a schema below 11 adds cached reads/writes to historical `request_logs.input_tokens` once and records the current schema version 12. Back up SQLite using its online backup API, or stop the gateway and back up its data directory before upgrading; rolling back code does not undo these counts.
 - Cost (USD) quotas are not available yet: local SDK agents do not expose per-request cost.
 
 ---
@@ -359,3 +361,11 @@ The image includes a Docker `HEALTHCHECK` that uses the actual bind address and 
 ## License
 
 [MIT](./LICENSE). The MIT license covers only the code in this repository. Third-party dependencies are under their own licenses; in particular, `@cursor/sdk` and its platform packages (e.g. `@cursor/sdk-linux-x64`) are proprietary (© Anysphere Inc., all rights reserved) and are included in the published Docker image.
+
+## Database backup and restore
+
+The database uses WAL. Do not copy only `cursor-api.sqlite` while the service runs. Use SQLite online backup or `VACUUM INTO` for a consistent snapshot, with a new or empty destination, and verify completion. An interrupted `VACUUM INTO` can leave an incomplete file. Protect backups with owner-only permissions.
+
+Stop the gateway before restoring. Preserve the complete current data directory as a recovery point; place the backup as `cursor-api.sqlite` in a fresh data directory without old `-wal` or `-shm` files. Restore matching configuration, especially the original `api_key_pepper` required for existing client keys, and original upstream account credentials. Back up secret configuration separately and securely. On a copy, run `PRAGMA integrity_check` and `PRAGMA foreign_key_check`; verify schema, keys, policies and quota counters. Open with the current build, verify `/health`, then restore traffic. On failure, stop and switch back to the full recovery point; never overwrite the only backup.
+
+Response caches and parked tool calls are not in database backups and are lost on restart. Restoring conversation mappings does not guarantee upstream agents remain resumable.
