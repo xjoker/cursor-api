@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
 import type { ApiKeyRow, AppConfig, QuotaPeriod } from "./contracts.js";
 import type { CursorKeyPool } from "./keypool.js";
+import type { RequestLifecycle } from "./request-lifecycle.js";
 import { generateClientKey, requireAdminKey } from "./auth.js";
 import {
   disableApiKey,
@@ -26,6 +27,7 @@ import {
   SCHEMA_VERSION,
   tokenStatsByKey,
 } from "./db.js";
+import { abortErrorOf } from "./request-lifecycle.js";
 import { GatewayError, invalidRequest } from "./errors.js";
 import { readJsonBody, sendJson, sendSimpleError } from "./http.js";
 import { listCursorModels, maxModeAllowedFor, peekCursorAccount } from "./cursor.js";
@@ -50,6 +52,13 @@ import { logInfo } from "./log.js";
 
 const ADMIN_PREFIX = "/admin/api/";
 const ADMIN_UPSTREAM_TIMEOUT_MS = 1_500;
+
+type AdminRequestContext = {
+  config: AppConfig;
+  db: DatabaseSync;
+  keyPool: CursorKeyPool;
+  beginRequestLifecycle: (req: IncomingMessage, res: ServerResponse, timeoutMs: number) => RequestLifecycle;
+};
 
 type UpstreamStatus = {
   upstream: "ok" | "unavailable";
@@ -100,17 +109,24 @@ export async function handleAdminRequest(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: { config: AppConfig; db: DatabaseSync; keyPool: CursorKeyPool },
+  ctx: AdminRequestContext,
 ): Promise<boolean> {
   if (!url.pathname.startsWith(ADMIN_PREFIX)) {
     return false;
   }
 
+  let lifecycle: RequestLifecycle | undefined;
   try {
     requireAdminKey(req, ctx.config.adminAccessKey);
-    await dispatch(req, res, url, ctx);
+    if (isAdminWriteMethod(req.method)) {
+      lifecycle = ctx.beginRequestLifecycle(req, res, ctx.config.adminRequestTimeoutMs);
+    }
+    await dispatch(req, res, url, ctx, lifecycle?.signal);
   } catch (error) {
-    sendSimpleError(res, error);
+    const timeout = error instanceof GatewayError && error.code === "request_timeout";
+    sendSimpleError(res, error, timeout ? { connection: "close" } : {});
+  } finally {
+    lifecycle?.stop();
   }
   return true;
 }
@@ -119,8 +135,10 @@ async function dispatch(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: { config: AppConfig; db: DatabaseSync; keyPool: CursorKeyPool },
+  ctx: AdminRequestContext,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const method = req.method ?? "";
   const pathname = url.pathname;
   const disableMatch = /^\/admin\/api\/keys\/([^/]+)\/disable$/.exec(pathname);
@@ -151,6 +169,7 @@ async function dispatch(
         max_live_sessions: ctx.config.maxLiveSessions,
         conversation_ttl_days: ctx.config.conversationTtlDays,
         request_timeout_ms: ctx.config.requestTimeoutMs,
+        admin_request_timeout_ms: ctx.config.adminRequestTimeoutMs,
         shutdown_timeout_ms: ctx.config.shutdownTimeoutMs,
       },
       runtime: {
@@ -225,7 +244,8 @@ async function dispatch(
   }
 
   if (method === "POST" && pathname === "/admin/api/keys") {
-    const body = await readJsonBody(req, ctx.config.maxBodyBytes);
+    const body = await readJsonBody(req, ctx.config.maxBodyBytes, signal);
+    throwIfAborted(signal);
     const parsed = parseCreateKeyBody(body);
     const generated = generateClientKey();
     const now = new Date().toISOString();
@@ -238,6 +258,7 @@ async function dispatch(
       updated_at: now,
       ...parsePolicyFields(body),
     };
+    throwIfAborted(signal);
     insertApiKey(ctx.db, row);
     const created = getApiKeyById(ctx.db, row.id);
     if (!created) {
@@ -248,6 +269,7 @@ async function dispatch(
   }
 
   if (method === "POST" && disableMatch) {
+    throwIfAborted(signal);
     const updated = disableApiKey(ctx.db, decodeURIComponent(disableMatch[1] ?? ""));
     // History-hash reuse records of this key must not outlive it (re-enabling starts clean).
     if (updated) forgetHistoryKey(updated.id);
@@ -259,6 +281,7 @@ async function dispatch(
   }
 
   if (method === "POST" && enableMatch) {
+    throwIfAborted(signal);
     const updated = enableApiKey(ctx.db, decodeURIComponent(enableMatch[1] ?? ""));
     if (!updated) {
       throw notFound("API key not found");
@@ -269,7 +292,8 @@ async function dispatch(
 
   if (method === "PATCH" && deleteMatch) {
     const id = decodeURIComponent(deleteMatch[1] ?? "");
-    const body = await readJsonBody(req, ctx.config.maxBodyBytes);
+    const body = await readJsonBody(req, ctx.config.maxBodyBytes, signal);
+    throwIfAborted(signal);
     if (!isRecord(body)) throw invalidRequest("Request body must be a JSON object");
     const patch: Partial<ApiKeyPolicyFields> & { name?: string } = parsePolicyFields(body);
     if (body.name !== undefined) {
@@ -278,6 +302,7 @@ async function dispatch(
       }
       patch.name = body.name.trim();
     }
+    throwIfAborted(signal);
     const updated = updateApiKeyPolicy(ctx.db, id, patch);
     if (!updated) throw notFound("API key not found");
     logInfo("api key policy updated", { api_key_id: id, fields: Object.keys(patch) });
@@ -299,6 +324,7 @@ async function dispatch(
   }
 
   if (method === "POST" && usageResetMatch) {
+    throwIfAborted(signal);
     const key = getApiKeyById(ctx.db, decodeURIComponent(usageResetMatch[1] ?? ""));
     if (!key) throw notFound("API key not found");
     const period = periodKey(key.quota_period, key.quota_tz);
@@ -309,6 +335,7 @@ async function dispatch(
   }
 
   if (method === "DELETE" && deleteMatch) {
+    throwIfAborted(signal);
     const deleted = deleteApiKey(ctx.db, decodeURIComponent(deleteMatch[1] ?? ""));
     if (!deleted) {
       throw notFound("API key not found");
@@ -363,6 +390,14 @@ async function dispatch(
   }
 
   throw notFound("Not found");
+}
+
+function isAdminWriteMethod(method: string | undefined): boolean {
+  return method === "POST" || method === "PATCH" || method === "DELETE";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortErrorOf(signal);
 }
 
 type PublicKey = Omit<ApiKeyRow, "key_digest" | "request_limit" | "used_requests"> & {
