@@ -14,6 +14,8 @@ const DEFAULT_LOG_DETAILED = false;
 const DEFAULT_LOG_DETAILED_MAX_BYTES = 65_536;
 const DEFAULT_LOG_MAX_DETAIL_BYTES = 268_435_456; // 256 MiB across all detail columns
 const DEFAULT_PARK_TIMEOUT_MS = 300_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 const DEFAULT_SSE_KEEPALIVE_MS = 15_000;
 const DEFAULT_AUTH_FAILURE_LIMIT = 20;
 const DEFAULT_RATE_LIMIT_PER_KEY = 0;
@@ -38,6 +40,8 @@ api_key_pepper = ""
 # cursor_key_strategy = "round_robin"   # or "least_active"
 
 # park_timeout_ms = 300000
+# request_timeout_ms = 300000     # 0 disables the end-to-end request deadline
+# shutdown_timeout_ms = 10000     # grace period for SIGTERM/SIGINT
 # max_live_sessions = 256        # running + parked Cursor sessions kept in memory
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
 # ignore_sampling_params = false  # drop unsupported Chat Completions sampling knobs
@@ -163,6 +167,26 @@ export function loadConfig(
       ),
       DEFAULT_LOG_MAX_DETAIL_BYTES,
       { min: 1_048_576, max: 10_737_418_240 },
+    ),
+    requestTimeoutMs: parseOptionalInterval(
+      pickConfigured(
+        env,
+        "REQUEST_TIMEOUT_MS",
+        intToString(tomlInt(toml, "request_timeout_ms")),
+        "request_timeout_ms",
+      ),
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      { min: 1, max: 86_400_000 },
+    ),
+    shutdownTimeoutMs: parseBoundedInt(
+      pickConfigured(
+        env,
+        "SHUTDOWN_TIMEOUT_MS",
+        intToString(tomlInt(toml, "shutdown_timeout_ms")),
+        "shutdown_timeout_ms",
+      ),
+      DEFAULT_SHUTDOWN_TIMEOUT_MS,
+      { min: 1, max: 300_000 },
     ),
     ignoreSamplingParams: parseBoolean(
       pickConfigured(env, "IGNORE_SAMPLING_PARAMS", boolToString(tomlBool(toml, "ignore_sampling_params")), "ignore_sampling_params"),

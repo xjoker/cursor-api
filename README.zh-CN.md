@@ -44,6 +44,7 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    stop_grace_period: 30s
     logging:
       driver: json-file
       options:
@@ -113,6 +114,8 @@ detailed = false
 | `cursor_key_cooldown_ms` | 限流后的冷却时间（默认 **60000**，1 秒–24 小时），连续失败翻倍，最多 8 倍。认证失败冷却 15 分钟 |
 | `cursor_key_strategy` | `round_robin`（默认）轮流使用各 key；`least_active` 把每个请求发给当前进行中请求最少的健康 key，持平时轮流。`GET /admin/api/cursor-keys` 返回每个 key 的 `active_requests`、`successes`、`failures`、`last_used_at` |
 | `park_timeout_ms` | 工具轮次在内存里保留多久（默认 **300000**）。网关重启后，下一次工具结果按 HTTP transcript 续场 |
+| `request_timeout_ms` | 每次 Chat/Responses 请求的总时限（环境变量 `REQUEST_TIMEOUT_MS`，默认 **300000** 毫秒，`0` 关闭），包括读取正文、模型预检和上游生成。超时返回 `504 request_timeout`；已经开始流式输出时通过错误事件结束。工具调用返回后停止本次计时，工具结果续轮重新计时 |
+| `shutdown_timeout_ms` | 收到 SIGTERM/SIGINT 后等待在途请求正常结束的宽限（环境变量 `SHUTDOWN_TIMEOUT_MS`，默认 **10000** 毫秒）。停止接收新请求，到期取消剩余请求并清理会话；Compose 为进程预留 30 秒退出时间 |
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
 | `quota_reserve_recent_runs` | 按 Key 的 `quota_tokens` 预留同时覆盖该 Key 最近 N 次 run 的平均实际用量（环境变量 `QUOTA_RESERVE_RECENT_RUNS`，默认 **20**，`0` = 只用输入估算） |
@@ -128,6 +131,8 @@ detailed = false
 | `trusted_proxies` | 反向代理的 IP 或 CIDR，逗号分隔，例如 `"127.0.0.1, 172.18.0.0/16"`（环境变量 `TRUSTED_PROXIES`）。默认为空：TCP 对端地址即客户端地址，忽略 `X-Forwarded-For`。对端在列表中时，取 `X-Forwarded-For` 从右往左第一个不在列表中的地址。在反代后面却不配置此项时，所有客户端在 `auth_failure_limit` 中共用代理地址。只填写会覆盖或追加 `X-Forwarded-For` 的代理（nginx `proxy_add_x_forwarded_for`、Caddy 默认行为） |
 
 会话在重启后仍绑定创建它的 Cursor Key，SQLite 仅保存指纹。移除所属 Key 后，增量续接会明确报错；发送完整历史可重放。旧映射没有归属信息时，多 Key 模式需要完整历史。
+
+请求超时或服务退出会尝试取消上游，但不能据此判断没有产生费用。SDK 尚未返回的创建或发送仍占用容量，迟到结果会被清理；已经调用发送但派发状态未知时保留保守配额。若增大退出宽限，也应同步增大容器的 `stop_grace_period`，为清理留出时间。
 
 ```bash
 chmod 600 data/config/gateway.toml

@@ -35,6 +35,7 @@ import { fingerprintKey, type CursorKeyPool } from "./keypool.js";
 import { imagesOfLastUser, renderTranscript } from "./openai.js";
 import { normalizeJsonReply, OutputLimiter, outputFormatInstruction } from "./output-limits.js";
 import { forgetAgent, hashHistory, historyResumeEnabled, rememberHistory, takeHistory } from "./history-resume.js";
+import { abortable, abortErrorOf } from "./request-lifecycle.js";
 
 const DEFAULT_PARK_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -108,6 +109,10 @@ interface LiveSession {
   parkTimeoutMs: number;
   createdAt: number;
   lastActiveAt: number;
+  /** Abort listener for the current HTTP turn; removed before parking. */
+  abortCleanup?: () => void;
+  abortSignal?: AbortSignal;
+  closed?: boolean;
 }
 
 const sessions = new Map<string, LiveSession>();
@@ -116,6 +121,10 @@ const liveSessions = new Set<LiveSession>();
 const sessionCounters = { evicted: 0, expired: 0, rejected: 0, conversationsPruned: 0 };
 let maxLiveSessions = 256;
 let pendingSessionCreates = 0;
+
+/** Session operations that must retain capacity until an uncancellable SDK promise settles. */
+const pendingSessionOperations = new Set<Promise<unknown>>();
+const pendingSessionCapacity = new Set<Promise<unknown>>();
 
 export interface SessionStats {
   live: number;
@@ -130,6 +139,59 @@ export interface SessionStats {
 
 export function configureSessionLimits(options: { maxLiveSessions: number }): void {
   maxLiveSessions = Math.max(1, Math.floor(options.maxLiveSessions));
+}
+
+/** Best-effort cancellation used by the bounded shutdown path. */
+export function abortAllSessions(): void {
+  for (const session of [...liveSessions]) {
+    session.closed = true;
+    unbindAbort(session);
+    const run = session.run;
+    if (run?.supports("cancel")) cancelRun(run, "shutdown");
+    void dropSession(session).catch((error) => {
+      logError("session shutdown cleanup failed", { error: error instanceof Error ? error.message : String(error) });
+    });
+  }
+}
+
+export function pendingSessionOperationCount(): number {
+  return pendingSessionOperations.size + pendingSessionCreates;
+}
+
+function trackPendingSessionOperation<T>(
+  promise: Promise<T>,
+  onSettled?: () => void,
+  retainsCapacity = false,
+): void {
+  pendingSessionOperations.add(promise);
+  if (retainsCapacity) pendingSessionCapacity.add(promise);
+  const settled = (): void => {
+    pendingSessionOperations.delete(promise);
+    pendingSessionCapacity.delete(promise);
+    onSettled?.();
+  };
+  void promise.then(
+    settled,
+    settled,
+  );
+}
+
+function cancelRun(run: Run, context: string): void {
+  let cancellation: Promise<void>;
+  try {
+    cancellation = Promise.resolve(run.cancel());
+  } catch (error) {
+    logError("run cancellation failed", {
+      context,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  trackPendingSessionOperation(cancellation);
+  void cancellation.catch((error) => logError("run cancellation failed", {
+    context,
+    error: error instanceof Error ? error.message : String(error),
+  }));
 }
 
 export function sessionStats(): SessionStats {
@@ -160,7 +222,24 @@ function isAwaitingClient(session: LiveSession): boolean {
  * running, the request is refused with 503 instead of growing without bound.
  */
 async function ensureSessionCapacity(apiKeyId: string): Promise<void> {
-  while (liveSessions.size + pendingSessionCreates >= maxLiveSessions) {
+  while (liveSessions.size + pendingSessionCreates + pendingSessionCapacity.size >= maxLiveSessions) {
+    // A dropped session still occupies a slot until its SDK disposal settles. Give the normal
+    // async disposal turn to finish, but never evict another parked session behind it or wait
+    // indefinitely on an SDK that cannot be cancelled.
+    if (pendingSessionCapacity.size > 0) {
+      await Promise.resolve();
+      if (pendingSessionCapacity.size > 0) {
+        sessionCounters.rejected += 1;
+        logInfo("session limit reached", { api_key_id: apiKeyId, live: liveSessions.size, max: maxLiveSessions });
+        throw new GatewayError(
+          503,
+          "too_many_sessions",
+          "Too many active Cursor sessions; retry shortly",
+          "server_error",
+        );
+      }
+      continue;
+    }
     let victim: LiveSession | undefined;
     for (const session of liveSessions) {
       if (!isAwaitingClient(session)) continue;
@@ -707,20 +786,39 @@ async function resumeUserTurnWithKey(
   options: TurnOptions,
   storedAgentId: string,
 ): Promise<CursorChatResult> {
-  const model = await resolveChatModel(options.apiKey, options.request, options.modelPolicy);
+  const model = await abortable(
+    resolveChatModel(options.apiKey, options.request, options.modelPolicy),
+    options.abortSignal,
+  );
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
   const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
+  const resumePromise = resumeLocalChatAgent({
+    agentId: storedAgentId,
+    apiKey: options.apiKey,
+    workspaceDir: options.workspaceDir,
+    model,
+    customTools,
+    allowMaxMode: session.allowMaxMode,
+  });
   try {
-    session.agent = await resumeLocalChatAgent({
-      agentId: storedAgentId,
-      apiKey: options.apiKey,
-      workspaceDir: options.workspaceDir,
-      model,
-      customTools,
-      allowMaxMode: session.allowMaxMode,
-    });
+    session.agent = await abortable(resumePromise, options.abortSignal);
   } catch (error) {
+    if (options.abortSignal.aborted) {
+      trackPendingSessionOperation(resumePromise, releaseCapacity);
+      void resumePromise.then((lateAgent) => {
+        const disposal = disposeAgent(lateAgent);
+        trackPendingSessionOperation(disposal, undefined, true);
+        void disposal.catch((cleanupError) => logError("late agent disposal failed", {
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        }));
+      }, (lateError) => {
+        logError("late agent resume failed", {
+          error: lateError instanceof Error ? lateError.message : String(lateError),
+        });
+      });
+      throw abortErrorOf(options.abortSignal);
+    }
     releaseCapacity();
     throw error;
   }
@@ -733,7 +831,6 @@ async function resumeUserTurnWithKey(
   try {
     // Claim (stream headers) only after the SDK-resolved max-mode check, so a 403 is still JSON.
     await options.claimOutput?.();
-    rememberConversation(session, options);
   } catch (error) {
     await dropSession(session);
     throw error;
@@ -771,19 +868,38 @@ async function startAgentSession(prompt: string, options: TurnOptions): Promise<
 }
 
 async function startAgentSessionWithKey(prompt: string, options: TurnOptions): Promise<CursorChatResult> {
-  const model = await resolveChatModel(options.apiKey, options.request, options.modelPolicy);
+  const model = await abortable(
+    resolveChatModel(options.apiKey, options.request, options.modelPolicy),
+    options.abortSignal,
+  );
   const releaseCapacity = await reserveSessionCapacity(options.apiKeyId);
   const session = emptySession(options, model.params, model.maxMode === true);
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
+  const createPromise = createLocalChatAgent({
+    apiKey: options.apiKey,
+    workspaceDir: options.workspaceDir,
+    model,
+    customTools,
+    allowMaxMode: session.allowMaxMode,
+  });
   try {
-    session.agent = await createLocalChatAgent({
-      apiKey: options.apiKey,
-      workspaceDir: options.workspaceDir,
-      model,
-      customTools,
-      allowMaxMode: session.allowMaxMode,
-    });
+    session.agent = await abortable(createPromise, options.abortSignal);
   } catch (error) {
+    if (options.abortSignal.aborted) {
+      trackPendingSessionOperation(createPromise, releaseCapacity);
+      void createPromise.then((lateAgent) => {
+        const disposal = disposeAgent(lateAgent);
+        trackPendingSessionOperation(disposal, undefined, true);
+        void disposal.catch((cleanupError) => logError("late agent disposal failed", {
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        }));
+      }, (lateError) => {
+        logError("late agent create failed", {
+          error: lateError instanceof Error ? lateError.message : String(lateError),
+        });
+      });
+      throw abortErrorOf(options.abortSignal);
+    }
     releaseCapacity();
     throw mapCursorError(error);
   }
@@ -791,7 +907,6 @@ async function startAgentSessionWithKey(prompt: string, options: TurnOptions): P
   try {
     // Claim (stream headers) only after the SDK-resolved max-mode check, so a 403 is still JSON.
     await options.claimOutput?.();
-    rememberConversation(session, options);
   } catch (error) {
     await dropSession(session);
     throw error;
@@ -919,24 +1034,85 @@ async function sendOnSession(
   const customTools = buildCustomTools(session, options.request.tools, options.request.tool_choice);
   const images = imagesOfLastUser(options.request.messages);
 
+  if (options.abortSignal.aborted) {
+    await dropSession(session);
+    throw abortErrorOf(options.abortSignal);
+  }
   let run: Run;
+  let sendSettled = false;
+  let upstreamStartedNotified = false;
+  const markUpstreamStarted = (): void => {
+    if (sendSettled || upstreamStartedNotified) return;
+    upstreamStartedNotified = true;
+    options.onUpstreamStarted?.();
+  };
+  const onAbort = (): void => markUpstreamStarted();
+  options.abortSignal.addEventListener("abort", onAbort, { once: true });
   // Max mode disallowed: hold deltas while `send` resolves so nothing streams before the
   // run.model max-mode check. (Allowed: nothing to check, stream directly.)
   session.heldDeltas = session.allowMaxMode ? undefined : [];
+  if (options.abortSignal.aborted) {
+    sendSettled = true;
+    options.abortSignal.removeEventListener("abort", onAbort);
+    session.heldDeltas = undefined;
+    await dropSession(session);
+    throw abortErrorOf(options.abortSignal);
+  }
+  let sendPromise: Promise<Run>;
   try {
-    run = await session.agent.send(images && images.length > 0 ? { text, images } : text, {
-      local: { ...(customTools ? { customTools } : {}), force: true },
-      onDelta: async ({ update }) => {
-        await emitDelta(session, update);
-      },
-    });
+    sendPromise = Promise.resolve(session.agent.send(images && images.length > 0 ? { text, images } : text, {
+        local: { ...(customTools ? { customTools } : {}), force: true },
+        onDelta: async ({ update }) => {
+          await emitDelta(session, update);
+        },
+    }));
   } catch (error) {
+    sendSettled = true;
+    options.abortSignal.removeEventListener("abort", onAbort);
     session.heldDeltas = undefined;
     await dropSession(session);
     throw mapCursorError(error);
   }
+  try {
+    run = await abortable(sendPromise, options.abortSignal);
+    sendSettled = true;
+    options.abortSignal.removeEventListener("abort", onAbort);
+  } catch (error) {
+    sendSettled = true;
+    options.abortSignal.removeEventListener("abort", onAbort);
+    session.heldDeltas = undefined;
+    if (options.abortSignal.aborted) {
+      session.closed = true;
+      session.sink = undefined;
+      trackPendingSessionOperation(sendPromise, () => {
+        void (async (): Promise<void> => {
+          try {
+            const lateRun = await sendPromise;
+            if (lateRun.supports("cancel")) cancelRun(lateRun, "late-send");
+          } catch (lateError) {
+            logError("late send failed", {
+              error: lateError instanceof Error ? lateError.message : String(lateError),
+            });
+          }
+          try {
+            await dropSession(session);
+          } catch (cleanupError) {
+            logError("late send cleanup failed", {
+              error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            });
+          }
+        })();
+      });
+      throw abortErrorOf(options.abortSignal);
+    }
+    await dropSession(session);
+    throw mapCursorError(error);
+  }
   // The upstream run exists from here on (counts toward the request quota even if cancelled below).
-  options.onUpstreamStarted?.();
+  if (!upstreamStartedNotified) {
+    upstreamStartedNotified = true;
+    options.onUpstreamStarted?.();
+  }
   if (run.model?.maxMode === true) {
     session.maxMode = true;
     if (!session.allowMaxMode) {
@@ -951,13 +1127,23 @@ async function sendOnSession(
       try {
         if (options.db) deleteAgentConversations(options.db, session.apiKeyId, session.agent.agentId);
       } finally {
-        if (run.supports("cancel")) await run.cancel().catch(() => undefined);
+        if (run.supports("cancel")) cancelRun(run, "max-mode-policy");
         await dropSession(session);
       }
       throw maxModeNotAllowed(run.model.id, { dispatched: true });
     }
   }
-  await releaseHeldDeltas(session);
+  try {
+    rememberConversation(session, {
+      apiKeyId: session.apiKeyId,
+      request: options.request,
+      db: options.db,
+    });
+    await releaseHeldDeltas(session);
+  } catch (error) {
+    await dropSession(session);
+    throw error;
+  }
   session.run = run;
   // A limit may already have been hit while `send` was resolving.
   if (session.output?.limiter?.cut) cancelForCut(session);
@@ -996,52 +1182,99 @@ export async function continueRun(
 export async function raceTurn(session: LiveSession): Promise<CursorChatResult> {
   const waitPromise = session.waitPromise;
   const batchPromise = session.batchReady?.promise;
+  // Shutdown unbinds the session listener while aborting it. Keep this turn's signal so the
+  // abort race can still classify the cancellation and retain an uncancellable wait operation.
+  const turnSignal = session.abortSignal;
   if (!waitPromise) {
     throw new GatewayError(500, "server_error", "No active Cursor run", "server_error");
   }
   let outcome:
     | { kind: "done"; result: CursorChatResult }
     | { kind: "tools"; calls: OpenAiToolCall[] };
+  let removeRaceAbort: (() => void) | undefined;
   try {
+    const abortPromise = turnSignal
+      ? new Promise<never>((_, reject) => {
+          const signal = turnSignal;
+          const onAbort = (): void => reject(abortErrorOf(signal));
+          removeRaceAbort = () => signal.removeEventListener("abort", onAbort);
+          if (signal.aborted) reject(abortErrorOf(signal));
+          else signal.addEventListener("abort", onAbort, { once: true });
+        })
+      : undefined;
     outcome = await Promise.race([
       waitPromise.then((result) => ({ kind: "done" as const, result })),
       (batchPromise ?? neverSettle()).then((calls) => ({ kind: "tools" as const, calls })),
+      ...(abortPromise ? [abortPromise] : []),
     ]);
   } catch (error) {
+    const signal = turnSignal;
+    if (signal?.aborted) {
+      trackPendingSessionOperation(waitPromise, undefined, true);
+      const settled = await Promise.race([
+        waitPromise,
+        new Promise<undefined>((resolve) => {
+          const timer = setTimeout(() => resolve(undefined), 250);
+          timer.unref();
+        }),
+      ]).catch(() => undefined);
+      await dropSession(session);
+      if (settled) return withThinking(session, settled);
+      return withThinking(session, {
+        text: session.text,
+        usage: toChatUsage(undefined),
+        usageKnown: false,
+        status: "cancelled",
+        finish_reason: "cancelled",
+        params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        ...quotaFields(session),
+      });
+    }
     await dropSession(session);
     throw error;
+  } finally {
+    removeRaceAbort?.();
   }
   if (outcome.kind === "tools") {
-    session.lastActiveAt = Date.now();
-    // Charge this round now (the client may never resume) and hold a concurrency slot while parked.
-    const estimate = segmentEstimate(session, outcome.calls);
-    session.quota = { inputChars: 0, thinkingChars: 0, precharged: (session.quota?.precharged ?? 0) + estimate };
-    session.releaseParkedSlot ??= holdParkedSlot(session.apiKeyId);
-    armParkTimeout(session);
-    indexSession(
-      session,
-      session.apiKeyId,
-      hashMessages([
-        ...session.lastRequestMessages,
-        {
-          role: "assistant",
-          content: session.text,
-          tool_calls: outcome.calls,
-        },
-      ]),
-    );
-    if (session.sink) await session.sink.onToolCalls(outcome.calls);
-    return withThinking(session, {
-      text: session.text,
-      usage: toChatUsage(undefined),
-      usageKnown: false,
-      params: session.modelParams,
-      ...(session.maxMode ? { max_mode: true } : {}),
-      status: "finished",
-      finish_reason: "tool_calls",
-      tool_calls: outcome.calls,
-      quota_estimate_tokens: estimate,
-    });
+    try {
+      // The originating HTTP deadline belongs to the completed tool-call response.
+      // A continuation binds a fresh signal below.
+      unbindAbort(session);
+      session.lastActiveAt = Date.now();
+      // Charge this round now (the client may never resume) and hold a concurrency slot while parked.
+      const estimate = segmentEstimate(session, outcome.calls);
+      session.quota = { inputChars: 0, thinkingChars: 0, precharged: (session.quota?.precharged ?? 0) + estimate };
+      session.releaseParkedSlot ??= holdParkedSlot(session.apiKeyId);
+      armParkTimeout(session);
+      indexSession(
+        session,
+        session.apiKeyId,
+        hashMessages([
+          ...session.lastRequestMessages,
+          {
+            role: "assistant",
+            content: session.text,
+            tool_calls: outcome.calls,
+          },
+        ]),
+      );
+      if (session.sink) await session.sink.onToolCalls(outcome.calls);
+      return withThinking(session, {
+        text: session.text,
+        usage: toChatUsage(undefined),
+        usageKnown: false,
+        params: session.modelParams,
+        ...(session.maxMode ? { max_mode: true } : {}),
+        status: "finished",
+        finish_reason: "tool_calls",
+        tool_calls: outcome.calls,
+        quota_estimate_tokens: estimate,
+      });
+    } catch (error) {
+      await dropSession(session);
+      throw error;
+    }
   }
   await dropSession(session);
   const agentId = session.agent?.agentId;
@@ -1147,6 +1380,7 @@ function flushBatch(session: LiveSession): void {
 }
 
 async function emitDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
+  if (session.closed) return;
   if (session.heldDeltas) {
     session.heldDeltas.push(update);
     return;
@@ -1166,6 +1400,7 @@ async function releaseHeldDeltas(session: LiveSession): Promise<void> {
 }
 
 async function deliverDelta(session: LiveSession, update: InteractionUpdate): Promise<void> {
+  if (session.closed) return;
   if (update.type === "thinking-delta") {
     if (update.text === "") return;
     // Upstream produced it, so it is charged whether or not the client sees it.
@@ -1184,7 +1419,7 @@ async function deliverDelta(session: LiveSession, update: InteractionUpdate): Pr
 }
 
 async function appendText(session: LiveSession, text: string): Promise<void> {
-  if (text === "") return;
+  if (session.closed || text === "") return;
   session.text += text;
   if (session.sink) await session.sink.onText(text);
 }
@@ -1206,7 +1441,7 @@ function outputShapingFor(request: ParsedChatRequest): LiveSession["output"] {
 function cancelForCut(session: LiveSession): void {
   const run = session.run;
   if (!run || session.parks.size > 0) return;
-  if (run.supports("cancel")) void run.cancel().catch(() => undefined);
+  if (run.supports("cancel")) cancelRun(run, "output-limit");
 }
 
 /** Final text plus finish details for limits and JSON mode (successful or limit-cancelled runs). */
@@ -1277,7 +1512,7 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
   }
   try {
     if (abortSignal.aborted && run.supports("cancel")) {
-      await run.cancel();
+      cancelRun(run, "request-abort");
     }
     const result = await run.wait();
     const billed = await billedUsageOf(session.agent);
@@ -1366,14 +1601,23 @@ async function settleRun(session: LiveSession, abortSignal: AbortSignal): Promis
 }
 
 function bindAbort(session: LiveSession, abortSignal: AbortSignal): void {
+  unbindAbort(session);
   const onAbort = (): void => {
     if (session.parks.size > 0) return;
     if (session.run?.supports("cancel")) {
-      void session.run.cancel();
+      cancelRun(session.run, "request-abort");
     }
   };
   if (abortSignal.aborted) onAbort();
   else abortSignal.addEventListener("abort", onAbort, { once: true });
+  session.abortSignal = abortSignal;
+  session.abortCleanup = () => abortSignal.removeEventListener("abort", onAbort);
+}
+
+function unbindAbort(session: LiveSession): void {
+  session.abortCleanup?.();
+  session.abortCleanup = undefined;
+  session.abortSignal = undefined;
 }
 
 function armParkTimeout(session: LiveSession): void {
@@ -1413,6 +1657,9 @@ function indexSession(session: LiveSession, apiKeyId: string, hash: string): voi
 }
 
 async function dropSession(session: LiveSession): Promise<void> {
+  if (session.closed && !liveSessions.has(session)) return;
+  session.closed = true;
+  unbindAbort(session);
   liveSessions.delete(session);
   session.releaseParkedSlot?.();
   session.releaseParkedSlot = undefined;
@@ -1426,7 +1673,11 @@ async function dropSession(session: LiveSession): Promise<void> {
     parked.reject(new Error("Session closed"));
   }
   session.parks.clear();
-  await disposeAgent(session.agent);
+  const disposal = disposeAgent(session.agent);
+  trackPendingSessionOperation(disposal, undefined, true);
+  void disposal.catch((error) => {
+    logError("agent disposal failed", { error: error instanceof Error ? error.message : String(error) });
+  });
 }
 
 function neverSettle(): Promise<never> {

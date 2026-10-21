@@ -28,6 +28,10 @@ export interface AppConfig {
   logDetailed: boolean;
   logDetailedMaxBytes: number;
   logMaxDetailBytes: number;
+  /** End-to-end generation deadline after client authentication; 0 disables it. */
+  requestTimeoutMs: number;
+  /** Grace period for in-flight requests during SIGTERM/SIGINT. */
+  shutdownTimeoutMs: number;
   parkTimeoutMs: number;
   /** Unsupported Chat Completions sampling knobs are dropped instead of rejected. */
   ignoreSamplingParams: boolean;

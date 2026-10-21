@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { GatewayError, httpStatusOf, toOpenAiErrorBody, toSimpleErrorBody } from "./errors.js";
+import { GatewayError, httpStatusOf, requestTimeoutError, toOpenAiErrorBody, toSimpleErrorBody } from "./errors.js";
+import { abortable, abortErrorOf } from "./request-lifecycle.js";
 
 export function corsHeaders(req: IncomingMessage, allowOrigins: string[] = ["*"]): Record<string, string> {
   if (allowOrigins.length === 0) return {};
@@ -118,31 +119,69 @@ function startSseKeepalive(res: ServerResponse, intervalMs: number): void {
   res.on("finish", stop);
 }
 
-export async function writeSse(res: ServerResponse, data: unknown): Promise<void> {
+export interface SseWriteOptions {
+  signal?: AbortSignal;
+  /** Bound a backpressure wait; destroys the response when the bound expires. */
+  timeoutMs?: number;
+}
+
+export async function writeSse(
+  res: ServerResponse,
+  data: unknown,
+  options: SseWriteOptions = {},
+): Promise<void> {
   const payload = typeof data === "string" ? data : JSON.stringify(data);
-  await writeSseRaw(res, `data: ${payload}\n\n`);
+  await writeSseRaw(res, `data: ${payload}\n\n`, options);
 }
 
 export async function writeSseEvent(
   res: ServerResponse,
   event: string,
   data: unknown,
+  options: SseWriteOptions = {},
 ): Promise<void> {
   const payload = typeof data === "string" ? data : JSON.stringify(data);
-  await writeSseRaw(res, `event: ${event}\ndata: ${payload}\n\n`);
+  await writeSseRaw(res, `event: ${event}\ndata: ${payload}\n\n`, options);
 }
 
-async function writeSseRaw(res: ServerResponse, frame: string): Promise<void> {
+async function writeSseRaw(res: ServerResponse, frame: string, options: SseWriteOptions): Promise<void> {
   if (sseResponseClosed(res)) return;
+  if (options.signal?.aborted) throw abortErrorOf(options.signal);
   const ok = res.write(frame);
   if (ok || sseResponseClosed(res)) return;
-  await new Promise<void>((resolve) => {
-    const done = (): void => {
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const cleanup = (): void => {
+      if (timer) clearTimeout(timer);
       res.off("drain", done);
       res.off("close", done);
       res.off("error", done);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve();
     };
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(abortErrorOf(options.signal as AbortSignal));
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        res.destroy();
+        reject(requestTimeoutError("Timed out writing the SSE response"));
+      }, options.timeoutMs);
+      timer.unref();
+    }
     res.once("drain", done);
     res.once("close", done);
     res.once("error", done);
@@ -153,10 +192,39 @@ function sseResponseClosed(res: ServerResponse): boolean {
   return res.destroyed || res.writableEnded || res.closed;
 }
 
-export async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+export async function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  if (!signal) return await readJsonBodyUnbounded(req, maxBytes);
+  let discard = signal.aborted;
+  const onAbort = (): void => {
+    discard = true;
+    // Keep consuming the request after the HTTP handler returns so a timed-out upload does not
+    // retain chunks or leave the connection half-read. The response layer adds Connection: close.
+    req.resume();
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (discard) req.resume();
+  const read = readJsonBodyUnbounded(req, maxBytes, () => discard);
+  try {
+    return await abortable(read, signal);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    if (discard) req.resume();
+  }
+}
+
+async function readJsonBodyUnbounded(
+  req: IncomingMessage,
+  maxBytes: number,
+  shouldDiscard: () => boolean = () => false,
+): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
+    if (shouldDiscard()) continue;
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buf.length;
     if (size > maxBytes) {
