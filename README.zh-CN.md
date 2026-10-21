@@ -44,6 +44,7 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    stop_grace_period: 30s
     logging:
       driver: json-file
       options:
@@ -113,6 +114,8 @@ detailed = false
 | `cursor_key_cooldown_ms` | 限流后的冷却时间（默认 **60000**，1 秒–24 小时），连续失败翻倍，最多 8 倍。认证失败冷却 15 分钟 |
 | `cursor_key_strategy` | `round_robin`（默认）轮流使用各 key；`least_active` 把每个请求发给当前进行中请求最少的健康 key，持平时轮流。`GET /admin/api/cursor-keys` 返回每个 key 的 `active_requests`、`successes`、`failures`、`last_used_at` |
 | `park_timeout_ms` | 工具轮次在内存里保留多久（默认 **300000**）。网关重启后，下一次工具结果按 HTTP transcript 续场 |
+| `request_timeout_ms` | 每次 Chat/Responses 请求的总时限（环境变量 `REQUEST_TIMEOUT_MS`，默认 **300000** 毫秒，`0` 关闭），包括读取正文、模型预检和上游生成。超时返回 `504 request_timeout`；已经开始流式输出时通过错误事件结束。工具调用返回后停止本次计时，工具结果续轮重新计时 |
+| `shutdown_timeout_ms` | 收到 SIGTERM/SIGINT 后等待在途请求正常结束的宽限（环境变量 `SHUTDOWN_TIMEOUT_MS`，默认 **10000** 毫秒）。停止接收新请求，到期取消剩余请求并清理会话；Compose 为进程预留 30 秒退出时间 |
 | `max_live_sessions` | 内存中运行和等待工具结果的 Cursor 会话上限（默认 **256**）；正在创建的会话也计入上限 |
 | `conversation_ttl_days` | 未使用的持久化 `conversation_id` 映射保留天数（默认 **30**） |
 | `quota_reserve_recent_runs` | 按 Key 的 `quota_tokens` 预留同时覆盖该 Key 最近 N 次 run 的平均实际用量（环境变量 `QUOTA_RESERVE_RECENT_RUNS`，默认 **20**，`0` = 只用输入估算） |
@@ -128,6 +131,8 @@ detailed = false
 | `trusted_proxies` | 反向代理的 IP 或 CIDR，逗号分隔，例如 `"127.0.0.1, 172.18.0.0/16"`（环境变量 `TRUSTED_PROXIES`）。默认为空：TCP 对端地址即客户端地址，忽略 `X-Forwarded-For`。对端在列表中时，取 `X-Forwarded-For` 从右往左第一个不在列表中的地址。在反代后面却不配置此项时，所有客户端在 `auth_failure_limit` 中共用代理地址。只填写会覆盖或追加 `X-Forwarded-For` 的代理（nginx `proxy_add_x_forwarded_for`、Caddy 默认行为） |
 
 会话在重启后仍绑定创建它的 Cursor Key，SQLite 仅保存指纹。移除所属 Key 后，增量续接会明确报错；发送完整历史可重放。旧映射没有归属信息时，多 Key 模式需要完整历史。
+
+请求超时或服务退出会尝试取消上游，但不能据此判断没有产生费用。SDK 尚未返回的创建或发送仍占用容量，迟到结果会被清理；已经调用发送但派发状态未知时保留保守配额。若增大退出宽限，也应同步增大容器的 `stop_grace_period`，为清理留出时间。
 
 ```bash
 chmod 600 data/config/gateway.toml
@@ -183,7 +188,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` | OpenAI SDK、OpenCode `"npm": "@ai-sdk/openai-compatible"` |
 | `POST` | `/v1/responses` | Codex、OpenCode `"npm": "@ai-sdk/openai"` |
 | `GET` | `/v1/models`、`/v1/models/{id}` | 模型列表 |
-| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，每个 Key 最多最近 100 条、总共 1000 条，总量满时淘汰条目最多的 Key 的最旧条目；`store: false` 不保存；重启丢失） |
+| `GET` | `/v1/responses/{id}` | 取回已完成的 Response（内存保存，按客户端 Key 隔离，1 小时，每个 Key 最多最近 100 条 / 8 MiB、总共 1000 条 / 32 MiB UTF-8 JSON 载荷；条数满时淘汰条目最多的 Key 的最旧条目，字节满时淘汰载荷最大的 Key 的最旧条目；每次读写先清理全局过期条目；单条超过 8 MiB 时正常返回但不缓存，后续读取为 404；`store: false` 不保存；重启丢失。字节上限不代表整个进程内存上限） |
 
 支持流式（`stream: true`）、视觉（`image_url`，以及 OpenCode 的 `image` / 图片 `file` 部件）、思考块（`delta.reasoning_content`，同时以 `delta.reasoning` / `message.reasoning` 再给一份，兼容 OpenRouter 风格客户端）、Cursor 参数（`params`、`variant`、`reasoning_effort` 等）。`variant` 匹配唯一的目录显示名；当 Cursor 把所有 variant 都起成同一个显示名时，改为匹配 effort/reasoning/fast 的值（OpenCode `--variant high` 在 `@ai-sdk/openai-compatible` 上不会发出该字段；请在请求体里发 `variant` 或 `reasoning_effort`）。支持 OpenAI 工具调用（`tools` / `tool_calls` / `role: tool`），供 OpenCode 等客户端在本地执行工具。Cursor 的 shell/文件工具保持关闭；仅在有客户端工具时打开 MCP，用来把这些工具暴露给模型。不支持音频。`temperature` / `top_p` / `seed` 会 400；`max_tokens` 仍接收。`reasoning_effort` 按尽力而为处理：精确匹配模型取值，否则取最接近档位；模型没有 effort 参数时忽略（布尔型思考开关：`none`/`minimal` 映射为关）。即使允许 max mode，「最接近档位」和思考开关也不会选只在 max 变体里出现的取值；只有精确的显式取值（例如模型列出 `max` 时传 `reasoning_effort: "max"`）才可能走 max mode。
 

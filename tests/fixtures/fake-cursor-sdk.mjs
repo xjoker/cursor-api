@@ -128,6 +128,11 @@ export const Cursor = {
   models: {
     async list({ apiKey }) {
       checkKey(apiKey);
+      ledger({ event: "preflight_started" });
+      if (process.env.FAKE_SDK_PRECHECK_DELAY_MS) {
+        await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SDK_PRECHECK_DELAY_MS)));
+      }
+      ledger({ event: "preflight_done" });
       return catalogForKey(apiKey);
     },
   },
@@ -165,6 +170,7 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
       checkKey(apiKey);
       const prompt = typeof message === "string" ? message : message.text;
       calls.send.push({ apiKey, agentId, prompt });
+      ledger({ event: "send_started", agentId });
       if (process.env.FAKE_SDK_DEBUG) process.stderr.write(`fake-sdk send: tools=${Object.keys(options.local?.customTools ?? {}).join(",")} tail=${JSON.stringify(prompt.slice(-300))}\n`);
       // A test-controlled gate keeps the agent claimed until the competing request has completed.
       if (prompt.includes("WAIT_FOR_SEND_GATE") && process.env.FAKE_SDK_SEND_GATE) {
@@ -172,8 +178,9 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
       }
-      if (process.env.FAKE_SDK_DELAY_MS) {
-        await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SDK_DELAY_MS)));
+      const sendDelayMs = process.env.FAKE_SDK_SEND_DELAY_MS ?? process.env.FAKE_SDK_DELAY_MS;
+      if (sendDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, Number(sendDelayMs)));
       }
       if (prompt.includes("FAIL_RATE_LIMIT")) {
         throw new RateLimitError("usage limit exceeded");
@@ -191,7 +198,9 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
       ledger({ event: "dispatch", agentId, maxMode: runModel?.maxMode === true });
       // FAKE_SDK_EARLY_DELTA=1: like the real SDK, text can arrive before `send` returns the Run.
       if (process.env.FAKE_SDK_EARLY_DELTA === "1") await emit({ type: "text-delta", text: "EARLY_LEAK" });
-      const work = (async () => {
+      const work = prompt.includes("NEVER_SETTLE")
+        ? new Promise(() => {})
+        : (async () => {
         // `THINK<<N>>` streams N characters of thinking instead of "pondering".
         const think = /THINK<<(\d+)>>/.exec(prompt);
         await emit({ type: "thinking-delta", text: think ? "t".repeat(Number(think[1])) : "pondering" });
@@ -275,7 +284,7 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
           text += part;
           await emit({ type: "text-delta", text: part });
         }
-      })();
+          })();
       return {
         model: runModel,
         supports: () => true,
@@ -286,6 +295,7 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
           ledger({ event: "cancel", agentId });
         },
         async wait() {
+          if (prompt.includes("NEVER_SETTLE")) await new Promise(() => {});
           await work;
           // `THROW_ON_CANCEL`: wait() rejects once the run was cancelled.
           if (status === "cancelled" && prompt.includes("THROW_ON_CANCEL")) throw new Error("run stream closed after cancel");
@@ -318,6 +328,9 @@ function makeAgent(apiKey, agentId, model, resumed = false) {
 export const Agent = {
   async create(options) {
     checkKey(options.apiKey);
+    if (process.env.FAKE_SDK_CREATE_DELAY_MS) {
+      await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SDK_CREATE_DELAY_MS)));
+    }
     agentSeq += 1;
     calls.create.push({ apiKey: options.apiKey, model: options.model, sdkMaxMode: sdkMaxMode(options.model) });
     const agentId = `agent-${String(agentSeq)}`;
@@ -327,6 +340,9 @@ export const Agent = {
   },
   async resume(agentId, options) {
     checkKey(options.apiKey);
+    if (process.env.FAKE_SDK_RESUME_DELAY_MS) {
+      await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_SDK_RESUME_DELAY_MS)));
+    }
     const owner = agentOwners.get(agentId);
     if (owner !== undefined && owner !== options.apiKey) {
       throw new AuthenticationError("agent belongs to another Cursor key");

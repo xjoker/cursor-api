@@ -125,6 +125,14 @@ export function upstreamTimeout(message = "Cursor request timed out"): GatewayEr
   return new GatewayError(504, "upstream_timeout", message, "upstream_error");
 }
 
+export function requestTimeoutError(message = "Cursor request timed out"): GatewayError {
+  return new GatewayError(504, "request_timeout", message, "upstream_error");
+}
+
+export function serverShuttingDownError(): GatewayError {
+  return new GatewayError(503, "server_shutting_down", "Gateway is shutting down", "server_error");
+}
+
 export function cancelledError(message = "Request cancelled"): GatewayError {
   return new GatewayError(499, "cancelled", message, "cancelled");
 }

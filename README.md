@@ -42,6 +42,7 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    stop_grace_period: 30s
     logging:
       driver: json-file
       options:
@@ -111,6 +112,8 @@ detailed = false
 | `cursor_key_cooldown_ms` | Cooldown after a rate limit (default **60000**, 1s–24h). Repeated failures double it, up to x8. Auth failures cool down for 15 minutes |
 | `cursor_key_strategy` | `round_robin` (default) rotates keys evenly. `least_active` sends each request to the healthy key with the fewest in-flight requests, with ties rotating. `GET /admin/api/cursor-keys` reports `active_requests`, `successes`, `failures` and `last_used_at` per key |
 | `park_timeout_ms` | How long a pending tool round stays in memory (default **300000**). After a restart, the next tool-result request continues from the HTTP transcript |
+| `request_timeout_ms` | Total deadline for each Chat/Responses request (env `REQUEST_TIMEOUT_MS`, default **300000** ms, `0` disables it), including body reading, model prechecks, and upstream generation. Expiry returns `504 request_timeout`, or ends an already-started stream with an error event. Returning tool calls ends that request's timer; the tool-result continuation gets a new deadline |
+| `shutdown_timeout_ms` | Grace period for in-flight requests after SIGTERM/SIGINT (env `SHUTDOWN_TIMEOUT_MS`, default **10000** ms). New requests stop; remaining requests are cancelled and sessions cleaned up after the grace period. Compose allows 30 seconds for process shutdown |
 | `max_live_sessions` | Maximum running and parked Cursor sessions in memory (default **256**); a pending creation counts toward the limit |
 | `conversation_ttl_days` | Drop unused persisted `conversation_id` mappings after this many days (default **30**) |
 | `quota_reserve_recent_runs` | Per-key `quota_tokens` reservations also cover the average actual usage of the key's last N runs (env `QUOTA_RESERVE_RECENT_RUNS`, default **20**, `0` = input estimate only) |
@@ -126,6 +129,8 @@ detailed = false
 | `trusted_proxies` | Comma-separated IPs or CIDRs of your reverse proxies, e.g. `"127.0.0.1, 172.18.0.0/16"` (env `TRUSTED_PROXIES`). Default empty: the TCP peer address is the client address and `X-Forwarded-For` is ignored. When the peer is listed, the client address is the right-most `X-Forwarded-For` entry that is not a listed proxy. Behind a proxy without this setting, all clients share the proxy's address for `auth_failure_limit`. Only list proxies that overwrite or append `X-Forwarded-For` (nginx `proxy_add_x_forwarded_for`, Caddy default) |
 
 Existing conversations stay bound to the Cursor key that created them, including after a restart. SQLite stores only its fingerprint. Removing that key causes an incremental continuation to fail explicitly; resend the full history to replay it. Legacy mappings without an owner require full history when multiple keys are configured.
+
+A request timeout or shutdown attempts upstream cancellation but does not establish that no charges occurred. Unsettled SDK creation or send operations still occupy capacity, and late results are cleaned up. A send with unknown dispatch status retains a conservative quota reservation. Increasing the shutdown grace period also requires increasing the container's `stop_grace_period` to leave time for cleanup.
 
 ```bash
 chmod 600 data/config/gateway.toml
@@ -181,7 +186,7 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` | OpenAI SDK, OpenCode `"npm": "@ai-sdk/openai-compatible"` |
 | `POST` | `/v1/responses` | Codex, OpenCode `"npm": "@ai-sdk/openai"` |
 | `GET` | `/v1/models`, `/v1/models/{id}` | Model list |
-| `GET` | `/v1/responses/{id}` | Retrieve a finished Response (in memory, per client key, 1 h, newest 100 per key and 1,000 in total — a full store drops the oldest entry of the key holding the most; not with `store: false`; lost on restart) |
+| `GET` | `/v1/responses/{id}` | Retrieve a finished Response (in memory, per client key, 1 h, newest 100 / 8 MiB per key and 1,000 / 32 MiB of UTF-8 JSON payload in total. Count pressure drops the oldest entry of the key holding the most entries; byte pressure uses the key holding the most bytes. Each read/write purges expired entries globally. A response above 8 MiB is returned normally but not cached; later retrieval returns 404. Not with `store: false`; lost on restart. Payload limits do not cap process memory) |
 
 Streaming (`stream: true`), vision (`image_url`, plus OpenCode `image` / image `file` parts), thinking (`delta.reasoning_content`, duplicated as `delta.reasoning` / `message.reasoning` for OpenRouter-style clients), and Cursor knobs (`params`, `variant`, `reasoning_effort`, …) are supported. `variant` matches a unique catalog display name, or an effort/reasoning/fast value when Cursor repeats the same display name (OpenCode `--variant high` does not send this field on `@ai-sdk/openai-compatible`; send `variant` or `reasoning_effort` on the body). OpenAI tool calling (`tools` / `tool_calls` / `role: tool`) is supported so clients like OpenCode can run tools locally. Cursor shell/file tools stay off; MCP is enabled only to surface those client tools. Audio is not. `temperature` / `top_p` / `seed` 400; `max_tokens` is accepted. `reasoning_effort` is best-effort: exact model value, else the nearest level, ignored for models without an effort control (boolean thinking toggles map `none`/`minimal` to off). The nearest-level mapping (and the thinking toggle) never picks a value that only max variants carry, even when max mode is allowed: only an exact, explicit value (e.g. `reasoning_effort: "max"` where the model lists `max`) can select max mode.
 

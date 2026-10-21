@@ -27,7 +27,13 @@ import {
   SCHEMA_VERSION,
   upsertConversation,
 } from "./db.js";
-import { GatewayError, cancelledError, httpStatusOf, modelNotFound } from "./errors.js";
+import {
+  GatewayError,
+  cancelledError,
+  httpStatusOf,
+  modelNotFound,
+  serverShuttingDownError,
+} from "./errors.js";
 import {
   beginSse,
   configureSse,
@@ -39,6 +45,7 @@ import {
   writeSseEvent,
 } from "./http.js";
 import { logError, logInfo, redactLogText, redactValue, setSystemLogWriter, truncateUtf8 } from "./log.js";
+import { abortable, RequestLifecycle } from "./request-lifecycle.js";
 import {
   encodeNonStreamCompletion,
   encodeStreamChunk,
@@ -63,7 +70,9 @@ import {
 } from "./cursor.js";
 import {
   aliasLiveConversation,
+  abortAllSessions,
   configureSessionLimits,
+  pendingSessionOperationCount,
   resumesParkedTurn,
   runChatTurn,
   startSessionSweeper,
@@ -111,9 +120,10 @@ const db = openDb(config.dataDir, {
 });
 configureSessionLimits({ maxLiveSessions: config.maxLiveSessions });
 configureHistoryResume({ enabled: config.historyResume });
-startSessionSweeper({ db, conversationTtlDays: config.conversationTtlDays });
+const stopSessionSweeper = startSessionSweeper({ db, conversationTtlDays: config.conversationTtlDays });
+let databaseOpen = true;
 setSystemLogWriter((entry) => {
-  insertSystemLog(db, entry);
+  if (databaseOpen) insertSystemLog(db, entry);
 });
 if (config.logDetailed) {
   logInfo("detailed request logs enabled", {
@@ -125,8 +135,20 @@ if (config.logDetailed) {
 }
 const adminPagePath = path.join(import.meta.dirname, "..", "public", "admin.html");
 
+let draining = false;
+let shutdownPromise: Promise<void> | undefined;
+const activeHandlers = new Set<Promise<void>>();
+const activeLifecycles = new Set<RequestLifecycle>();
+const SHUTDOWN_CLEANUP_TIMEOUT_MS = 2_000;
+
 const server = createServer((req, res) => {
-  void handleRequest(req, res).catch((error) => {
+  if (draining) {
+    const error = serverShuttingDownError();
+    if ((req.url ?? "").startsWith("/v1/")) sendOpenAiError(res, error);
+    else sendJson(res, error.httpStatus, { error: error.message, code: error.code });
+    return;
+  }
+  const task = handleRequest(req, res).catch((error) => {
     logError("unhandled request error", {
       code: error instanceof GatewayError ? error.code : "server_error",
     });
@@ -136,6 +158,11 @@ const server = createServer((req, res) => {
     }
     sendJson(res, 500, { error: "Internal server error", code: "server_error" });
   });
+  activeHandlers.add(task);
+  void task.then(
+    () => activeHandlers.delete(task),
+    () => activeHandlers.delete(task),
+  );
 });
 
 server.listen(config.gatewayPort, config.gatewayHost, () => {
@@ -147,7 +174,130 @@ server.listen(config.gatewayPort, config.gatewayHost, () => {
   warmCursorAccount(keyPool.primary);
 });
 
+process.on("SIGTERM", () => {
+  void beginShutdown("SIGTERM");
+});
+process.on("SIGINT", () => {
+  void beginShutdown("SIGINT");
+});
+
+async function beginShutdown(signal: string): Promise<void> {
+  if (shutdownPromise) return await shutdownPromise;
+  draining = true;
+  shutdownPromise = shutdown(signal);
+  return await shutdownPromise;
+}
+
+async function shutdown(signal: string): Promise<void> {
+  let forced = false;
+  let hardStop = false;
+  const hardStopTimer = setTimeout(() => {
+    hardStop = true;
+    logError("gateway shutdown forced", {
+      signal,
+      forced: true,
+      unsettled: true,
+      active_handlers: activeHandlers.size,
+      pending_session_operations: pendingSessionOperationCount(),
+    });
+    setSystemLogWriter(undefined);
+    process.exit(1);
+  }, config.shutdownTimeoutMs + SHUTDOWN_CLEANUP_TIMEOUT_MS + 1_000);
+  const serverClose = new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+  try {
+    const graceful = await waitForHandlers(config.shutdownTimeoutMs);
+    if (!graceful) {
+      forced = true;
+      for (const lifecycle of [...activeLifecycles]) lifecycle.abortForShutdown();
+      server.closeAllConnections?.();
+    }
+    abortAllSessions();
+    stopSessionSweeper();
+
+    // Keep the database open while request finally blocks settle. Uncancellable SDK work gets a
+    // bounded cleanup window; if it remains pending, exit without pretending cleanup completed.
+    const cleanupDeadline = Date.now() + SHUTDOWN_CLEANUP_TIMEOUT_MS;
+    const handlersSettled = await waitForHandlers(remainingMs(cleanupDeadline));
+    const sessionsSettled = handlersSettled && await waitForSessionCleanup(remainingMs(cleanupDeadline));
+    server.closeIdleConnections?.();
+    const serverSettled = handlersSettled && sessionsSettled && await waitForPromise(serverClose, remainingMs(cleanupDeadline));
+    if (!handlersSettled || !sessionsSettled || !serverSettled) {
+      forced = true;
+      logError("gateway shutdown forced", {
+        signal,
+        forced: true,
+        unsettled: true,
+        active_handlers: activeHandlers.size,
+        pending_session_operations: pendingSessionOperationCount(),
+      });
+      setSystemLogWriter(undefined);
+      process.exit(1);
+    }
+
+    if (forced) logError("gateway shutdown forced", { signal, forced: true, unsettled: false });
+    else logInfo("gateway shutdown complete", { signal, forced: false, unsettled: false });
+    setSystemLogWriter(undefined);
+    databaseOpen = false;
+    try {
+      db.close();
+    } catch (error) {
+      logError("database close failed", { error: error instanceof Error ? error.message : String(error) });
+      forced = true;
+    }
+    const exitCode = forced ? 1 : 0;
+    process.exitCode = exitCode;
+    // Do not let unrelated SDK sockets/timers extend shutdown after the database is closed.
+    setTimeout(() => process.exit(exitCode), 250);
+  } finally {
+    clearTimeout(hardStopTimer);
+    if (hardStop) process.exit(1);
+  }
+}
+
+async function waitForHandlers(timeoutMs: number): Promise<boolean> {
+  if (activeHandlers.size === 0) return true;
+  return await waitForPromise(Promise.all([...activeHandlers]), timeoutMs);
+}
+
+async function waitForSessionCleanup(timeoutMs: number): Promise<boolean> {
+  if (pendingSessionOperationCount() === 0) return true;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (pendingSessionOperationCount() > 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await delay(Math.min(25, remaining));
+  }
+  return true;
+}
+
+async function waitForPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
+  if (timeoutMs <= 0) return false;
+  return await Promise.race([
+    promise.then(() => true, () => true),
+    delay(timeoutMs).then(() => false),
+  ]);
+}
+
+function remainingMs(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+function delay(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, timeoutMs));
+    timer.unref();
+  });
+}
+
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (draining) {
+    const error = serverShuttingDownError();
+    if ((req.url ?? "").startsWith("/v1/")) sendOpenAiError(res, error);
+    else sendJson(res, error.httpStatus, { error: error.message, code: error.code });
+    return;
+  }
   const cors = corsHeaders(req, config.corsAllowOrigins);
   let url: URL;
   try {
@@ -289,11 +439,21 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 }
 
+function beginRequestLifecycle(req: IncomingMessage, res: ServerResponse): RequestLifecycle {
+  let lifecycle!: RequestLifecycle;
+  lifecycle = new RequestLifecycle(req, res, config.requestTimeoutMs, () => {
+    activeLifecycles.delete(lifecycle);
+  });
+  activeLifecycles.add(lifecycle);
+  return lifecycle;
+}
+
 async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const started = Date.now();
   const requestId = `chatcmpl_${randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1000);
   const key = requireClientKey(req, db, config.apiKeyPepper);
+  const lifecycle = beginRequestLifecycle(req, res);
 
   let model = "";
   let stream = 0;
@@ -307,9 +467,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
   let chatResult: CursorChatResult | null = null;
   let ticket: KeyTicket | undefined;
   let maxDispatched = false;
+  let terminalSse = false;
 
   try {
-    const body = await readJsonBody(req, config.maxBodyBytes);
+    const body = await readJsonBody(req, config.maxBodyBytes, lifecycle.signal);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
     const parsed = parseChatCompletionsRequest(body, {
@@ -320,29 +481,22 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     model = parsed.model;
     stream = parsed.stream ? 1 : 0;
     validateChatTurnRequest(parsed);
-    ticket = await admitTurn(key, parsed);
+    ticket = await admitTurn(key, parsed, lifecycle.signal);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
     const headers = corsHeaders(req, config.corsAllowOrigins);
 
-    const abort = new AbortController();
-    let holdForTools = false;
-    const onClose = (): void => {
-      if (holdForTools) return;
-      if (!res.writableEnded) abort.abort();
-    };
-    req.on("close", onClose);
-    res.on("close", onClose);
+    const abort = lifecycle.controller;
+    const writeFrame = (data: unknown): Promise<void> =>
+      writeSse(res, data, { signal: terminalSse ? undefined : lifecycle.signal, timeoutMs: terminalSse ? 100 : config.requestTimeoutMs });
 
-    try {
-      const collectedTools: OpenAiToolCall[] = [];
-      const sink = parsed.stream
+    const collectedTools: OpenAiToolCall[] = [];
+    const sink = parsed.stream
         ? {
             onText: async (text: string): Promise<void> => {
               if (text === "") return;
-              await writeSse(
-                res,
+              await writeFrame(
                 encodeStreamChunk({
                   id: requestId,
                   created,
@@ -353,8 +507,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             },
             onThinking: async (text: string): Promise<void> => {
               if (text === "") return;
-              await writeSse(
-                res,
+              await writeFrame(
                 encodeStreamChunk({
                   id: requestId,
                   created,
@@ -366,8 +519,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             onToolCalls: async (calls: OpenAiToolCall[]): Promise<void> => {
               collectedTools.push(...calls);
               for (const [index, call] of calls.entries()) {
-                await writeSse(
-                  res,
+                await writeFrame(
                   encodeStreamChunk({
                     id: requestId,
                     created,
@@ -375,8 +527,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
                     tool_calls: [{ index, id: call.id, name: call.name, arguments: "" }],
                   }),
                 );
-                await writeSse(
-                  res,
+                await writeFrame(
                   encodeStreamChunk({
                     id: requestId,
                     created,
@@ -395,8 +546,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             },
           };
 
-      const upstreamStarted = Date.now();
-      const result = await runChatTurn({
+    const upstreamStarted = Date.now();
+    const result = await runChatTurn({
         apiKey: keyPool.primary,
         keyPool,
         apiKeyId: key.id,
@@ -406,8 +557,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         onClaimed: parsed.stream
           ? async (): Promise<void> => {
               beginSse(res, requestId, headers);
-              await writeSse(
-                res,
+              await writeFrame(
                 encodeStreamChunk({
                   id: requestId,
                   created,
@@ -423,41 +573,37 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
         modelPolicy: modelOptionsFor(key),
         onUpstreamStarted: () => ticket?.markStarted(),
       });
-      upstreamMs = Date.now() - upstreamStarted;
-      chatResult = result;
-      if (result.usageKnown) usage = result.usage;
+    upstreamMs = Date.now() - upstreamStarted;
+    chatResult = result;
+    if (result.usageKnown) usage = result.usage;
+    if (lifecycle.error) throw lifecycle.error;
 
-      if (result.finish_reason === "tool_calls") {
-        holdForTools = true;
-      }
-
-      if (result.status === "cancelled" || result.finish_reason === "cancelled") {
+    if (result.status === "cancelled" || result.finish_reason === "cancelled") {
         httpStatus = 499;
         errorCode = "cancelled";
         if (parsed.stream) {
-          await writeSse(res, {
+          await writeFrame({
             error: {
               message: "Request cancelled",
               type: "cancelled",
               code: "cancelled",
             },
           });
-          await writeSse(res, "[DONE]");
+          await writeFrame("[DONE]");
           res.end();
           return;
         }
         throw cancelledError();
       }
-      if (result.status === "error" || result.finish_reason === "error") {
+    if (result.status === "error" || result.finish_reason === "error") {
         throw runFailureError(result.error);
       }
 
-      const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = clientFinishReason(result);
+    const toolCalls = result.tool_calls ?? collectedTools;
+    const finishReason = clientFinishReason(result);
 
-      if (parsed.stream) {
-        await writeSse(
-          res,
+    if (parsed.stream) {
+        await writeFrame(
           encodeStreamChunk({
             id: requestId,
             created,
@@ -466,8 +612,7 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
           }),
         );
         if (parsed.includeUsage && result.usageKnown) {
-          await writeSse(
-            res,
+          await writeFrame(
             encodeStreamChunk({
               id: requestId,
               created,
@@ -478,9 +623,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             }),
           );
         }
-        await writeSse(res, "[DONE]");
+        await writeFrame("[DONE]");
         res.end();
-      } else {
+    } else {
         sendJson(
           res,
           200,
@@ -498,76 +643,85 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
           }),
           { "x-request-id": requestId, ...headers },
         );
-      }
-    } finally {
-      req.off("close", onClose);
-      res.off("close", onClose);
     }
   } catch (error) {
-    httpStatus = httpStatusOf(error);
-    errorCode = error instanceof GatewayError ? error.code : "server_error";
-    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
-    errorMessage = error instanceof Error ? error.message : String(error);
+    const effectiveError = lifecycle.error ?? error;
+    httpStatus = httpStatusOf(effectiveError);
+    errorCode = effectiveError instanceof GatewayError ? effectiveError.code : "server_error";
+    maxDispatched = effectiveError instanceof GatewayError && effectiveError.maxModeDispatched === true;
+    errorMessage = effectiveError instanceof Error ? effectiveError.message : String(effectiveError);
     if (!res.headersSent) {
-      sendOpenAiError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
+      if (effectiveError instanceof GatewayError && effectiveError.code === "request_timeout") {
+        res.setHeader("connection", "close");
+      }
+      if (!res.destroyed) sendOpenAiError(res, effectiveError, requestId, corsHeaders(req, config.corsAllowOrigins));
     } else {
-      const mapped = error instanceof GatewayError ? error : null;
-      await writeSse(res, {
-        error: {
-          message: mapped?.message ?? "Cursor request failed",
-          type: mapped?.openaiType ?? "upstream_error",
-          code: mapped?.code ?? "upstream_error",
-        },
-      });
-      await writeSse(res, "[DONE]");
-      res.end();
+      const mapped = effectiveError instanceof GatewayError ? effectiveError : null;
+      terminalSse = true;
+      try {
+        await writeSse(res, {
+          error: {
+            message: mapped?.message ?? "Cursor request failed",
+            type: mapped?.openaiType ?? "upstream_error",
+            code: mapped?.code ?? "upstream_error",
+          },
+        }, { timeoutMs: 100 });
+        await writeSse(res, "[DONE]", { timeoutMs: 100 });
+        if (!res.writableEnded) res.end();
+      } catch {
+        res.destroy();
+      }
     }
   } finally {
-    ticket?.finish(chatResult);
-    const durationMs = Date.now() - started;
-    const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
-    responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
-    insertRequestLog(db, {
-      id: requestId,
-      api_key_id: key.id,
-      path: "/v1/chat/completions",
-      model,
-      stream,
-      http_status: httpStatus,
-      duration_ms: durationMs,
-      input_tokens: usage?.prompt_tokens ?? null,
-      output_tokens: usage?.completion_tokens ?? null,
-      total_tokens: usage?.total_tokens ?? null,
-      cache_read_tokens: usage?.cache_read_tokens ?? null,
-      cache_write_tokens: usage?.cache_write_tokens ?? null,
-      reasoning_tokens: usage?.reasoning_tokens ?? null,
-      error_code: errorCode,
-      created_at: new Date().toISOString(),
-      upstream_ms: upstreamMs,
-      gateway_ms: gatewayMs,
-      request_detail: requestDetail,
-      response_detail: responseDetail,
-      max_mode: maxModeOf(chatResult, maxDispatched),
-      ...costFields(chatResult),
-    });
-    logInfo("chat completed", {
-      request_id: requestId,
-      api_key_id: key.id,
-      model,
-      stream: stream === 1,
-      http_status: httpStatus,
-      duration_ms: durationMs,
-      upstream_ms: upstreamMs,
-      gateway_ms: gatewayMs,
-      input_tokens: usage?.prompt_tokens ?? null,
-      output_tokens: usage?.completion_tokens ?? null,
-      total_tokens: usage?.total_tokens ?? null,
-      cache_read_tokens: usage?.cache_read_tokens ?? null,
-      cache_write_tokens: usage?.cache_write_tokens ?? null,
-      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
-      error_code: errorCode,
-      ...(errorMessage ? { error_message: errorMessage } : {}),
-    });
+    try {
+      ticket?.finish(chatResult);
+      const durationMs = Date.now() - started;
+      const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
+      responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
+      insertRequestLog(db, {
+        id: requestId,
+        api_key_id: key.id,
+        path: "/v1/chat/completions",
+        model,
+        stream,
+        http_status: httpStatus,
+        duration_ms: durationMs,
+        input_tokens: usage?.prompt_tokens ?? null,
+        output_tokens: usage?.completion_tokens ?? null,
+        total_tokens: usage?.total_tokens ?? null,
+        cache_read_tokens: usage?.cache_read_tokens ?? null,
+        cache_write_tokens: usage?.cache_write_tokens ?? null,
+        reasoning_tokens: usage?.reasoning_tokens ?? null,
+        error_code: errorCode,
+        created_at: new Date().toISOString(),
+        upstream_ms: upstreamMs,
+        gateway_ms: gatewayMs,
+        request_detail: requestDetail,
+        response_detail: responseDetail,
+        max_mode: maxModeOf(chatResult, maxDispatched),
+        ...costFields(chatResult),
+      });
+      logInfo("chat completed", {
+        request_id: requestId,
+        api_key_id: key.id,
+        model,
+        stream: stream === 1,
+        http_status: httpStatus,
+        duration_ms: durationMs,
+        upstream_ms: upstreamMs,
+        gateway_ms: gatewayMs,
+        input_tokens: usage?.prompt_tokens ?? null,
+        output_tokens: usage?.completion_tokens ?? null,
+        total_tokens: usage?.total_tokens ?? null,
+        cache_read_tokens: usage?.cache_read_tokens ?? null,
+        cache_write_tokens: usage?.cache_write_tokens ?? null,
+        max_mode: maxModeOf(chatResult, maxDispatched) === 1,
+        error_code: errorCode,
+        ...(errorMessage ? { error_message: errorMessage } : {}),
+      });
+    } finally {
+      lifecycle.stop();
+    }
   }
 }
 
@@ -576,6 +730,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   const requestId = `resp_${randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1000);
   const key = requireClientKey(req, db, config.apiKeyPepper);
+  const lifecycle = beginRequestLifecycle(req, res);
 
   let model = "";
   let stream = 0;
@@ -590,9 +745,10 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
   let ticket: KeyTicket | undefined;
   let maxDispatched = false;
   let writer: ResponsesStreamWriter | undefined;
+  let terminalSse = false;
 
   try {
-    const body = await readJsonBody(req, config.maxBodyBytes);
+    const body = await readJsonBody(req, config.maxBodyBytes, lifecycle.signal);
     model = peekModel(body);
     requestDetail = snapshotIncomingBody(body);
     const parsed = parseResponsesRequest(body, { enforceOutputLimits: config.enforceOutputLimits });
@@ -606,34 +762,29 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
       parsed.conversation_id_generated = true;
     }
     validateChatTurnRequest(parsed);
-    ticket = await admitTurn(key, parsed);
+    ticket = await admitTurn(key, parsed, lifecycle.signal);
     if (config.logDetailed) {
       requestDetail = truncateUtf8(buildRequestDetail(parsed), config.logDetailedMaxBytes);
     }
     const headers = corsHeaders(req, config.corsAllowOrigins);
 
-    const abort = new AbortController();
-    let holdForTools = false;
-    const onClose = (): void => {
-      if (holdForTools) return;
-      if (!res.writableEnded) abort.abort();
-    };
-    req.on("close", onClose);
-    res.on("close", onClose);
+    const abort = lifecycle.controller;
 
-    try {
-      const collectedTools: OpenAiToolCall[] = [];
-      const customToolNames = new Set(parsed.customToolNames ?? []);
-      if (parsed.stream) {
+    const collectedTools: OpenAiToolCall[] = [];
+    const customToolNames = new Set(parsed.customToolNames ?? []);
+    if (parsed.stream) {
         writer = new ResponsesStreamWriter(
           async (event, data) => {
-            await writeSseEvent(res, event, data);
+            await writeSseEvent(res, event, data, {
+              signal: terminalSse ? undefined : lifecycle.signal,
+              timeoutMs: terminalSse ? 100 : config.requestTimeoutMs,
+            });
           },
           { id: requestId, created, model: parsed.model },
           customToolNames,
         );
-      }
-      const sink = parsed.stream
+    }
+    const sink = parsed.stream
         ? {
             onText: async (text: string): Promise<void> => {
               await writer?.onText(text);
@@ -654,8 +805,8 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
             },
           };
 
-      const upstreamStarted = Date.now();
-      const result = await runChatTurn({
+    const upstreamStarted = Date.now();
+    const result = await runChatTurn({
         apiKey: keyPool.primary,
         keyPool,
         apiKeyId: key.id,
@@ -674,16 +825,17 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         modelPolicy: modelOptionsFor(key),
         onUpstreamStarted: () => ticket?.markStarted(),
       });
-      rememberResponseChain(key.id, resumeId, requestId);
-      upstreamMs = Date.now() - upstreamStarted;
-      chatResult = result;
-      if (result.usageKnown) usage = result.usage;
+    upstreamMs = Date.now() - upstreamStarted;
+    if (lifecycle.error) {
+        chatResult = result;
+        if (result.usageKnown) usage = result.usage;
+        throw lifecycle.error;
+    }
+    rememberResponseChain(key.id, resumeId, requestId);
+    chatResult = result;
+    if (result.usageKnown) usage = result.usage;
 
-      if (result.finish_reason === "tool_calls") {
-        holdForTools = true;
-      }
-
-      if (result.status === "cancelled" || result.finish_reason === "cancelled") {
+    if (result.status === "cancelled" || result.finish_reason === "cancelled") {
         httpStatus = 499;
         errorCode = "cancelled";
         if (parsed.stream) {
@@ -701,14 +853,14 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         }
         throw cancelledError();
       }
-      if (result.status === "error" || result.finish_reason === "error") {
+    if (result.status === "error" || result.finish_reason === "error") {
         throw runFailureError(result.error);
       }
 
-      const toolCalls = result.tool_calls ?? collectedTools;
-      const finishReason = clientFinishReason(result);
+    const toolCalls = result.tool_calls ?? collectedTools;
+    const finishReason = clientFinishReason(result);
 
-      if (parsed.stream) {
+    if (parsed.stream) {
         const final = await writer?.complete({
           content: result.text,
           usage: result.usageKnown ? result.usage : null,
@@ -720,7 +872,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         });
         if (final && keepResponse) storeResponse(key.id, final);
         res.end();
-      } else {
+    } else {
         const final = encodeNonStreamResponse({
           id: requestId,
           created,
@@ -736,73 +888,82 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
         });
         if (keepResponse) storeResponse(key.id, final);
         sendJson(res, 200, final, { "x-request-id": requestId, ...headers });
-      }
-    } finally {
-      req.off("close", onClose);
-      res.off("close", onClose);
     }
   } catch (error) {
-    httpStatus = httpStatusOf(error);
-    errorCode = error instanceof GatewayError ? error.code : "server_error";
-    maxDispatched = error instanceof GatewayError && error.maxModeDispatched === true;
-    errorMessage = error instanceof Error ? error.message : String(error);
+    const effectiveError = lifecycle.error ?? error;
+    httpStatus = httpStatusOf(effectiveError);
+    errorCode = effectiveError instanceof GatewayError ? effectiveError.code : "server_error";
+    maxDispatched = effectiveError instanceof GatewayError && effectiveError.maxModeDispatched === true;
+    errorMessage = effectiveError instanceof Error ? effectiveError.message : String(effectiveError);
     if (!res.headersSent) {
-      sendOpenAiError(res, error, requestId, corsHeaders(req, config.corsAllowOrigins));
+      if (effectiveError instanceof GatewayError && effectiveError.code === "request_timeout") {
+        res.setHeader("connection", "close");
+      }
+      if (!res.destroyed) sendOpenAiError(res, effectiveError, requestId, corsHeaders(req, config.corsAllowOrigins));
     } else {
-      const mapped = error instanceof GatewayError ? error : null;
-      await writer?.fail({
-        message: mapped?.message ?? "Cursor request failed",
-        type: mapped?.openaiType ?? "upstream_error",
-        code: mapped?.code ?? "upstream_error",
-      });
-      res.end();
+      const mapped = effectiveError instanceof GatewayError ? effectiveError : null;
+      terminalSse = true;
+      try {
+        await writer?.fail({
+          message: mapped?.message ?? "Cursor request failed",
+          type: mapped?.openaiType ?? "upstream_error",
+          code: mapped?.code ?? "upstream_error",
+        });
+        if (!res.writableEnded) res.end();
+      } catch {
+        res.destroy();
+      }
     }
   } finally {
-    ticket?.finish(chatResult);
-    const durationMs = Date.now() - started;
-    const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
-    responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
-    insertRequestLog(db, {
-      id: requestId,
-      api_key_id: key.id,
-      path: "/v1/responses",
-      model,
-      stream,
-      http_status: httpStatus,
-      duration_ms: durationMs,
-      input_tokens: usage?.prompt_tokens ?? null,
-      output_tokens: usage?.completion_tokens ?? null,
-      total_tokens: usage?.total_tokens ?? null,
-      cache_read_tokens: usage?.cache_read_tokens ?? null,
-      cache_write_tokens: usage?.cache_write_tokens ?? null,
-      reasoning_tokens: usage?.reasoning_tokens ?? null,
-      error_code: errorCode,
-      created_at: new Date().toISOString(),
-      upstream_ms: upstreamMs,
-      gateway_ms: gatewayMs,
-      request_detail: requestDetail,
-      response_detail: responseDetail,
-      max_mode: maxModeOf(chatResult, maxDispatched),
-      ...costFields(chatResult),
-    });
-    logInfo("responses completed", {
-      request_id: requestId,
-      api_key_id: key.id,
-      model,
-      stream: stream === 1,
-      http_status: httpStatus,
-      duration_ms: durationMs,
-      upstream_ms: upstreamMs,
-      gateway_ms: gatewayMs,
-      input_tokens: usage?.prompt_tokens ?? null,
-      output_tokens: usage?.completion_tokens ?? null,
-      total_tokens: usage?.total_tokens ?? null,
-      cache_read_tokens: usage?.cache_read_tokens ?? null,
-      cache_write_tokens: usage?.cache_write_tokens ?? null,
-      max_mode: maxModeOf(chatResult, maxDispatched) === 1,
-      error_code: errorCode,
-      ...(errorMessage ? { error_message: errorMessage } : {}),
-    });
+    try {
+      ticket?.finish(chatResult);
+      const durationMs = Date.now() - started;
+      const gatewayMs = upstreamMs === null ? null : Math.max(0, durationMs - upstreamMs);
+      responseDetail = snapshotResponseDetail(chatResult, errorCode, errorMessage);
+      insertRequestLog(db, {
+        id: requestId,
+        api_key_id: key.id,
+        path: "/v1/responses",
+        model,
+        stream,
+        http_status: httpStatus,
+        duration_ms: durationMs,
+        input_tokens: usage?.prompt_tokens ?? null,
+        output_tokens: usage?.completion_tokens ?? null,
+        total_tokens: usage?.total_tokens ?? null,
+        cache_read_tokens: usage?.cache_read_tokens ?? null,
+        cache_write_tokens: usage?.cache_write_tokens ?? null,
+        reasoning_tokens: usage?.reasoning_tokens ?? null,
+        error_code: errorCode,
+        created_at: new Date().toISOString(),
+        upstream_ms: upstreamMs,
+        gateway_ms: gatewayMs,
+        request_detail: requestDetail,
+        response_detail: responseDetail,
+        max_mode: maxModeOf(chatResult, maxDispatched),
+        ...costFields(chatResult),
+      });
+      logInfo("responses completed", {
+        request_id: requestId,
+        api_key_id: key.id,
+        model,
+        stream: stream === 1,
+        http_status: httpStatus,
+        duration_ms: durationMs,
+        upstream_ms: upstreamMs,
+        gateway_ms: gatewayMs,
+        input_tokens: usage?.prompt_tokens ?? null,
+        output_tokens: usage?.completion_tokens ?? null,
+        total_tokens: usage?.total_tokens ?? null,
+        cache_read_tokens: usage?.cache_read_tokens ?? null,
+        cache_write_tokens: usage?.cache_write_tokens ?? null,
+        max_mode: maxModeOf(chatResult, maxDispatched) === 1,
+        error_code: errorCode,
+        ...(errorMessage ? { error_message: errorMessage } : {}),
+      });
+    } finally {
+      lifecycle.stop();
+    }
   }
 }
 
@@ -879,11 +1040,18 @@ function modelOptionsFor(key: ApiKeyRow): ModelSelectionOptions {
  * (403 model_not_allowed / max_mode_not_allowed and 404 win over 429, nothing is pre-charged), then
  * the request is admitted (concurrency slot + atomic request pre-charge). Unrestricted keys skip both.
  */
-async function admitTurn(key: ApiKeyRow, request: ParsedChatRequest): Promise<KeyTicket> {
+async function admitTurn(
+  key: ApiKeyRow,
+  request: ParsedChatRequest,
+  abortSignal?: AbortSignal,
+): Promise<KeyTicket> {
   if (needsModelPrecheck(key)) {
-    await keyPool.run((apiKey) => validateChatRequestModel(apiKey, request, modelOptionsFor(key)), undefined, {
-      record: false,
-    });
+    const preflight = keyPool.run(
+      (apiKey) => validateChatRequestModel(apiKey, request, modelOptionsFor(key)),
+      undefined,
+      { record: false },
+    );
+    await (abortSignal ? abortable(preflight, abortSignal) : preflight);
   }
   const now = Date.now();
   keyRateLimiter.check(key.id, now);

@@ -52,17 +52,36 @@ export async function startFakeGateway(extraEnv = {}, options = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
-  const exited = once(child, "exit");
+  const exited = once(child, "exit").then(([code, signal]) => ({ code, signal }));
   let output = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => (output += chunk));
   child.stderr.on("data", (chunk) => (output += chunk));
 
+  const waitForExit = async (timeoutMs = 15_000) => {
+    let timer;
+    try {
+      return await Promise.race([
+        exited,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`gateway did not exit within ${String(timeoutMs)}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
   const stopChild = async () => {
     try {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      await exited;
+      try {
+        await waitForExit();
+      } catch {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await waitForExit(5_000);
+      }
     } finally {
       removeTempDir(dataDir);
     }
@@ -87,6 +106,10 @@ export async function startFakeGateway(extraEnv = {}, options = {}) {
     dataDir,
     output: () => output,
     stop: stopChild,
+    signal: (signal) => {
+      if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+    },
+    waitForExit,
   };
 }
 
