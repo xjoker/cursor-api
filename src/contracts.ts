@@ -30,6 +30,8 @@ export interface AppConfig {
   logMaxDetailBytes: number;
   /** End-to-end generation deadline after client authentication; 0 disables it. */
   requestTimeoutMs: number;
+  /** Deadline for authenticated admin POST/PATCH/DELETE body handling and dispatch. */
+  adminRequestTimeoutMs: number;
   /** Grace period for in-flight requests during SIGTERM/SIGINT. */
   shutdownTimeoutMs: number;
   parkTimeoutMs: number;

@@ -15,6 +15,7 @@ const DEFAULT_LOG_DETAILED_MAX_BYTES = 65_536;
 const DEFAULT_LOG_MAX_DETAIL_BYTES = 268_435_456; // 256 MiB across all detail columns
 const DEFAULT_PARK_TIMEOUT_MS = 300_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+const DEFAULT_ADMIN_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 const DEFAULT_SSE_KEEPALIVE_MS = 15_000;
 const DEFAULT_AUTH_FAILURE_LIMIT = 20;
@@ -41,6 +42,7 @@ api_key_pepper = ""
 
 # park_timeout_ms = 300000
 # request_timeout_ms = 300000     # 0 disables the end-to-end request deadline
+# admin_request_timeout_ms = 10000 # authenticated admin write deadline (1..300000)
 # shutdown_timeout_ms = 10000     # grace period for SIGTERM/SIGINT
 # max_live_sessions = 256        # running + parked Cursor sessions kept in memory
 # conversation_ttl_days = 30     # drop conversation_id mappings unused this long
@@ -177,6 +179,18 @@ export function loadConfig(
       ),
       DEFAULT_REQUEST_TIMEOUT_MS,
       { min: 1, max: 86_400_000 },
+    ),
+    adminRequestTimeoutMs: parseBoundedInt(
+      pickConfigured(
+        env,
+        "ADMIN_REQUEST_TIMEOUT_MS",
+        optionalTrimmed(env.ADMIN_REQUEST_TIMEOUT_MS) === undefined
+          ? tomlIntegerString(toml, "admin_request_timeout_ms")
+          : undefined,
+        "admin_request_timeout_ms",
+      ),
+      DEFAULT_ADMIN_REQUEST_TIMEOUT_MS,
+      { min: 1, max: 300_000 },
     ),
     shutdownTimeoutMs: parseBoundedInt(
       pickConfigured(

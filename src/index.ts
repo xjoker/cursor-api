@@ -370,7 +370,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    if (await handleAdminRequest(req, res, url, { config, db, keyPool })) {
+    if (await handleAdminRequest(req, res, url, { config, db, keyPool, beginRequestLifecycle })) {
       return;
     }
 
@@ -439,9 +439,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 }
 
-function beginRequestLifecycle(req: IncomingMessage, res: ServerResponse): RequestLifecycle {
+function beginRequestLifecycle(
+  req: IncomingMessage,
+  res: ServerResponse,
+  timeoutMs = config.requestTimeoutMs,
+): RequestLifecycle {
   let lifecycle!: RequestLifecycle;
-  lifecycle = new RequestLifecycle(req, res, config.requestTimeoutMs, () => {
+  lifecycle = new RequestLifecycle(req, res, timeoutMs, () => {
     activeLifecycles.delete(lifecycle);
   });
   activeLifecycles.add(lifecycle);

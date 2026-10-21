@@ -42,11 +42,20 @@ export function sendOpenAiError(
     ...(requestId ? { "x-request-id": requestId } : {}),
     ...extraHeaders,
     ...GatewayError.retryAfterHeaders(error),
+    ...(error instanceof GatewayError && error.code === "payload_too_large" ? { connection: "close" } : {}),
   });
 }
 
-export function sendSimpleError(res: ServerResponse, error: unknown): void {
-  sendJson(res, httpStatusOf(error), toSimpleErrorBody(error), GatewayError.retryAfterHeaders(error));
+export function sendSimpleError(
+  res: ServerResponse,
+  error: unknown,
+  extraHeaders: Record<string, string> = {},
+): void {
+  sendJson(res, httpStatusOf(error), toSimpleErrorBody(error), {
+    ...GatewayError.retryAfterHeaders(error),
+    ...(error instanceof GatewayError && error.code === "payload_too_large" ? { connection: "close" } : {}),
+    ...extraHeaders,
+  });
 }
 
 export function readBearer(req: IncomingMessage): string | null {
@@ -223,7 +232,8 @@ async function readJsonBodyUnbounded(
 ): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
+  // 超限是请求错误，提前结束读取不能销毁连接并被误判为客户端取消。
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     if (shouldDiscard()) continue;
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buf.length;
