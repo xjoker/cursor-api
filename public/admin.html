@@ -546,6 +546,72 @@
       overflow-wrap: anywhere;
     }
 
+    .overview-runtime { margin-bottom: 16px; }
+    .overview-runtime-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .runtime-observability {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      margin: 0;
+      background: var(--border-soft);
+      border: 1px solid var(--border-soft);
+    }
+    .runtime-stat {
+      min-width: 0;
+      padding: 12px;
+      background: var(--field);
+    }
+    .runtime-stat-label {
+      color: var(--muted);
+      font-size: var(--text-xs);
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .runtime-stat-main {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 7px;
+      min-width: 0;
+    }
+    .runtime-stat-main span {
+      color: var(--fg-2);
+      font-size: var(--text-xs);
+      overflow-wrap: anywhere;
+    }
+    .runtime-stat-main strong {
+      min-width: 0;
+      color: var(--fg);
+      font-family: var(--font-mono);
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.3;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+    .runtime-stat-detail {
+      margin-top: 6px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .runtime-stat-detail strong { color: var(--fg-2); font-weight: 600; }
+    .runtime-note {
+      margin-top: 10px !important;
+      margin-bottom: 0 !important;
+      font-size: var(--text-xs);
+      overflow-wrap: anywhere;
+    }
+
     .error-summary {
       display: inline-flex;
       align-items: baseline;
@@ -824,6 +890,7 @@
     @media (max-width: 1100px) and (min-width: 861px) {
       .cards-group { grid-template-columns: 1fr 1fr; }
       .settings-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .runtime-observability { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .filters .filter-item label .hint { display: none; }
     }
     @media (max-width: 860px) {
@@ -832,6 +899,7 @@
         grid-template-rows: auto minmax(0, 1fr);
       }
       .settings-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .runtime-observability { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       nav {
         height: auto;
         max-height: none;
@@ -878,6 +946,9 @@
     @media (max-width: 560px) {
       .cards-group { grid-template-columns: 1fr; }
       .settings-list { grid-template-columns: 1fr; }
+      .runtime-observability { grid-template-columns: 1fr; }
+      .overview-runtime .panel-head { align-items: flex-start; flex-wrap: wrap; }
+      .overview-runtime-actions { width: 100%; justify-content: space-between; }
       .filters .filter-item,
       .filters .filter-item.range,
       .filters .filter-item.page { flex: 1 1 100%; max-width: none; }
@@ -1019,7 +1090,7 @@
         </div>
       </div>
       <button id="connect" class="btn btn-primary btn-block" type="button" data-i18n="login.connect">Connect</button>
-      <p id="login-error" class="error" hidden></p>
+      <p id="login-error" class="error" hidden role="alert"></p>
       <div class="lang-switch" role="group" aria-label="Language">
         <button type="button" class="btn btn-secondary btn-small" data-lang="en">EN</button>
         <button type="button" class="btn btn-secondary btn-small" data-lang="zh">中文</button>
@@ -1056,6 +1127,7 @@
           <h2 data-i18n="overview.title">Overview</h2>
           <p id="overview-retention-hint" data-i18n="overview.hint">Gateway status, token totals, and the OpenAI base URL for clients.</p>
         </div>
+        <p id="overview-error" class="error" hidden role="alert" aria-live="assertive"></p>
         <div id="overview-cards"></div>
         <div class="panel overview-settings">
           <div class="panel-head">
@@ -1065,6 +1137,19 @@
           <dl id="runtime-settings" class="settings-list">
             <div class="setting-item"><dt data-i18n="common.loading">Loading</dt><dd></dd></div>
           </dl>
+        </div>
+        <div class="panel overview-runtime">
+          <div class="panel-head">
+            <h3 data-i18n="overview.runtime.title">Runtime resources</h3>
+            <div class="overview-runtime-actions">
+              <span class="hint" data-i18n="overview.runtime.hint">Current process snapshot</span>
+              <button class="btn btn-secondary btn-small" type="button" id="refresh-overview" data-i18n="overview.runtime.refresh">Refresh</button>
+            </div>
+          </div>
+          <div id="runtime-observability" class="runtime-observability" aria-live="polite" aria-atomic="false">
+            <span class="loading" data-i18n="common.loading">Loading</span>
+          </div>
+          <p class="muted runtime-note" data-i18n="overview.runtime.cacheNote">Cache payload is the Response cache payload, not total process memory.</p>
         </div>
         <div class="panel" id="calls-panel">
           <div class="panel-head">
@@ -1124,7 +1209,7 @@
               <button id="refresh-syslog" class="btn btn-secondary" type="button" data-i18n="common.refresh">Refresh</button>
             </div>
           </div>
-          <p id="syslog-error" class="error" hidden></p>
+          <p id="syslog-error" class="error" hidden role="alert"></p>
           <div id="syslog-view"><span class="loading" data-i18n="common.loading">Loading</span></div>
           <div id="syslog-pager" class="pager hidden"></div>
         </div>
@@ -1143,14 +1228,14 @@
             </div>
             <button id="create-key" class="btn btn-primary" type="button" data-i18n="keys.create">Create</button>
           </div>
-          <p id="create-error" class="error" hidden></p>
+          <p id="create-error" class="error" hidden role="alert"></p>
           <div id="created-key" class="secret hidden"></div>
         </div>
         <div class="panel">
           <div class="toolbar">
             <button id="refresh-keys" class="btn btn-secondary" type="button" data-i18n="common.refresh">Refresh</button>
           </div>
-          <p id="keys-error" class="error" hidden></p>
+          <p id="keys-error" class="error" hidden role="alert"></p>
           <div id="keys-table"><span class="loading" data-i18n="common.loading">Loading</span></div>
         </div>
       </section>
@@ -1165,7 +1250,7 @@
           <div class="toolbar">
             <button id="refresh-pool" class="btn btn-secondary" type="button" data-i18n="common.refresh">Refresh</button>
           </div>
-          <p id="pool-error" class="error" hidden></p>
+          <p id="pool-error" class="error" hidden role="alert"></p>
           <div id="pool-table"><span class="loading" data-i18n="common.loading">Loading</span></div>
         </div>
       </section>
@@ -1232,7 +1317,7 @@
               </div>
             </div>
           </div>
-          <p id="logs-error" class="error" hidden></p>
+          <p id="logs-error" class="error" hidden role="alert"></p>
           <div id="logs-view"><span class="loading" data-i18n="common.loading">Loading</span></div>
           <div id="logs-pager" class="pager hidden"></div>
         </div>
@@ -1334,6 +1419,32 @@
       "overview.calls": "近 7 天调用",
       "overview.callsHint": "按 UTC 自然日",
       "overview.callsEmpty": "这 7 天还没有调用。",
+      "overview.runtime.title": "运行资源",
+      "overview.runtime.hint": "当前进程快照",
+      "overview.runtime.refresh": "刷新总览",
+      "overview.runtime.memory": "进程内存",
+      "overview.runtime.rss": "RSS",
+      "overview.runtime.heap": "Heap",
+      "overview.runtime.external": "External",
+      "overview.runtime.arrayBuffers": "ArrayBuffers",
+      "overview.runtime.cache": "Response 缓存",
+      "overview.runtime.entries": "条目",
+      "overview.runtime.payload": "载荷",
+      "overview.runtime.perKey": "每 Key 上限",
+      "overview.runtime.ttl": "TTL",
+      "overview.runtime.pending": "未完成 SDK 操作",
+      "overview.runtime.uptime": "运行时长",
+      "overview.runtime.cacheNote": "缓存载荷只统计 Response 缓存，不是进程总内存。",
+      "overview.runtime.memoryNote": "ArrayBuffers 已包含在 External 中，不要相加。",
+      "overview.runtime.dayUnit": "天",
+      "overview.runtime.hourUnit": "小时",
+      "overview.runtime.minuteUnit": "分",
+      "overview.runtime.secondUnit": "秒",
+      "overview.setting.requestTimeout": "请求时限",
+      "overview.setting.requestTimeoutHint": "网关请求上限；0 = 关闭",
+      "overview.setting.shutdownTimeout": "退出宽限",
+      "overview.setting.shutdownTimeoutHint": "退出时等待进行中会话的时长",
+      "overview.upstreamTimeout": "上游超时",
       "pool.title": "Cursor Key",
       "pool.help": "号池里的上游 Cursor API Key：健康状态、冷却和实时负载。只显示 Key 的 id。打开时每 5 秒刷新。",
       "pool.strategy": "选择策略",
@@ -1526,6 +1637,8 @@
       "err.notJson": "返回的不是 JSON。可能本文件没有被 cursor-api 进程提供，或路由不匹配。",
       "err.badAdmin": "管理密钥不正确。请填 .env 的 ADMIN_ACCESS_KEY，不要填 CURSOR_API_KEY 或客户端 Key。",
       "err.fetch": "连不上网关。确认 cursor-api 进程已在跑，且本文件由其进程同源提供。",
+      "err.timeout": "管理请求超过 15 秒。请点击刷新或重试。",
+      "err.cancelled": "管理请求已取消。请点击刷新或重试。",
       "err.copyEmpty": "没有可复制的内容",
       "err.copyFail": "复制失败，请手动选中",
       "errorReason.invalid_request": "请求不符合接口要求",
@@ -1626,6 +1739,32 @@
       "overview.calls": "Calls last 7 days",
       "overview.callsHint": "UTC calendar days",
       "overview.callsEmpty": "No calls in these 7 days.",
+      "overview.runtime.title": "Runtime resources",
+      "overview.runtime.hint": "Current process snapshot",
+      "overview.runtime.refresh": "Refresh overview",
+      "overview.runtime.memory": "Process memory",
+      "overview.runtime.rss": "RSS",
+      "overview.runtime.heap": "Heap",
+      "overview.runtime.external": "External",
+      "overview.runtime.arrayBuffers": "ArrayBuffers",
+      "overview.runtime.cache": "Response cache",
+      "overview.runtime.entries": "Entries",
+      "overview.runtime.payload": "Payload",
+      "overview.runtime.perKey": "Per-key caps",
+      "overview.runtime.ttl": "TTL",
+      "overview.runtime.pending": "Pending SDK operations",
+      "overview.runtime.uptime": "Uptime",
+      "overview.runtime.cacheNote": "Cache payload is the Response cache payload, not total process memory.",
+      "overview.runtime.memoryNote": "ArrayBuffers are included in External; do not add them.",
+      "overview.runtime.dayUnit": "d",
+      "overview.runtime.hourUnit": "h",
+      "overview.runtime.minuteUnit": "m",
+      "overview.runtime.secondUnit": "s",
+      "overview.setting.requestTimeout": "Request timeout",
+      "overview.setting.requestTimeoutHint": "Gateway request deadline; 0 = off",
+      "overview.setting.shutdownTimeout": "Shutdown grace",
+      "overview.setting.shutdownTimeoutHint": "Time to wait for active sessions during shutdown",
+      "overview.upstreamTimeout": "Upstream timeout",
       "pool.title": "Cursor keys",
       "pool.help": "Upstream Cursor API keys in the pool: health, cooldown, and live load. Keys are shown by id only. Refreshes every 5 seconds while open.",
       "pool.strategy": "Strategy",
@@ -1818,6 +1957,8 @@
       "err.notJson": "Response is not JSON. This file may not be served by the cursor-api process, or the route does not match.",
       "err.badAdmin": "Wrong admin key. Use ADMIN_ACCESS_KEY from .env — not CURSOR_API_KEY or a client key.",
       "err.fetch": "Cannot reach the gateway. Confirm cursor-api is running and this page is same-origin.",
+      "err.timeout": "The admin request exceeded 15 seconds. Refresh or retry.",
+      "err.cancelled": "The admin request was cancelled. Refresh or retry.",
       "err.copyEmpty": "Nothing to copy",
       "err.copyFail": "Copy failed — select manually",
       "errorReason.invalid_request": "Invalid request",
@@ -1856,6 +1997,8 @@
       { name: "sse_keepalive_ms", label: "overview.setting.sseKeepalive", hint: "overview.setting.sseKeepaliveHint" },
       { name: "max_live_sessions", label: "overview.setting.maxLiveSessions", hint: "overview.setting.maxLiveSessionsHint" },
       { name: "conversation_ttl_days", label: "overview.setting.conversationTtl", hint: "overview.setting.conversationTtlHint" },
+      { name: "request_timeout_ms", label: "overview.setting.requestTimeout", hint: "overview.setting.requestTimeoutHint" },
+      { name: "shutdown_timeout_ms", label: "overview.setting.shutdownTimeout", hint: "overview.setting.shutdownTimeoutHint" },
     ]);
 
     const ERROR_CODE_REASON_KEYS = new Map([
@@ -1962,7 +2105,9 @@
     applyStaticI18n();
 
     const ADMIN_STORE = "cursor-api.admin";
+    const ADMIN_API_TIMEOUT_MS = 15_000;
     let adminKey = readAdminStore();
+    let adminApiLastFailure = null;
     let logsTimer = 0;
     let currentView = "overview";
     let logPage = 1;
@@ -2015,6 +2160,7 @@
     $("create-key").addEventListener("click", createKey);
     $("refresh-keys").addEventListener("click", loadKeys);
     $("refresh-pool").addEventListener("click", loadPool);
+    $("refresh-overview").addEventListener("click", loadOverview);
     $("refresh-logs").addEventListener("click", () => { loadLogFilters(true); loadLogs(); loadStats(); });
     $("refresh-syslog").addEventListener("click", () => { syslogPage = 1; loadSyslog(); });
     $("syslog-level").addEventListener("change", () => { syslogPage = 1; loadSyslog(); });
@@ -2084,11 +2230,13 @@
         showError("login-error", t("login.needKey"));
         return;
       }
-      const data = await adminApi("GET", "/admin/api/overview", null, silent ? null : "login-error");
+      const data = await adminApi("GET", "/admin/api/overview", null, "login-error");
       if (!data) {
         if (!silent) return;
-        adminKey = "";
-        clearAdminStore();
+        if (adminApiLastFailure === "auth") {
+          adminKey = "";
+          clearAdminStore();
+        }
         return;
       }
       writeAdminStore(adminKey);
@@ -2100,7 +2248,8 @@
     }
 
     async function loadOverview() {
-      const data = await adminApi("GET", "/admin/api/overview", null, null);
+      hide("overview-error");
+      const data = await adminApi("GET", "/admin/api/overview", null, "overview-error");
       if (data) renderOverview(data);
     }
 
@@ -2139,7 +2288,22 @@
       return String(value);
     }
 
+    function runtimeNumber(value) {
+      if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : null;
+    }
+
     function formatRuntimeSetting(name, value) {
+      if (name === "request_timeout_ms") {
+        const number = runtimeNumber(value);
+        if (number === null) return "—";
+        return number === 0 ? t("overview.off") : `${fmtNum(number)} ms`;
+      }
+      if (name === "shutdown_timeout_ms") {
+        const number = runtimeNumber(value);
+        return number === null ? "—" : `${fmtNum(number)} ms`;
+      }
       if (name === "allow_max_mode") {
         if (value === true) return t("overview.allowed");
         if (value === false) return t("overview.denied");
@@ -2167,6 +2331,87 @@
         return String(fmtNum(value)) + " " + t("overview.daysUnit");
       }
       return displayRuntimeValue(value);
+    }
+
+    function formatRuntimeCount(value) {
+      const number = runtimeNumber(value);
+      return number === null ? "—" : fmtNum(number);
+    }
+
+    function formatRuntimeBytes(value) {
+      const number = runtimeNumber(value);
+      if (number === null) return "—";
+      return `${(number / (1024 * 1024)).toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+        maximumFractionDigits: 1,
+      })} MiB`;
+    }
+
+    function formatRuntimeMilliseconds(value) {
+      const number = runtimeNumber(value);
+      return number === null ? "—" : `${fmtNum(number)} ms`;
+    }
+
+    function formatRuntimeDuration(value) {
+      const number = runtimeNumber(value);
+      if (number === null) return "—";
+      let remaining = Math.floor(number);
+      const days = Math.floor(remaining / 86400);
+      remaining %= 86400;
+      const hours = Math.floor(remaining / 3600);
+      remaining %= 3600;
+      const minutes = Math.floor(remaining / 60);
+      const seconds = remaining % 60;
+      const parts = [];
+      if (days) parts.push(`${days}${t("overview.runtime.dayUnit")}`);
+      if (hours || days) parts.push(`${String(hours).padStart(2, "0")}${t("overview.runtime.hourUnit")}`);
+      if (minutes || hours || days) parts.push(`${String(minutes).padStart(2, "0")}${t("overview.runtime.minuteUnit")}`);
+      parts.push(`${String(seconds).padStart(2, "0")}${t("overview.runtime.secondUnit")}`);
+      return parts.join(" ");
+    }
+
+    function renderRuntimeObservability(data) {
+      const host = $("runtime-observability");
+      if (!host) return;
+      const runtime = data?.runtime && typeof data.runtime === "object" && !Array.isArray(data.runtime)
+        ? data.runtime
+        : {};
+      const memory = runtime.memory && typeof runtime.memory === "object" && !Array.isArray(runtime.memory)
+        ? runtime.memory
+        : {};
+      const cache = runtime.response_cache && typeof runtime.response_cache === "object" && !Array.isArray(runtime.response_cache)
+        ? runtime.response_cache
+        : {};
+      const rss = formatRuntimeBytes(memory.rss_bytes);
+      const heap = `${formatRuntimeBytes(memory.heap_used_bytes)} / ${formatRuntimeBytes(memory.heap_total_bytes)}`;
+      const external = formatRuntimeBytes(memory.external_bytes);
+      const arrayBuffers = formatRuntimeBytes(memory.array_buffers_bytes);
+      const entries = `${formatRuntimeCount(cache.entries)} / ${formatRuntimeCount(cache.max_entries)}`;
+      const payload = `${formatRuntimeBytes(cache.payload_bytes)} / ${formatRuntimeBytes(cache.max_payload_bytes)}`;
+      const perKeyEntries = formatRuntimeCount(cache.max_entries_per_key);
+      const perKeyPayload = formatRuntimeBytes(cache.max_payload_bytes_per_key);
+      host.innerHTML = `
+        <div class="runtime-stat">
+          <div class="runtime-stat-label">${escapeHtml(t("overview.runtime.memory"))}</div>
+          <div class="runtime-stat-main"><span>${escapeHtml(t("overview.runtime.rss"))}</span><strong>${escapeHtml(rss)}</strong></div>
+          <div class="runtime-stat-detail">${escapeHtml(t("overview.runtime.heap"))}: <strong>${escapeHtml(heap)}</strong></div>
+          <div class="runtime-stat-detail">${escapeHtml(t("overview.runtime.external"))}: <strong>${escapeHtml(external)}</strong> · ${escapeHtml(t("overview.runtime.arrayBuffers"))}: <strong>${escapeHtml(arrayBuffers)}</strong></div>
+          <div class="runtime-stat-detail">${escapeHtml(t("overview.runtime.memoryNote"))}</div>
+        </div>
+        <div class="runtime-stat">
+          <div class="runtime-stat-label">${escapeHtml(t("overview.runtime.cache"))}</div>
+          <div class="runtime-stat-main"><span>${escapeHtml(t("overview.runtime.entries"))}</span><strong>${escapeHtml(entries)}</strong></div>
+          <div class="runtime-stat-detail">${escapeHtml(t("overview.runtime.payload"))}: <strong>${escapeHtml(payload)}</strong></div>
+          <div class="runtime-stat-detail">${escapeHtml(t("overview.runtime.perKey"))}: <strong>${escapeHtml(perKeyEntries)}</strong> ${escapeHtml(t("overview.runtime.entries"))} · <strong>${escapeHtml(perKeyPayload)}</strong> ${escapeHtml(t("overview.runtime.payload"))}</div>
+          <div class="runtime-stat-detail">${escapeHtml(t("overview.runtime.ttl"))}: <strong>${escapeHtml(formatRuntimeMilliseconds(cache.ttl_ms))}</strong></div>
+        </div>
+        <div class="runtime-stat">
+          <div class="runtime-stat-label">${escapeHtml(t("overview.runtime.pending"))}</div>
+          <div class="runtime-stat-main"><strong>${escapeHtml(formatRuntimeCount(runtime.pending_session_operations))}</strong></div>
+        </div>
+        <div class="runtime-stat">
+          <div class="runtime-stat-label">${escapeHtml(t("overview.runtime.uptime"))}</div>
+          <div class="runtime-stat-main"><strong>${escapeHtml(formatRuntimeDuration(runtime.uptime_seconds))}</strong></div>
+        </div>`;
     }
 
     function renderRuntimeSettings(data) {
@@ -2201,7 +2446,9 @@
     }
 
     function renderOverview(data) {
+      hide("overview-error");
       const upstreamOk = data.upstream === "ok";
+      const upstreamTimedOut = data.upstream_error_code === "upstream_timeout";
       const tokens = data.tokens ?? {};
       const totals = tokens.totals ?? {};
       logRetentionDays = Number(tokens.retention_days ?? data.logs?.retention_days ?? 7) || 7;
@@ -2215,9 +2462,14 @@
         detail: logDetailedEnabled ? t("logs.detailOn") : t("logs.detailOff"),
       });
       renderRuntimeSettings(data);
+      renderRuntimeObservability(data);
+      const upstreamLabel = upstreamTimedOut
+        ? `${upstreamOk ? t("overview.upstreamOk") : t("overview.upstreamBad")} · ${t("overview.upstreamTimeout")}`
+        : upstreamOk ? t("overview.upstreamOk") : t("overview.upstreamBad");
+      const upstreamTone = upstreamTimedOut ? "warn" : upstreamOk ? "ok" : "bad";
       const status = [
         card(t("overview.version"), String(data.version ?? ""), null, "text"),
-        card(t("overview.upstream"), upstreamOk ? t("overview.upstreamOk") : t("overview.upstreamBad"), upstreamOk ? "ok" : "bad"),
+        card(t("overview.upstream"), upstreamLabel, upstreamTone),
         card(t("overview.upstreamKey"), data.account?.api_key_name ? String(data.account.api_key_name) : t("overview.unknown"), null, "text"),
         card(t("overview.clientKeys"), t("overview.keysAvail", { enabled: data.keys?.enabled ?? 0, total: data.keys?.total ?? 0 }), null, "text"),
       ];
@@ -2239,7 +2491,7 @@
         `export OPENAI_API_KEY=${t("overview.snippetKey")}\n` +
         t("overview.snippetAuth");
       $("nav-version").textContent = `v${data.version ?? "—"}`;
-      $("nav-dot").className = `dot ${upstreamOk ? "ok" : "bad"}`;
+      $("nav-dot").className = `dot ${upstreamTimedOut ? "warn" : upstreamOk ? "ok" : "bad"}`;
     }
 
     function renderCallChart(series) {
@@ -3322,10 +3574,18 @@
     }
 
     async function adminApi(method, path, body, errorId) {
+      adminApiLastFailure = null;
       if (!adminKey) {
+        adminApiLastFailure = "not_connected";
         if (errorId) showError(errorId, t("err.notConnected"));
         return null;
       }
+      const controller = new AbortController();
+      let timedOut = false;
+      const timer = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort("admin-timeout");
+      }, ADMIN_API_TIMEOUT_MS);
       try {
         const res = await fetch(path, {
           method,
@@ -3334,6 +3594,7 @@
             ...(body ? { "content-type": "application/json" } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
         });
         const text = await res.text();
         const contentType = res.headers.get("content-type") ?? "";
@@ -3358,6 +3619,7 @@
         }
         if (!res.ok) {
           const message = typeof data.error === "string" ? data.error : JSON.stringify(data);
+          adminApiLastFailure = message === "Invalid API key" || message === "Invalid ADMIN_ACCESS_KEY" ? "auth" : "http";
           if (errorId) {
             showError(
               errorId,
@@ -3370,15 +3632,21 @@
         }
         return data;
       } catch (err) {
+        const aborted = timedOut || controller.signal.aborted || err?.name === "AbortError";
+        adminApiLastFailure = timedOut ? "timeout" : aborted ? "cancelled" : "network";
         if (errorId) {
-          showError(
-            errorId,
-            err instanceof Error && err.message.includes("Failed to fetch")
-              ? t("err.fetch")
-              : (err instanceof Error ? err.message : String(err)),
-          );
+          const message = timedOut
+            ? t("err.timeout")
+            : aborted
+              ? t("err.cancelled")
+              : err instanceof Error && err.message.includes("Failed to fetch")
+                ? t("err.fetch")
+                : (err instanceof Error ? err.message : String(err));
+          showError(errorId, message);
         }
         return null;
+      } finally {
+        window.clearTimeout(timer);
       }
     }
 
