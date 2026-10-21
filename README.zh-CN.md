@@ -300,6 +300,8 @@ Token 计量的限制：
 
 也就是说：在 Docker 里，除非 `gateway.toml` 另有设置，容器监听 `0.0.0.0`；不用 Docker 时监听 `127.0.0.1`。如果 `GATEWAY_HOST` 覆盖了 `gateway.toml` 里不同的 `host`，启动时会打一条 `warn` 日志。端口映射的宿主机一侧请保持回环（`127.0.0.1:8787:8787`），除非确实要对外暴露，不要去掉 `127.0.0.1:` 前缀。
 
+统计与日志裁剪使用数据库索引；旧库升级首次启动会建立索引，需预留启动时间与磁盘空间。性能口径和限制见[SQLite 优化验证](docs/sqlite-optimization-20261021.md)。
+
 SQLite 与工作区在 `./data`。请求日志和系统日志按 `[logs]` 在写入时和启动时自动清理。容器 stdout 由 compose 的 `logging.options` 轮转（约 30 MB 上限）。
 
 ---
