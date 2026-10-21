@@ -30,7 +30,15 @@ import { GatewayError, invalidRequest } from "./errors.js";
 import { readJsonBody, sendJson, sendSimpleError } from "./http.js";
 import { listCursorModels, maxModeAllowedFor, peekCursorAccount } from "./cursor.js";
 import { forgetKey as forgetHistoryKey } from "./history-resume.js";
-import { sessionStats } from "./session.js";
+import { pendingSessionOperationCount, sessionStats } from "./session.js";
+import {
+  MAX_STORED_RESPONSES,
+  MAX_STORED_RESPONSES_PER_KEY,
+  MAX_STORED_RESPONSE_BYTES,
+  MAX_STORED_RESPONSE_BYTES_PER_KEY,
+  RESPONSE_TTL_MS,
+  responseStoreStats,
+} from "./response-store.js";
 import {
   inFlightRequests,
   canonicalTimeZone,
@@ -41,6 +49,52 @@ import {
 import { logInfo } from "./log.js";
 
 const ADMIN_PREFIX = "/admin/api/";
+const ADMIN_UPSTREAM_TIMEOUT_MS = 1_500;
+
+type UpstreamStatus = {
+  upstream: "ok" | "unavailable";
+  upstream_error_code: string | null;
+};
+
+interface UpstreamProbe {
+  result: Promise<UpstreamStatus>;
+}
+
+const upstreamChecks = new WeakMap<CursorKeyPool, UpstreamProbe>();
+
+function upstreamCheckFor(keyPool: CursorKeyPool): Promise<UpstreamStatus> {
+  const existing = upstreamChecks.get(keyPool);
+  if (existing) return existing.result;
+  const check = keyPool.run((apiKey) => listCursorModels(apiKey));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const state: { result?: Promise<UpstreamStatus> } = {};
+  const result = new Promise<UpstreamStatus>((resolve) => {
+    const finish = (status: UpstreamStatus): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(status);
+      if (upstreamChecks.get(keyPool)?.result === state.result) upstreamChecks.delete(keyPool);
+    };
+    timer = setTimeout(
+      () => resolve({ upstream: "unavailable", upstream_error_code: "upstream_timeout" }),
+      ADMIN_UPSTREAM_TIMEOUT_MS,
+    );
+    timer.unref();
+    // One result handler observes the uncancellable probe, consumes late rejection, and clears
+    // the single-flight entry only after the underlying check actually settles.
+    void check.then(
+      () => finish({ upstream: "ok", upstream_error_code: null }),
+      (error: unknown) => finish({
+        upstream: "unavailable",
+        upstream_error_code: error instanceof GatewayError && typeof error.code === "string"
+          ? error.code
+          : "upstream_error",
+      }),
+    );
+  });
+  state.result = result;
+  upstreamChecks.set(keyPool, { result });
+  return result;
+}
 
 export async function handleAdminRequest(
   req: IncomingMessage,
@@ -78,17 +132,14 @@ async function dispatch(
   if (method === "GET" && pathname === "/admin/api/overview") {
     const keys = listApiKeys(ctx.db);
     const stats = requestStats(ctx.db);
-    let upstream: "ok" | "unavailable" = "ok";
-    try {
-      await ctx.keyPool.run((apiKey) => listCursorModels(apiKey));
-    } catch {
-      upstream = "unavailable";
-    }
+    const upstream = await upstreamCheckFor(ctx.keyPool);
+    const memory = process.memoryUsage();
+    const responseCache = responseStoreStats();
     sendJson(res, 200, {
       version: ctx.config.version,
       git_commit: ctx.config.gitCommit,
       schema_version: SCHEMA_VERSION,
-      upstream,
+      ...upstream,
       account: peekCursorAccount(),
       settings: {
         rate_limit_per_key: ctx.config.rateLimitPerKey,
@@ -99,6 +150,28 @@ async function dispatch(
         sse_keepalive_ms: ctx.config.sseKeepaliveMs,
         max_live_sessions: ctx.config.maxLiveSessions,
         conversation_ttl_days: ctx.config.conversationTtlDays,
+        request_timeout_ms: ctx.config.requestTimeoutMs,
+        shutdown_timeout_ms: ctx.config.shutdownTimeoutMs,
+      },
+      runtime: {
+        uptime_seconds: Math.floor(process.uptime()),
+        memory: {
+          rss_bytes: memory.rss,
+          heap_used_bytes: memory.heapUsed,
+          heap_total_bytes: memory.heapTotal,
+          external_bytes: memory.external,
+          array_buffers_bytes: memory.arrayBuffers,
+        },
+        pending_session_operations: pendingSessionOperationCount(),
+        response_cache: {
+          entries: responseCache.entries,
+          payload_bytes: responseCache.payloadBytes,
+          max_entries: MAX_STORED_RESPONSES,
+          max_payload_bytes: MAX_STORED_RESPONSE_BYTES,
+          max_entries_per_key: MAX_STORED_RESPONSES_PER_KEY,
+          max_payload_bytes_per_key: MAX_STORED_RESPONSE_BYTES_PER_KEY,
+          ttl_ms: RESPONSE_TTL_MS,
+        },
       },
       sessions: { ...sessionStats(), conversations_stored: countConversations(ctx.db) },
       cursor_keys: summarizeKeys(ctx.keyPool),

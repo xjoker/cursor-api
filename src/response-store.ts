@@ -27,6 +27,11 @@ let total = 0;
 const bytesByKey = new Map<string, number>();
 let totalBytes = 0;
 
+export interface ResponseStoreStats {
+  entries: number;
+  payloadBytes: number;
+}
+
 function removeEntry(apiKeyId: string, responseId: string, entries: Map<string, Entry>): boolean {
   const entry = entries.get(responseId);
   if (!entry) return false;
@@ -123,6 +128,11 @@ export function getStoredResponse(apiKeyId: string, responseId: string, now = Da
   const entry = entries?.get(responseId);
   if (!entries || !entry) return undefined;
   return JSON.parse(entry.payload.toString("utf8")) as Record<string, unknown>;
+}
+
+export function responseStoreStats(now = Date.now()): ResponseStoreStats {
+  purgeExpired(now);
+  return { entries: total, payloadBytes: totalBytes };
 }
 
 export function clearStoredResponses(): void {
