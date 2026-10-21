@@ -9,6 +9,18 @@ Version numbers use **`YYYYMMDD.N`** (date + same-day increment). The single sou
 
 ---
 
+## [20261021.1] — 2026-10-21
+
+### Added
+
+- `request_timeout_ms` / `REQUEST_TIMEOUT_MS` 默认 300000，覆盖生成请求的正文读取、模型预检、SDK 操作和流式写入；0 关闭。超时返回 504 `request_timeout`，已开始的 SSE 返回对应协议错误终帧，客户端断连保持取消语义。
+- SIGTERM/SIGINT 停止接收新请求，按 `shutdown_timeout_ms` / `SHUTDOWN_TIMEOUT_MS`（默认 10000）等待在途请求，再取消会话并有界清理；未完成清理明确记录并非零退出。Compose 停止宽限期为 30 秒。
+
+### Changed
+
+- 不可取消的 SDK 创建、发送及等待在超时后继续占用相应会话容量，迟到结果清理；发送结果未知时保守结算配额。工具停车续轮获得新的请求时限。
+- Response 缓存按 UTF-8 JSON 字节保存，总计最多 32 MiB、每个 Key 最多 8 MiB，保留原有条数和一小时限制；读写先回收全局过期条目。单条超过 8 MiB 时正常返回但不缓存，后续 GET 返回 404；这些载荷上限不代表整个进程内存上限。
+
 ## [20261020.5] — 2026-10-20
 
 ### Added
